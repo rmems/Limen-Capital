@@ -1,0 +1,38 @@
+# Large data / experiment artifacts / local vault (see LIMEN_VAULT_DIR)
+/data/
+data/
+*.jsonl
+*.csv
+*.parquet
+runs/
+
+# Binary blobs (except committed wire golden fixtures)
+*.bin
+!wire/fixtures/
+!wire/fixtures/**
+
+# Julia manifests (regenerated from Project.toml)
+Manifest.toml
+brain/Manifest.toml
+
+# Environment and logs
+.env
+*.log
+
+# Editor / local agent tooling (not product source)
+.vscode/
+.idea/
+.mimocode/
+*.swp
+*~
+
+# Build artifacts (track execution/ source; ignore cargo output)
+execution/target/
+target/
+build/
+*.d
+*.rlib
+deps/
+
+# Local Codex Security bulk-scan artifacts (outside commit)
+security-scans/

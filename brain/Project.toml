@@ -1,0 +1,33 @@
+name = "LimenCapitalBrain"
+uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+version = "0.1.0"
+
+[deps]
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+DuckDB = "ce010cf0-fd6d-555e-a612-92147395e921"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Polars = "f9a48970-388f-5813-8d08-444a7ec5a06e"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+ZMQ = "c2297ded-f4af-51ae-bb23-16f91089e4e1"
+
+# Limen-Neural packages (local path via [sources]; `Pkg.instantiate()` resolves)
+LiquidCortex = "1f75a0df-502a-4be0-9310-97a9e2e7f166"
+TemporalFocus = "b7e4c3f2-1d2e-4a5b-8c9d-0e1f2a3b4c5e"
+
+[sources]
+LiquidCortex = {path = "../../Limen-Neural/LiquidCortex.jl"}
+TemporalFocus = {path = "../../Limen-Neural/NeuroPulse.jl"}
+
+[compat]
+CUDA = "5"
+julia = "1.10"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

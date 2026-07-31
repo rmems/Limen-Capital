@@ -1,0 +1,48 @@
+// Spikenaut Trade Signal Schema — Zero-Copy FlatBuffers
+// Shared between Julia brain and Rust execution engine
+//
+// Compile with: flatc --rust signal.fbs
+
+namespace Spikenaut;
+
+enum Side : byte {
+  Buy = 0,
+  Sell = 1,
+  Neutral = 2
+}
+
+/// 16-neuron LIF state (the "brain" outputting the signal)
+table LIFState {
+  neuron_ids: [uint32];           // 16 neuron indices
+  membrane_potentials: [float];   // v[0..15]
+  spike_history: [bool];          // spikes[0..15] (current timestep)
+  weights: [float];               // Flattened 16×16 weight matrix
+  pre_trace: [float];             // Presynaptic traces [0..15]
+  eligibility_trace: [float];     // STDP eligibility [0..15]
+}
+
+/// Core trade signal with SNN confidence
+table TradeSignal {
+  // Market signal
+  ticker: string;
+  side: Side;
+  price: double;
+  quantity: double;
+
+  // SNN metadata
+  confidence: float;              // 0.0 - 1.0 (neuron spike synchrony)
+  spike_count: uint32;            // How many neurons spiked this step
+  firing_rate: float;             // Spikes / total neurons (0.0 - 1.0)
+
+  // 16-neuron LIF state at decision time
+  lif_state: LIFState;
+
+  // Latency tracking (nanoseconds)
+  timestamp_ns: int64;            // Signal creation time
+
+  // Kelly criterion (pre-calculated by Julia)
+  kelly_fraction: float;          // Bet sizing (0.0 - 1.0)
+  kelly_confidence: float;        // Win probability estimate (0.0 - 1.0)
+}
+
+root_type TradeSignal;
