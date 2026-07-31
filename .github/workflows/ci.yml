@@ -34,9 +34,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Install Rust stable (latest)
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable (1.97.1+)
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: Cache Cargo + target
@@ -65,7 +66,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        julia-version: ['1.10', '1.11']
+        julia-version: ['1.12']
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
