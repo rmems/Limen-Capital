@@ -27,6 +27,9 @@ metabolic-ledger = { git = "https://github.com/Limen-Neural/metabolic-ledger", r
 
 ## Julia (`brain/Project.toml`)
 
+Requires **Julia 1.12+** (`[compat] julia = "1.12"`). Pkg `[sources]` git pins need
+Julia ≥ 1.11; CI and local research target **1.12**.
+
 | Package | Role | Pin (rev) | Status |
 |---------|------|-----------|--------|
 | **LiquidCortex** | Sparse CUDA LSM | `4e2698cbbec9…` (2026-07-16) | Preferred |

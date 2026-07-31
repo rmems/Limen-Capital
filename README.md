@@ -62,14 +62,14 @@ Limen-Capital/
 
 ### Prerequisites
 
-- Julia 1.10+, Rust stable, network for first-time git deps
+- Julia **1.12+** (Pkg `[sources]` pins; CI uses 1.12), Rust **stable** (latest), network for first-time git deps
 - Optional: NVIDIA GPU for full EnsembleBrain / research runs
 
 ### 1. Structure + unit tests
 
 ```bash
 ./test_integration.sh
-cd execution && cargo test          # fetches metabolic-ledger + corpus-ipc
+cd execution && cargo test          # fetches metabolic-ledger (+ optional feature deps)
 cd ../brain && julia --project=. -e 'using Pkg; Pkg.instantiate()'
 julia --project=. test/runtests.jl
 # or: ./scripts/smoke_wire_local.sh

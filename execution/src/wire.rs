@@ -66,18 +66,7 @@ pub fn json_ipc_endpoint() -> Result<String, String> {
     } else {
         default_tmp_json_ipc_dir()
     };
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("failed to create JSON IPC directory {}: {e}", dir.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
-            format!(
-                "failed to chmod 0700 JSON IPC directory {}: {e}",
-                dir.display()
-            )
-        })?;
-    }
+    prepare_json_ipc_dir(&dir)?;
     Ok(format!("ipc://{}/signals.ipc", dir.display()))
 }
 
@@ -85,7 +74,57 @@ fn default_tmp_json_ipc_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(format!("/tmp/limen-capital-{}", current_uid()))
 }
 
-/// Numeric OS UID for multi-user /tmp isolation (Linux: `/proc/self/status`).
+/// Create (if needed) and verify a non-symlink, owner-only IPC directory.
+fn prepare_json_ipc_dir(dir: &std::path::Path) -> Result<(), String> {
+    // Refuse to create through an existing symlink at the leaf path.
+    if let Ok(meta) = std::fs::symlink_metadata(dir) {
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "JSON IPC path {} is a symlink — refusing to use attacker-controlled path",
+                dir.display()
+            ));
+        }
+    }
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("failed to create JSON IPC directory {}: {e}", dir.display()))?;
+    let meta = std::fs::symlink_metadata(dir)
+        .map_err(|e| format!("failed to stat JSON IPC directory {}: {e}", dir.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!(
+            "JSON IPC path {} resolved as a symlink after create",
+            dir.display()
+        ));
+    }
+    if !meta.is_dir() {
+        return Err(format!(
+            "JSON IPC path {} is not a directory",
+            dir.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let uid = current_uid();
+        if meta.uid() != uid {
+            return Err(format!(
+                "JSON IPC directory {} owned by uid {}, expected {}",
+                dir.display(),
+                meta.uid(),
+                uid
+            ));
+        }
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+            format!(
+                "failed to chmod 0700 JSON IPC directory {}: {e}",
+                dir.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Numeric OS UID for multi-user /tmp isolation.
+/// Prefer `/proc/self/status`; fall back to libc `getuid` (not UID 0).
 fn current_uid() -> u32 {
     if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
         for line in status.lines() {
@@ -96,7 +135,19 @@ fn current_uid() -> u32 {
             }
         }
     }
-    0
+    #[cfg(unix)]
+    {
+        // libc is transitive; declare the symbol for a correct fallback.
+        extern "C" {
+            fn getuid() -> u32;
+        }
+        // SAFETY: getuid is always safe on POSIX.
+        unsafe { getuid() }
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
 }
 
 pub fn pack_market_pulse(pulse: &MarketPulse) -> [u8; MARKET_PULSE_BYTES] {
@@ -210,12 +261,19 @@ mod tests {
 
     #[test]
     fn json_ipc_respects_env() {
+        struct ClearEnv;
+        impl Drop for ClearEnv {
+            fn drop(&mut self) {
+                // SAFETY: test-only env cleanup even if assert panics.
+                std::env::remove_var("LIMEN_JSON_IPC");
+            }
+        }
+        let _guard = ClearEnv;
         std::env::set_var("LIMEN_JSON_IPC", "ipc:///tmp/custom-limen-test.ipc");
         assert_eq!(
             json_ipc_endpoint().unwrap(),
             "ipc:///tmp/custom-limen-test.ipc"
         );
-        std::env::remove_var("LIMEN_JSON_IPC");
     }
 
     #[test]

@@ -47,20 +47,30 @@ for d in execution brain math strategy proto; do
     fi
 done
 
-# Test 2: Limen-Neural quality deps
+# Test 2: Limen-Neural quality deps (git pins preferred; sibling optional)
 echo ""
 echo "Test 2: Limen-Neural dependencies..."
+if grep -qE 'git\s*=\s*"https://github.com/Limen-Neural/metabolic-ledger"' "$ROOT/execution/Cargo.toml"; then
+    pass "metabolic-ledger git pin present (no sibling clone required)"
+else
+    fail "metabolic-ledger git pin missing from execution/Cargo.toml"
+fi
+if grep -q '\[sources\]' "$ROOT/brain/Project.toml" && grep -q 'LiquidCortex' "$ROOT/brain/Project.toml"; then
+    pass "Julia [sources] git pins present for LiquidCortex/TemporalFocus"
+else
+    fail "brain/Project.toml [sources] pins missing"
+fi
 if [ -n "$LIMEN_NEURAL" ] && [ -d "$LIMEN_NEURAL" ]; then
-    pass "Limen-Neural root found"
+    pass "Optional Limen-Neural sibling found at $LIMEN_NEURAL"
     for lib in metabolic-ledger LiquidCortex.jl NeuroPulse.jl kinetic-signals; do
         if [ -d "$LIMEN_NEURAL/$lib" ]; then
-            pass "$lib present"
+            pass "sibling $lib present"
         else
-            fail "$lib missing under $LIMEN_NEURAL"
+            warn "sibling $lib missing under $LIMEN_NEURAL (ok if using git pins only)"
         fi
     done
 else
-    fail "Limen-Neural sibling not found (set LIMEN_NEURAL=...)"
+    warn "No Limen-Neural sibling (set LIMEN_NEURAL=... only if developing against local clones)"
 fi
 
 # Test 3: Cargo.toml uses metabolic-ledger

@@ -52,7 +52,7 @@ Published by `spike_helm.jl` → `publish_readout!`.
 
 ## Mapping readout → TradeSignal (v1 — implemented)
 
-See `wire/README.md` and `corpus_ipc::readout_to_trade`:
+See `wire/README.md` and `execution/src/binary_wire.rs::readout_to_trade`:
 
 1. 16 floats = 8 × (bull, bear); assets DNX…Verus + Residual.
 2. `score_i = bull_i - bear_i`; primary = argmax |score|.

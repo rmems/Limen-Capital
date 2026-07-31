@@ -36,9 +36,10 @@ struct MarketPulse
 end
 
 """
-    validate_market_pulse_fields!(f::AbstractVector{Float32}) -> Vector{Float32}
+    validate_market_pulse_fields(f::AbstractVector{Float32}) -> Vector{Float32}
 
-Require all floats finite; reject non-positive prices; soft-clamp vols to [0, 1].
+Return a new validated vector (does not mutate `f`): all floats finite;
+non-positive prices rejected; vols soft-clamped to `[0, 1]`.
 Layout of `f` matches decode: 7×(price, vol) + 11 trailing signals.
 """
 function validate_market_pulse_fields(f::AbstractVector{Float32})

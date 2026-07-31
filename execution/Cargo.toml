@@ -2,6 +2,8 @@
 name = "spikenaut-execution-engine"
 version = "0.1.0"
 edition = "2021"
+# CI installs latest stable; keep MSRV aligned with current stable tooling.
+rust-version = "1.97"
 description = "Limen-Capital Rust muscle — ZMQ signal consumer, gates, metabolic-ledger ghost execution"
 license = "MIT"
 

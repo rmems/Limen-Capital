@@ -23,7 +23,11 @@ exchange gateway. Default configuration assumes a **single-user, loopback-trust*
 
 Research default is **plain ZMQ** on loopback.
 
-1. Set `ZMQ_CURVE=1`.
+**Not end-to-end yet:** only the Julia brain path currently has CURVE hooks. The bundled Rust publisher/subscriber peers still use plain ZMQ. Setting `ZMQ_CURVE=1` on the brain alone will break MarketPulse / ReadoutPacket links until both sides use compatible CURVE roles and keys. Treat this as a future dual-side upgrade (tracked with optional ZAP allowlisting).
+
+When both ends support CURVE:
+
+1. Set `ZMQ_CURVE=1` on **every** peer (brain and muscle).
 2. Provide real CURVE material via env only (never commit keys):
    - `ZMQ_SERVER_KEY` / `ZMQ_CLIENT_KEY` (and any peer public keys your build expects).
 3. Do **not** treat CURVE alone as multi-user authentication until an allowlist (ZAP) lands.

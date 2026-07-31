@@ -1,7 +1,10 @@
 #!/bin/sh
 # --- Aikido local scanner (optional; resolve via PATH or AIKIDO_LOCAL_SCANNER) ---
 _AIKIDO_SCANNER="${AIKIDO_LOCAL_SCANNER:-}"
-if [ -z "$_AIKIDO_SCANNER" ]; then
+_AIKIDO_EXPLICIT=0
+if [ -n "$_AIKIDO_SCANNER" ]; then
+  _AIKIDO_EXPLICIT=1
+else
   _AIKIDO_SCANNER="$(command -v aikido-local-scanner 2>/dev/null || true)"
 fi
 if [ -n "$_AIKIDO_SCANNER" ] && [ -x "$_AIKIDO_SCANNER" ]; then
@@ -11,6 +14,10 @@ if [ -n "$_AIKIDO_SCANNER" ] && [ -x "$_AIKIDO_SCANNER" ]; then
   if [ "$_aikido_exit" -ne 0 ]; then
     exit "$_aikido_exit"
   fi
+elif [ "$_AIKIDO_EXPLICIT" -eq 1 ]; then
+  # Fail closed when the operator explicitly configured a scanner path.
+  echo >&2 "beads/pre-commit: AIKIDO_LOCAL_SCANNER is set but not executable: $_AIKIDO_SCANNER"
+  exit 1
 else
   # Do not block collaborators/CI without a local Aikido install.
   echo >&2 "beads/pre-commit: aikido-local-scanner not found on PATH (set AIKIDO_LOCAL_SCANNER to enforce) — skipping secret scan"

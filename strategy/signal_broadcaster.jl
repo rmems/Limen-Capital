@@ -51,9 +51,34 @@ function current_os_uid()::UInt32
     end
 end
 
+"""Create/verify a non-symlink, owner-only IPC directory (fail closed)."""
+function prepare_json_ipc_dir(dir::AbstractString)
+    if islink(dir)
+        error("JSON IPC path $dir is a symlink — refusing attacker-controlled path")
+    end
+    try
+        mkpath(dir)
+    catch e
+        error("failed to create JSON IPC directory $dir: $e")
+    end
+    islink(dir) && error("JSON IPC path $dir is a symlink after create")
+    isdir(dir) || error("JSON IPC path $dir is not a directory")
+    try
+        st = stat(dir)
+        st.uid == current_os_uid() || error(
+            "JSON IPC directory $dir owned by uid $(st.uid), expected $(current_os_uid())",
+        )
+        chmod(dir, 0o700)
+    catch e
+        error("failed to secure JSON IPC directory $dir: $e")
+    end
+    return nothing
+end
+
 """Default JSON IPC endpoint (UID-scoped; env `LIMEN_JSON_IPC` overrides)."""
 function default_json_ipc_endpoint()::String
     if haskey(ENV, "LIMEN_JSON_IPC") && !isempty(ENV["LIMEN_JSON_IPC"])
+        # Custom endpoint: do not mkdir the default tree as a side effect.
         return validate_json_ipc_endpoint(ENV["LIMEN_JSON_IPC"])
     end
     if haskey(ENV, "XDG_RUNTIME_DIR") && !isempty(ENV["XDG_RUNTIME_DIR"])
@@ -61,12 +86,7 @@ function default_json_ipc_endpoint()::String
     else
         dir = joinpath("/tmp", "limen-capital-$(current_os_uid())")
     end
-    try
-        mkpath(dir)
-        chmod(dir, 0o700)
-    catch e
-        error("failed to prepare JSON IPC directory $dir: $e")
-    end
+    prepare_json_ipc_dir(dir)
     return "ipc://$(joinpath(dir, "signals.ipc"))"
 end
 
@@ -86,6 +106,17 @@ mutable struct SignalBroadcaster
         context = ZMQ.Context()
         socket = ZMQ.Socket(context, ZMQ.PUB)
         ep = something(endpoint, default_json_ipc_endpoint())
+        # Drop a stale ipc:// filesystem entry from a prior crashed publisher.
+        if startswith(ep, "ipc://")
+            sock_path = ep[7:end]
+            if ispath(sock_path) && !isdir(sock_path) && !islink(sock_path)
+                try
+                    rm(sock_path)
+                catch e
+                    @warn "Could not remove stale IPC socket $sock_path" exception = e
+                end
+            end
+        end
         ZMQ.bind(socket, ep)
 
         println("[$(now())] SignalBroadcaster initialized at $ep")

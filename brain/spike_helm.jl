@@ -234,8 +234,13 @@ function main()
 
             tick += 1
 
-            # ── 2. Decode the packed struct ──────────────────────────────────
-            pulse = decode_market_pulse(raw)
+            # ── 2. Decode the packed struct (fail-closed; keep loop alive) ────
+            pulse = try
+                decode_market_pulse(raw)
+            catch e
+                @warn "Rejecting invalid MarketPulse frame" exception = e
+                continue
+            end
 
             # ── 2.5 FeatureStream (Hawkes on DNX price) ───────────────────────
             snap = update_features!(features, Float64(pulse.dnx_price), Float64(tick))

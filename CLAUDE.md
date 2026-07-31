@@ -53,17 +53,27 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
-_Add your build and test commands here_
-
 ```bash
-# Example:
-# npm install
-# npm test
+# Rust muscle (fmt + clippy + tests)
+cd execution
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --locked
+
+# Julia brain (CPU unit suite; no full CUDA instantiate required)
+cd brain
+julia --project=. test/runtests.jl
+
+# Structure / wiring gate
+./test_integration.sh
 ```
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+Experimental SNN-HFT stack: **Julia brain** (`brain/`) produces binary `ReadoutPacket`
+frames; **Rust muscle** (`execution/`) consumes wire frames, applies gates/Kelly, and
+ghost-trades via `metabolic-ledger`. Wire contracts live in-tree at
+`execution/src/binary_wire.rs` until public corpus-ipc exports them.
 
 ## Conventions & Patterns
 
