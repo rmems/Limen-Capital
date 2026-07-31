@@ -1,0 +1,89 @@
+# Third-party Actions pinned to immutable commit SHAs (supply-chain hygiene).
+# Style aligned with rmems/corinth-canal and Limen-Neural/* CI.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: ['**']
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # CPU-only research path; avoid requiring LiquidCortex GPU packages in CI.
+  LIMEN_RESERVOIR: naut_core
+
+jobs:
+  rust:
+    name: Rust (execution)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: execution
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo + target
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          workspaces: execution -> target
+          shared-key: limen-capital-execution-v1
+          cache-on-failure: true
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Build
+        run: cargo build --locked
+
+      - name: Test
+        run: cargo test --locked -- --nocapture
+
+  julia:
+    name: Julia ${{ matrix.julia-version }} (brain CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        julia-version: ['1.10', '1.11']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@fa02766e078afaaf09b14210362cee14137e6a32 # v3.0.2
+        with:
+          version: ${{ matrix.julia-version }}
+
+      - name: Cache Julia artifacts
+        uses: julia-actions/cache@a45e8fa8be21c18a06b7177052533149e61e9b38 # v3.1.0
+
+      # Unit tests only need Test + Random + local includes.
+      # Skip full Project.toml instantiate (CUDA / DuckDB / LiquidCortex are heavy
+      # and optional for the CPU wire/encoder suite).
+      - name: Run Capital unit tests
+        run: |
+          julia --color=yes test/runtests.jl
+        working-directory: brain

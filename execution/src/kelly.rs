@@ -55,16 +55,11 @@ impl KellyCriterion {
         let kelly_frac = (p * b - q) / b;
 
         // Clamp to sensible bounds (never exceed 100% of bankroll)
-        kelly_frac.max(0.0).min(1.0)
+        kelly_frac.clamp(0.0, 1.0)
     }
 
     /// Position size given Kelly fraction and account balance
-    pub fn position_size(
-        &self,
-        kelly_fraction: f64,
-        account_balance: f64,
-        price: f64,
-    ) -> f64 {
+    pub fn position_size(&self, kelly_fraction: f64, account_balance: f64, price: f64) -> f64 {
         // position_size = (kelly_fraction * account_balance) / price
         (kelly_fraction * account_balance) / price
     }
@@ -155,10 +150,10 @@ impl PositionSizer {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RiskTier {
-    Aggressive,  // 0.95+
-    Moderate,    // 0.85 - 0.94
+    Aggressive,   // 0.95+
+    Moderate,     // 0.85 - 0.94
     Conservative, // 0.70 - 0.84
-    Minimal,     // < 0.70
+    Minimal,      // < 0.70
 }
 
 #[derive(Debug, Clone)]
@@ -182,7 +177,10 @@ mod tests {
         // b=0.05 → breakeven p ≈ 0.952; p=0.98 yields positive fraction
         let kelly = KellyCriterion::new(0.05);
         let frac = kelly.calculate_fraction(0.98);
-        assert!(frac > 0.5, "high p with b=0.05 should be substantial: got {frac}");
+        assert!(
+            frac > 0.5,
+            "high p with b=0.05 should be substantial: got {frac}"
+        );
     }
 
     #[test]

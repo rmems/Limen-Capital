@@ -35,9 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut t = 0u64;
     loop {
         t += 1;
-        let now_ns = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_nanos() as u64;
+        let now_ns = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64;
         pulse.timestamp_ns = now_ns;
         let phase = (t as f32) * 0.05;
         for i in 0..7 {
@@ -50,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let buf = pulse.pack();
         publisher.send(&buf[..], 0)?;
-        if t % 50 == 0 {
+        if t.is_multiple_of(50) {
             info!("published tick={t} price0={:.4}", pulse.prices[0]);
         }
         thread::sleep(period);

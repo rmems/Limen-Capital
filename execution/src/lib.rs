@@ -109,7 +109,8 @@ impl ExecutionEngine {
     }
 
     fn sync_sizer_balance(&mut self) {
-        self.sizer.set_account_balance(self.ghost_wallet.balance_atp as f64);
+        self.sizer
+            .set_account_balance(self.ghost_wallet.balance_atp as f64);
     }
 
     /// Full decision path: gates → size → ghost execute.
@@ -137,7 +138,9 @@ impl ExecutionEngine {
                 "[{}] Neutral (confidence: {}, latency: {}ns)",
                 signal.ticker, signal.confidence, latency
             );
-            return ExecutionDecision::Neutral { latency_ns: latency };
+            return ExecutionDecision::Neutral {
+                latency_ns: latency,
+            };
         }
 
         // Size: fractional Kelly from ATP bankroll (policy)

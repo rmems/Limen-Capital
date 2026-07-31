@@ -10,9 +10,7 @@
 use std::io::{Cursor, Read, Write};
 
 /// Asset tickers in MarketPulse / readout pair order (0..6). Pair 7 is residual.
-pub const ASSET_TICKERS: [&str; 7] = [
-    "DNX", "Quai", "Qubic", "Kaspa", "Monero", "Ocean", "Verus",
-];
+pub const ASSET_TICKERS: [&str; 7] = ["DNX", "Quai", "Qubic", "Kaspa", "Monero", "Ocean", "Verus"];
 
 pub const MARKET_PULSE_BYTES: usize = 120;
 pub const READOUT_PACKET_BYTES: usize = 88;
@@ -219,10 +217,10 @@ pub struct MappedTrade {
 /// Map readout + NERO relevance → trade side/confidence (NervousWire v1).
 pub fn readout_to_trade(packet: &ReadoutPacket) -> MappedTrade {
     let mut scores = [0f32; N_PAIRS];
-    for i in 0..N_PAIRS {
+    for (i, score) in scores.iter_mut().enumerate() {
         let bull = packet.readout[2 * i];
         let bear = packet.readout[2 * i + 1];
-        scores[i] = bull - bear;
+        *score = bull - bear;
     }
 
     let mut primary = 0usize;

@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// dydx market price snapshot
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +76,12 @@ impl DydxOrderBook {
 pub struct DydxClient {
     base_url: String,
     client: reqwest::Client,
+}
+
+impl Default for DydxClient {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DydxClient {
@@ -167,7 +173,14 @@ impl DydxClient {
 pub struct MarketFeed {
     client: DydxClient,
     prices: Arc<RwLock<std::collections::HashMap<String, DydxPrice>>>,
+    #[allow(dead_code)] // reserved for orderbook polling
     orderbooks: Arc<RwLock<std::collections::HashMap<String, DydxOrderBook>>>,
+}
+
+impl Default for MarketFeed {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MarketFeed {
@@ -197,20 +210,12 @@ impl MarketFeed {
 
     /// Get latest cached price
     pub async fn get_latest_price(&self, ticker: &str) -> Option<f64> {
-        self.prices
-            .read()
-            .await
-            .get(ticker)
-            .map(|p| p.price)
+        self.prices.read().await.get(ticker).map(|p| p.price)
     }
 
     /// Get bid-ask spread in basis points
     pub async fn get_spread_bps(&self, ticker: &str) -> Option<f64> {
-        self.prices
-            .read()
-            .await
-            .get(ticker)
-            .map(|p| p.spread_bps())
+        self.prices.read().await.get(ticker).map(|p| p.spread_bps())
     }
 }
 
