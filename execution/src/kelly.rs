@@ -54,7 +54,10 @@ impl KellyCriterion {
         // Kelly Formula: F = (p*b - q) / b
         let kelly_frac = (p * b - q) / b;
 
-        // Clamp to sensible bounds (never exceed 100% of bankroll)
+        if !kelly_frac.is_finite() {
+            return 0.0;
+        }
+
         kelly_frac.clamp(0.0, 1.0)
     }
 

@@ -50,7 +50,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
       - name: Build
         run: cargo build --locked
@@ -85,5 +85,5 @@ jobs:
       # and optional for the CPU wire/encoder suite).
       - name: Run Capital unit tests
         run: |
-          julia --color=yes test/runtests.jl
+          julia --color=yes --project=. test/runtests.jl
         working-directory: brain
