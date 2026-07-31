@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "limen",
+  "project_id": "ffe540b1-a03b-408c-b8dc-c73acd5a44fd"
+}
