@@ -52,17 +52,19 @@ echo ""
 echo "Test 2: Limen-Neural dependencies..."
 assert_cargo_git_rev() {
     local crate="$1" url_substr="$2"
+    # Note: awk END always runs after exit from main — do not force exit 1 there.
     if awk -v crate="$crate" -v url="$url_substr" '
+        BEGIN { ok = 0 }
         $0 ~ crate"[[:space:]]*=" {
-            block=$0
-            while (getline > 0) {
-                block=block " " $0
-                if ($0 ~ /}/) break
+            block = $0
+            while (block !~ /}/ && (getline line) > 0) {
+                block = block " " line
             }
-            if (block ~ url && block ~ /rev[[:space:]]*=[[:space:]]*"[0-9a-fA-F]{7,}"/) exit 0
-            exit 1
+            if (block ~ url && block ~ /rev[[:space:]]*=[[:space:]]*"[0-9a-fA-F]{7,}"/) {
+                ok = 1
+            }
         }
-        END { exit 1 }
+        END { exit(ok ? 0 : 1) }
     ' "$ROOT/execution/Cargo.toml"; then
         pass "$crate git+rev pin present"
     else
@@ -71,13 +73,19 @@ assert_cargo_git_rev() {
 }
 assert_julia_source_rev() {
     local pkg="$1" url_substr="$2"
+    # Only accept [sources] table entries (url=…, rev=…), not [deps] UUID lines.
     if awk -v pkg="$pkg" -v url="$url_substr" '
-        $0 ~ "^"pkg"[[:space:]]*=" {
-            line=$0
-            if (line ~ url && line ~ /rev[[:space:]]*=[[:space:]]*"[0-9a-fA-F]{7,}"/) exit 0
-            exit 1
+        BEGIN { ok = 0; in_sources = 0 }
+        /^\[/ {
+            in_sources = ($0 ~ /^\[sources\]/)
+            next
         }
-        END { exit 1 }
+        in_sources && $0 ~ "^"pkg"[[:space:]]*=" {
+            if ($0 ~ url && $0 ~ /rev[[:space:]]*=[[:space:]]*"[0-9a-fA-F]{7,}"/) {
+                ok = 1
+            }
+        }
+        END { exit(ok ? 0 : 1) }
     ' "$ROOT/brain/Project.toml"; then
         pass "Julia $pkg [sources] url+rev pin present"
     else
