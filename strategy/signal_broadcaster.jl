@@ -106,22 +106,39 @@ mutable struct SignalBroadcaster
         context = ZMQ.Context()
         socket = ZMQ.Socket(context, ZMQ.PUB)
         ep = something(endpoint, default_json_ipc_endpoint())
-        # Drop a stale ipc:// filesystem entry from a prior crashed publisher.
+        # Drop only a stale Unix-domain *socket* from a prior crashed publisher.
+        # Never delete regular files / dirs / symlinks (typo-safe fail-closed).
         if startswith(ep, "ipc://")
-            sock_path = ep[7:end]
-            if ispath(sock_path) && !isdir(sock_path) && !islink(sock_path)
-                try
-                    rm(sock_path)
-                catch e
-                    @warn "Could not remove stale IPC socket $sock_path" exception = e
-                end
-            end
+            remove_stale_ipc_socket!(ep[7:end])
         end
         ZMQ.bind(socket, ep)
 
         println("[$(now())] SignalBroadcaster initialized at $ep")
         new(context, socket, 0, ep)
     end
+end
+
+"""Remove a stale Unix socket at `path`; refuse regular files/dirs/symlinks."""
+function remove_stale_ipc_socket!(path::AbstractString)
+    ispath(path) || return nothing
+    islink(path) && error("IPC path $path is a symlink — refusing to delete")
+    isdir(path) && error("IPC path $path is a directory — refusing to delete")
+    isfile(path) && error(
+        "IPC path $path is a regular file — refusing to delete non-socket target",
+    )
+    # Linux S_IFMT=0o170000, S_IFSOCK=0o140000 — only unlink real Unix sockets.
+    mode = stat(path).mode
+    if (mode & 0o170000) != 0o140000
+        error(
+            "IPC path $path is not a Unix socket (mode=$(string(mode; base=8))) — refusing to delete",
+        )
+    end
+    try
+        rm(path)
+    catch e
+        error("Could not remove stale IPC socket $path: $e")
+    end
+    return nothing
 end
 
 """

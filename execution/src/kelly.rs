@@ -45,12 +45,17 @@ impl KellyCriterion {
     ///   b = odds (payoff_ratio)
     ///
     /// # Returns
-    /// Kelly fraction (0.0 - 1.0+): how much of bankroll to risk
+    /// Kelly fraction in `0.0..=1.0` (invalid inputs fail closed to `0.0`).
     pub fn calculate_fraction(&self, win_probability: f32) -> f64 {
         let p = win_probability as f64;
-        let q = 1.0 - p;
         let b = self.expected_payoff_ratio;
 
+        // Fail closed on non-probability inputs and non-positive odds.
+        if !p.is_finite() || !(0.0..=1.0).contains(&p) || !b.is_finite() || b <= 0.0 {
+            return 0.0;
+        }
+
+        let q = 1.0 - p;
         // Kelly Formula: F = (p*b - q) / b
         let kelly_frac = (p * b - q) / b;
 
@@ -224,5 +229,20 @@ mod tests {
         let mut sizer = PositionSizer::new(100.0, 0.05, 0.25);
         sizer.set_account_balance(500.0);
         assert_eq!(sizer.account_balance(), 500.0);
+    }
+
+    #[test]
+    fn test_kelly_rejects_negative_payoff_ratio() {
+        // Without validation, b=-1 and p=0.5 clamped to max (1.0); must fail closed.
+        let kelly = KellyCriterion::new(-1.0);
+        assert_eq!(kelly.calculate_fraction(0.5), 0.0);
+    }
+
+    #[test]
+    fn test_kelly_rejects_out_of_range_probability() {
+        let kelly = KellyCriterion::new(0.05);
+        assert_eq!(kelly.calculate_fraction(-0.1), 0.0);
+        assert_eq!(kelly.calculate_fraction(1.5), 0.0);
+        assert_eq!(kelly.calculate_fraction(f32::NAN), 0.0);
     }
 }

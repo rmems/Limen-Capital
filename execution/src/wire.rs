@@ -48,16 +48,19 @@ pub fn validate_json_ipc_endpoint(ep: &str) -> Result<String, String> {
     Ok(ep.to_string())
 }
 
-/// Default JSON IPC endpoint (OS-UID scoped; override with `LIMEN_JSON_IPC`).
-/// Prefer `$XDG_RUNTIME_DIR/limen-capital/signals.ipc`, else `/tmp/limen-capital-$UID/`.
-/// Returns an error if the endpoint is invalid or the directory cannot be created.
-pub fn json_ipc_endpoint() -> Result<String, String> {
-    if let Ok(v) = std::env::var("LIMEN_JSON_IPC") {
+/// Resolve JSON IPC endpoint from an optional override (pure of process env).
+/// When `override_ep` is `Some` and non-empty, validates and returns it.
+/// Otherwise builds the default UID-scoped path under XDG or `/tmp`.
+pub fn resolve_json_ipc_endpoint(
+    override_ep: Option<&str>,
+    xdg_runtime_dir: Option<&str>,
+) -> Result<String, String> {
+    if let Some(v) = override_ep {
         if !v.is_empty() {
-            return validate_json_ipc_endpoint(&v);
+            return validate_json_ipc_endpoint(v);
         }
     }
-    let dir = if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
+    let dir = if let Some(runtime) = xdg_runtime_dir {
         if !runtime.is_empty() {
             std::path::PathBuf::from(runtime).join("limen-capital")
         } else {
@@ -68,6 +71,18 @@ pub fn json_ipc_endpoint() -> Result<String, String> {
     };
     prepare_json_ipc_dir(&dir)?;
     Ok(format!("ipc://{}/signals.ipc", dir.display()))
+}
+
+/// Default JSON IPC endpoint (OS-UID scoped; override with `LIMEN_JSON_IPC`).
+/// Prefer `$XDG_RUNTIME_DIR/limen-capital/signals.ipc`, else `/tmp/limen-capital-$UID/`.
+/// Returns an error if the endpoint is invalid or the directory cannot be created.
+pub fn json_ipc_endpoint() -> Result<String, String> {
+    let override_ep = std::env::var("LIMEN_JSON_IPC").ok();
+    let xdg = std::env::var("XDG_RUNTIME_DIR").ok();
+    resolve_json_ipc_endpoint(
+        override_ep.as_deref().filter(|s| !s.is_empty()),
+        xdg.as_deref().filter(|s| !s.is_empty()),
+    )
 }
 
 fn default_tmp_json_ipc_dir() -> std::path::PathBuf {
@@ -260,18 +275,10 @@ mod tests {
     }
 
     #[test]
-    fn json_ipc_respects_env() {
-        struct ClearEnv;
-        impl Drop for ClearEnv {
-            fn drop(&mut self) {
-                // SAFETY: test-only env cleanup even if assert panics.
-                std::env::remove_var("LIMEN_JSON_IPC");
-            }
-        }
-        let _guard = ClearEnv;
-        std::env::set_var("LIMEN_JSON_IPC", "ipc:///tmp/custom-limen-test.ipc");
+    fn json_ipc_respects_override_without_env_mutation() {
+        // Pure helper: no process-global env mutation (parallel-test safe).
         assert_eq!(
-            json_ipc_endpoint().unwrap(),
+            resolve_json_ipc_endpoint(Some("ipc:///tmp/custom-limen-test.ipc"), None).unwrap(),
             "ipc:///tmp/custom-limen-test.ipc"
         );
     }
