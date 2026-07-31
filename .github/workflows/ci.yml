@@ -34,10 +34,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust stable (latest)
+      - name: Install Rust 1.97.1 (MSRV / latest stable pin)
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable (1.97.1+)
         with:
-          toolchain: stable
+          # Pin exact version so CI verifies declared rust-version = "1.97"
+          # rather than a floating `stable` channel.
+          toolchain: 1.97.1
           components: rustfmt, clippy
 
       - name: Cache Cargo + target

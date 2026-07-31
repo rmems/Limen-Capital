@@ -47,19 +47,46 @@ for d in execution brain math strategy proto; do
     fi
 done
 
-# Test 2: Limen-Neural quality deps (git pins preferred; sibling optional)
+# Test 2: Limen-Neural quality deps — require git URL + rev pins (sibling optional)
 echo ""
 echo "Test 2: Limen-Neural dependencies..."
-if grep -qE 'git\s*=\s*"https://github.com/Limen-Neural/metabolic-ledger"' "$ROOT/execution/Cargo.toml"; then
-    pass "metabolic-ledger git pin present (no sibling clone required)"
-else
-    fail "metabolic-ledger git pin missing from execution/Cargo.toml"
-fi
-if grep -q '\[sources\]' "$ROOT/brain/Project.toml" && grep -q 'LiquidCortex' "$ROOT/brain/Project.toml"; then
-    pass "Julia [sources] git pins present for LiquidCortex/TemporalFocus"
-else
-    fail "brain/Project.toml [sources] pins missing"
-fi
+assert_cargo_git_rev() {
+    local crate="$1" url_substr="$2"
+    if awk -v crate="$crate" -v url="$url_substr" '
+        $0 ~ crate"[[:space:]]*=" {
+            block=$0
+            while (getline > 0) {
+                block=block " " $0
+                if ($0 ~ /}/) break
+            }
+            if (block ~ url && block ~ /rev[[:space:]]*=[[:space:]]*"[0-9a-fA-F]{7,}"/) exit 0
+            exit 1
+        }
+        END { exit 1 }
+    ' "$ROOT/execution/Cargo.toml"; then
+        pass "$crate git+rev pin present"
+    else
+        fail "$crate missing git URL and/or rev pin in execution/Cargo.toml"
+    fi
+}
+assert_julia_source_rev() {
+    local pkg="$1" url_substr="$2"
+    if awk -v pkg="$pkg" -v url="$url_substr" '
+        $0 ~ "^"pkg"[[:space:]]*=" {
+            line=$0
+            if (line ~ url && line ~ /rev[[:space:]]*=[[:space:]]*"[0-9a-fA-F]{7,}"/) exit 0
+            exit 1
+        }
+        END { exit 1 }
+    ' "$ROOT/brain/Project.toml"; then
+        pass "Julia $pkg [sources] url+rev pin present"
+    else
+        fail "Julia $pkg missing url and/or rev in brain/Project.toml [sources]"
+    fi
+}
+assert_cargo_git_rev "metabolic-ledger" "github.com/Limen-Neural/metabolic-ledger"
+assert_julia_source_rev "LiquidCortex" "github.com/Limen-Neural/LiquidCortex.jl"
+assert_julia_source_rev "TemporalFocus" "github.com/Limen-Neural/NeuroPulse.jl"
 if [ -n "$LIMEN_NEURAL" ] && [ -d "$LIMEN_NEURAL" ]; then
     pass "Optional Limen-Neural sibling found at $LIMEN_NEURAL"
     for lib in metabolic-ledger LiquidCortex.jl NeuroPulse.jl kinetic-signals; do

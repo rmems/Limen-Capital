@@ -53,16 +53,16 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
+Run from the repository root (each gate uses a subshell so directories do not leak):
+
 ```bash
 # Rust muscle (fmt + clippy + tests)
-cd execution
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo test --locked
+(cd execution && cargo fmt --all -- --check \
+  && cargo clippy --all-targets --all-features --locked -- -D warnings \
+  && cargo test --locked)
 
 # Julia brain (CPU unit suite; no full CUDA instantiate required)
-cd brain
-julia --project=. test/runtests.jl
+(cd brain && julia --project=. test/runtests.jl)
 
 # Structure / wiring gate
 ./test_integration.sh
