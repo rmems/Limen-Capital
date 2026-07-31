@@ -8,7 +8,7 @@ exchange gateway. Default configuration assumes a **single-user, loopback-trust*
 | Surface | Default | Trust assumption |
 |---------|---------|------------------|
 | Binary ZMQ MarketPulse / ReadoutPacket | `tcp://127.0.0.1:5555` / `:5556` | Only local processes publish; plain ZMQ (no CURVE) |
-| JSON TradeSignal adapter | User-scoped IPC under `$XDG_RUNTIME_DIR/limen-capital/` (or `/tmp/limen-capital-$USER/`) | Same user; override with `LIMEN_JSON_IPC` |
+| JSON TradeSignal adapter | User-scoped IPC under `$XDG_RUNTIME_DIR/limen-capital/` (or `/tmp/limen-capital-$UID/`) | Same OS UID; override with validated `LIMEN_JSON_IPC` |
 | Ghost wallet (metabolic-ledger) | Local JSONL paper ledger | No exchange credentials |
 | MarketPulse floats | Validated finite; prices `> 0`; vols soft-clamped to `[0, 1]` | Malformed frames fail closed |
 
@@ -33,8 +33,10 @@ Research default is **plain ZMQ** on loopback.
 Do not use a world-predictable path such as `/tmp/spikenaut_signals.ipc`.
 
 - **Default:** `$XDG_RUNTIME_DIR/limen-capital/signals.ipc` when `XDG_RUNTIME_DIR` is set;
-  otherwise `/tmp/limen-capital-$USER/signals.ipc` with directory mode `0700` when the OS allows.
-- **Override:** `LIMEN_JSON_IPC` (full ZMQ endpoint string, e.g. `ipc:///path/to/signals.ipc`).
+  otherwise `/tmp/limen-capital-$UID/signals.ipc` (numeric OS UID) with directory mode `0700`.
+- **Override:** `LIMEN_JSON_IPC` must be `ipc://` + absolute filesystem path with no `..` segments
+  (e.g. `ipc:///run/user/1000/limen-capital/signals.ipc`). Invalid overrides are rejected.
+- Directory create / `chmod 0700` failures abort setup (no silent continue on `/tmp`).
 - Publisher (`strategy/signal_broadcaster.jl`) and consumer (`execution`, `LIMEN_WIRE=json`) must agree.
 
 ## Untrusted / multi-user hosts
@@ -54,4 +56,8 @@ If other users can run processes on the same machine:
 
 ## Reporting
 
-For this personal public repo, open a GitHub security advisory or private contact preferred by the maintainer. Do not file public issues that include live credentials or private keys.
+Private vulnerability reports: use GitHub Security Advisories for this repository —
+
+https://github.com/rmems/Limen-Capital/security/advisories/new
+
+Do not file public issues that include live credentials or private keys.

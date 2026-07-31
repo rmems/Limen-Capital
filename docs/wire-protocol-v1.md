@@ -46,7 +46,7 @@ Published by `spike_helm.jl` → `publish_readout!`.
 
 | Path | Status |
 |------|--------|
-| JSON over IPC (`signal_broadcaster.jl` + `LIMEN_WIRE=json`) | **Adapter only** — default `$XDG_RUNTIME_DIR/limen-capital/signals.ipc` or `/tmp/limen-capital-$USER/signals.ipc`; override `LIMEN_JSON_IPC`. Side field is **lowercase** (`buy`/`sell`/`neutral`). |
+| JSON over IPC (`signal_broadcaster.jl` + `LIMEN_WIRE=json`) | **Adapter only** — default `$XDG_RUNTIME_DIR/limen-capital/signals.ipc` or `/tmp/limen-capital-$UID/signals.ipc` (mode `0700`); override `LIMEN_JSON_IPC` (`ipc://` + absolute path, no `..`). Side field is **lowercase** (`buy`/`sell`/`neutral`). |
 | FlatBuffers `proto/signal.fbs` | Reserved for TradeSignal v2; not required for v1 binary path. |
 | corpus-ipc models | Future shared schema; extend when packets stabilize. |
 

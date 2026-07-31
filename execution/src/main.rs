@@ -4,8 +4,10 @@
 //! (default `tcp://127.0.0.1:5556`), maps to `TradeSignal`, runs confidence
 //! gates, and executes ghost trades via metabolic-ledger.
 //!
-//! Optional: set `LIMEN_WIRE=json` to use legacy JSON IPC
-//! (`LIMEN_JSON_IPC`, default under `$XDG_RUNTIME_DIR/limen-capital/`).
+//! Optional: set `LIMEN_WIRE=json` to use legacy JSON IPC.
+//! Endpoint: `LIMEN_JSON_IPC` (must be `ipc://` + absolute path), else
+//! `$XDG_RUNTIME_DIR/limen-capital/signals.ipc`, else
+//! `/tmp/limen-capital-$UID/signals.ipc` (directory mode 0700).
 //!
 //! Usage:
 //!   cargo run --release
@@ -115,7 +117,7 @@ async fn start_json_listener(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let context = zmq::Context::new();
     let subscriber = context.socket(zmq::SUB)?;
-    let ipc_addr = json_ipc_endpoint();
+    let ipc_addr = json_ipc_endpoint().map_err(|e| format!("JSON IPC setup: {e}"))?;
     subscriber.connect(&ipc_addr)?;
     subscriber.set_subscribe(b"")?;
     info!("JSON SUB connected to {ipc_addr}");

@@ -52,7 +52,7 @@ Fallback: `LIMEN_RESERVOIR=naut_core` uses in-tree `brain/naut_core.jl` without 
 | `LIMEN_VAULT_DIR` | DuckDB vault directory | `data/vault` under Capital |
 | `LIMEN_IPC_SUB` | MarketPulse PUB endpoint | `tcp://127.0.0.1:5555` |
 | `LIMEN_IPC_PUB` | ReadoutPacket PUB endpoint | `tcp://127.0.0.1:5556` |
-| `LIMEN_JSON_IPC` | JSON TradeSignal IPC endpoint | `$XDG_RUNTIME_DIR/limen-capital/signals.ipc` or `/tmp/limen-capital-$USER/signals.ipc` |
+| `LIMEN_JSON_IPC` | JSON TradeSignal IPC (`ipc://` + absolute path) | `$XDG_RUNTIME_DIR/limen-capital/signals.ipc` or `/tmp/limen-capital-$UID/signals.ipc` |
 | `LIMEN_RESERVOIR` | `auto` / `liquid_cortex` / `naut_core` | `auto` |
 | `LIMEN_AGG_MODE` | `relevance` / `static` / `blend` | `relevance` |
 | `LIMEN_MC_PATHS` | Monte Carlo paths (0 = off) | `0` |

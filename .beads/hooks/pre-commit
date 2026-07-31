@@ -1,8 +1,20 @@
 #!/bin/sh
-# --- Aikido local scanner ---
-[ -x "/home/raulmc/.local/bin/aikido-local-scanner" ] || { echo "Aikido Local Scanner is missing. Find install instructions at https://help.aikido.dev/code-scanning/local-code-scanning/aikido-secrets-pre-commit-hook"; exit 1; }
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-"/home/raulmc/.local/bin/aikido-local-scanner" pre-commit-scan "$REPO_ROOT"
+# --- Aikido local scanner (optional; resolve via PATH or AIKIDO_LOCAL_SCANNER) ---
+_AIKIDO_SCANNER="${AIKIDO_LOCAL_SCANNER:-}"
+if [ -z "$_AIKIDO_SCANNER" ]; then
+  _AIKIDO_SCANNER="$(command -v aikido-local-scanner 2>/dev/null || true)"
+fi
+if [ -n "$_AIKIDO_SCANNER" ] && [ -x "$_AIKIDO_SCANNER" ]; then
+  REPO_ROOT="$(git rev-parse --show-toplevel)"
+  "$_AIKIDO_SCANNER" pre-commit-scan "$REPO_ROOT"
+  _aikido_exit=$?
+  if [ "$_aikido_exit" -ne 0 ]; then
+    exit "$_aikido_exit"
+  fi
+else
+  # Do not block collaborators/CI without a local Aikido install.
+  echo >&2 "beads/pre-commit: aikido-local-scanner not found on PATH (set AIKIDO_LOCAL_SCANNER to enforce) — skipping secret scan"
+fi
 # --- End Aikido local scanner ---
 
 # --- BEGIN BEADS INTEGRATION v1.0.4 ---

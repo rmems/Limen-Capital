@@ -5,9 +5,9 @@ Primary research wire is binary ReadoutPacket on LIMEN_IPC_PUB (see wire/README.
 This module is the **JSON IPC adapter** for tools that still emit TradeSignal JSON
 (`LIMEN_WIRE=json` on the Rust muscle).
 
-Endpoint (override with `LIMEN_JSON_IPC`):
+Endpoint (override with `LIMEN_JSON_IPC`, must be `ipc://` + absolute path, no `..`):
   - `$XDG_RUNTIME_DIR/limen-capital/signals.ipc` when set
-  - else `/tmp/limen-capital-$USER/signals.ipc` (mode 0o700 on the directory)
+  - else `/tmp/limen-capital-\$UID/signals.ipc` (mode 0o700; numeric OS UID)
 
 Usage:
     using Revise
@@ -23,22 +23,49 @@ using JSON3
 using Printf
 using Dates
 
-"""Default JSON IPC endpoint (user-scoped; env `LIMEN_JSON_IPC` overrides)."""
+"""Validate `LIMEN_JSON_IPC`: `ipc://` + absolute path, no `..` segments."""
+function validate_json_ipc_endpoint(ep::AbstractString)::String
+    ep = strip(ep)
+    isempty(ep) && error("LIMEN_JSON_IPC is empty")
+    startswith(ep, "ipc://") || error("LIMEN_JSON_IPC must start with ipc://")
+    path = ep[7:end]  # after "ipc://"
+    startswith(path, "/") || error("LIMEN_JSON_IPC path must be absolute (ipc:///path/...)")
+    any(==(".."), split(path, '/')) && error("LIMEN_JSON_IPC must not contain '..' path segments")
+    return String(ep)
+end
+
+"""Numeric OS UID for multi-user /tmp isolation (Linux /proc, else getuid)."""
+function current_os_uid()::UInt32
+    try
+        for line in eachline("/proc/self/status")
+            if startswith(line, "Uid:")
+                return parse(UInt32, split(line)[2])
+            end
+        end
+    catch
+    end
+    try
+        return UInt32(Libc.getuid())
+    catch
+        return UInt32(0)
+    end
+end
+
+"""Default JSON IPC endpoint (UID-scoped; env `LIMEN_JSON_IPC` overrides)."""
 function default_json_ipc_endpoint()::String
     if haskey(ENV, "LIMEN_JSON_IPC") && !isempty(ENV["LIMEN_JSON_IPC"])
-        return ENV["LIMEN_JSON_IPC"]
+        return validate_json_ipc_endpoint(ENV["LIMEN_JSON_IPC"])
     end
     if haskey(ENV, "XDG_RUNTIME_DIR") && !isempty(ENV["XDG_RUNTIME_DIR"])
         dir = joinpath(ENV["XDG_RUNTIME_DIR"], "limen-capital")
     else
-        user = get(ENV, "USER", "user")
-        dir = joinpath("/tmp", "limen-capital-$(user)")
+        dir = joinpath("/tmp", "limen-capital-$(current_os_uid())")
     end
-    mkpath(dir)
     try
+        mkpath(dir)
         chmod(dir, 0o700)
-    catch
-        # best-effort on non-Unix / restricted FS
+    catch e
+        error("failed to prepare JSON IPC directory $dir: $e")
     end
     return "ipc://$(joinpath(dir, "signals.ipc"))"
 end
@@ -150,4 +177,4 @@ function test_broadcast()
 end
 
 # Export public API
-export SignalBroadcaster, broadcast_trade, shutdown, test_broadcast, default_json_ipc_endpoint
+export SignalBroadcaster, broadcast_trade, shutdown, test_broadcast, default_json_ipc_endpoint, validate_json_ipc_endpoint

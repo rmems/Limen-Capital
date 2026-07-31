@@ -24,33 +24,37 @@ pub fn readout_endpoint() -> String {
     std::env::var("LIMEN_IPC_PUB").unwrap_or_else(|_| IPC_READOUT_DEFAULT.to_string())
 }
 
-/// Decode MarketPulse and reject non-finite prices/vols (Capital-side guard).
-/// Soft-clamps volumes into [0, 1]. Price ≤ 0 or NaN/Inf → error.
+/// Decode MarketPulse with validation (finite fields, prices > 0, vol clamp).
+/// Validation lives in [`MarketPulse::decode`] (defense-in-depth).
 pub fn decode_market_pulse(buf: &[u8]) -> Result<MarketPulse, String> {
-    let mut pulse = MarketPulse::decode(buf)?;
-    for (i, &p) in pulse.prices.iter().enumerate() {
-        if !p.is_finite() {
-            return Err(format!("MarketPulse price[{i}] is not finite: {p}"));
-        }
-        if p <= 0.0 {
-            return Err(format!("MarketPulse price[{i}] must be > 0, got {p}"));
-        }
-    }
-    for (i, v) in pulse.vols.iter_mut().enumerate() {
-        if !v.is_finite() {
-            return Err(format!("MarketPulse vol[{i}] is not finite: {v}"));
-        }
-        *v = v.clamp(0.0, 1.0);
-    }
-    Ok(pulse)
+    MarketPulse::decode(buf)
 }
 
-/// Default JSON IPC endpoint (user-scoped; override with `LIMEN_JSON_IPC`).
-/// Prefer `$XDG_RUNTIME_DIR/limen-capital/signals.ipc`, else `/tmp/limen-capital-$USER/`.
-pub fn json_ipc_endpoint() -> String {
+/// Validate a `LIMEN_JSON_IPC` override: must be `ipc://` + absolute path, no `..`.
+pub fn validate_json_ipc_endpoint(ep: &str) -> Result<String, String> {
+    let ep = ep.trim();
+    if ep.is_empty() {
+        return Err("LIMEN_JSON_IPC is empty".into());
+    }
+    let Some(path) = ep.strip_prefix("ipc://") else {
+        return Err("LIMEN_JSON_IPC must start with ipc://".into());
+    };
+    if !path.starts_with('/') {
+        return Err("LIMEN_JSON_IPC path must be absolute (ipc:///path/...)".into());
+    }
+    if path.split('/').any(|seg| seg == "..") {
+        return Err("LIMEN_JSON_IPC must not contain '..' path segments".into());
+    }
+    Ok(ep.to_string())
+}
+
+/// Default JSON IPC endpoint (OS-UID scoped; override with `LIMEN_JSON_IPC`).
+/// Prefer `$XDG_RUNTIME_DIR/limen-capital/signals.ipc`, else `/tmp/limen-capital-$UID/`.
+/// Returns an error if the endpoint is invalid or the directory cannot be created.
+pub fn json_ipc_endpoint() -> Result<String, String> {
     if let Ok(v) = std::env::var("LIMEN_JSON_IPC") {
         if !v.is_empty() {
-            return v;
+            return validate_json_ipc_endpoint(&v);
         }
     }
     let dir = if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
@@ -62,18 +66,37 @@ pub fn json_ipc_endpoint() -> String {
     } else {
         default_tmp_json_ipc_dir()
     };
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("failed to create JSON IPC directory {}: {e}", dir.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+            format!(
+                "failed to chmod 0700 JSON IPC directory {}: {e}",
+                dir.display()
+            )
+        })?;
     }
-    format!("ipc://{}/signals.ipc", dir.display())
+    Ok(format!("ipc://{}/signals.ipc", dir.display()))
 }
 
 fn default_tmp_json_ipc_dir() -> std::path::PathBuf {
-    let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
-    std::path::PathBuf::from(format!("/tmp/limen-capital-{user}"))
+    std::path::PathBuf::from(format!("/tmp/limen-capital-{}", current_uid()))
+}
+
+/// Numeric OS UID for multi-user /tmp isolation (Linux: `/proc/self/status`).
+fn current_uid() -> u32 {
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("Uid:") {
+                if let Some(uid) = rest.split_whitespace().next().and_then(|s| s.parse().ok()) {
+                    return uid;
+                }
+            }
+        }
+    }
+    0
 }
 
 pub fn pack_market_pulse(pulse: &MarketPulse) -> [u8; MARKET_PULSE_BYTES] {
@@ -159,7 +182,6 @@ mod tests {
     #[test]
     fn reject_non_finite_price() {
         let mut bytes = std::fs::read(fixture("marketpulse.bin")).expect("fixture");
-        // prices[0] starts at offset 8
         bytes[8..12].copy_from_slice(&f32::NAN.to_le_bytes());
         assert!(decode_market_pulse(&bytes).is_err());
     }
@@ -172,9 +194,34 @@ mod tests {
     }
 
     #[test]
+    fn reject_non_finite_signal_field() {
+        let mut bytes = std::fs::read(fixture("marketpulse.bin")).expect("fixture");
+        // confidence_signal at offset 8 + 14*4 = 64
+        bytes[64..68].copy_from_slice(&f32::INFINITY.to_le_bytes());
+        assert!(decode_market_pulse(&bytes).is_err());
+    }
+
+    #[test]
+    fn reject_non_finite_readout() {
+        let mut bytes = std::fs::read(fixture("readout.bin")).expect("fixture");
+        bytes[8..12].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert!(decode_readout(&bytes).is_err());
+    }
+
+    #[test]
     fn json_ipc_respects_env() {
         std::env::set_var("LIMEN_JSON_IPC", "ipc:///tmp/custom-limen-test.ipc");
-        assert_eq!(json_ipc_endpoint(), "ipc:///tmp/custom-limen-test.ipc");
+        assert_eq!(
+            json_ipc_endpoint().unwrap(),
+            "ipc:///tmp/custom-limen-test.ipc"
+        );
         std::env::remove_var("LIMEN_JSON_IPC");
+    }
+
+    #[test]
+    fn json_ipc_rejects_traversal() {
+        assert!(validate_json_ipc_endpoint("ipc:///tmp/../etc/passwd").is_err());
+        assert!(validate_json_ipc_endpoint("tcp://127.0.0.1:1").is_err());
+        assert!(validate_json_ipc_endpoint("ipc://relative").is_err());
     }
 }

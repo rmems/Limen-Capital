@@ -112,7 +112,7 @@ impl MarketPulse {
             prices[i] = read_f32()?;
             vols[i] = read_f32()?;
         }
-        Ok(Self {
+        let mut pulse = Self {
             timestamp_ns,
             prices,
             vols,
@@ -127,7 +127,50 @@ impl MarketPulse {
             basys_buffer_load: read_f32()?,
             dydx_oi_delta: read_f32()?,
             dydx_funding_rate: read_f32()?,
-        })
+        };
+        pulse.validate_and_clamp()?;
+        Ok(pulse)
+    }
+
+    /// Finite check on all f32 fields; reject price ≤ 0; soft-clamp vols to [0, 1].
+    /// Order matches Julia `validate_market_pulse_fields`: finite-all first, then prices.
+    pub fn validate_and_clamp(&mut self) -> Result<(), String> {
+        for (i, &p) in self.prices.iter().enumerate() {
+            if !p.is_finite() {
+                return Err(format!("MarketPulse price[{i}] is not finite: {p}"));
+            }
+        }
+        for (i, &v) in self.vols.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(format!("MarketPulse vol[{i}] is not finite: {v}"));
+            }
+        }
+        for (name, x) in [
+            ("confidence_signal", self.confidence_signal),
+            ("funding_rate", self.funding_rate),
+            ("liquidation_vol", self.liquidation_vol),
+            ("liquidity_delta", self.liquidity_delta),
+            ("l3_order_imbalance", self.l3_order_imbalance),
+            ("gpu_temp_c", self.gpu_temp_c),
+            ("gpu_power_w", self.gpu_power_w),
+            ("gpu_util_pct", self.gpu_util_pct),
+            ("basys_buffer_load", self.basys_buffer_load),
+            ("dydx_oi_delta", self.dydx_oi_delta),
+            ("dydx_funding_rate", self.dydx_funding_rate),
+        ] {
+            if !x.is_finite() {
+                return Err(format!("MarketPulse {name} is not finite: {x}"));
+            }
+        }
+        for (i, &p) in self.prices.iter().enumerate() {
+            if p <= 0.0 {
+                return Err(format!("MarketPulse price[{i}] must be > 0, got {p}"));
+            }
+        }
+        for v in &mut self.vols {
+            *v = v.clamp(0.0, 1.0);
+        }
+        Ok(())
     }
 }
 
@@ -186,6 +229,16 @@ impl ReadoutPacket {
             let mut b = [0u8; 4];
             c.read_exact(&mut b).map_err(|e| e.to_string())?;
             *r = f32::from_le_bytes(b);
+        }
+        for (i, &x) in readout.iter().enumerate() {
+            if !x.is_finite() {
+                return Err(format!("ReadoutPacket readout[{i}] is not finite: {x}"));
+            }
+        }
+        for (i, &x) in relevance.iter().enumerate() {
+            if !x.is_finite() {
+                return Err(format!("ReadoutPacket relevance[{i}] is not finite: {x}"));
+            }
         }
         Ok(Self {
             tick,
