@@ -3,7 +3,11 @@ signal_broadcaster.jl — JSON adapter (secondary path)
 
 Primary research wire is binary ReadoutPacket on LIMEN_IPC_PUB (see wire/README.md).
 This module is the **JSON IPC adapter** for tools that still emit TradeSignal JSON
-to ipc:///tmp/spikenaut_signals.ipc (LIMEN_WIRE=json on the Rust muscle).
+(`LIMEN_WIRE=json` on the Rust muscle).
+
+Endpoint (override with `LIMEN_JSON_IPC`):
+  - `$XDG_RUNTIME_DIR/limen-capital/signals.ipc` when set
+  - else `/tmp/limen-capital-$USER/signals.ipc` (mode 0o700 on the directory)
 
 Usage:
     using Revise
@@ -19,6 +23,26 @@ using JSON3
 using Printf
 using Dates
 
+"""Default JSON IPC endpoint (user-scoped; env `LIMEN_JSON_IPC` overrides)."""
+function default_json_ipc_endpoint()::String
+    if haskey(ENV, "LIMEN_JSON_IPC") && !isempty(ENV["LIMEN_JSON_IPC"])
+        return ENV["LIMEN_JSON_IPC"]
+    end
+    if haskey(ENV, "XDG_RUNTIME_DIR") && !isempty(ENV["XDG_RUNTIME_DIR"])
+        dir = joinpath(ENV["XDG_RUNTIME_DIR"], "limen-capital")
+    else
+        user = get(ENV, "USER", "user")
+        dir = joinpath("/tmp", "limen-capital-$(user)")
+    end
+    mkpath(dir)
+    try
+        chmod(dir, 0o700)
+    catch
+        # best-effort on non-Unix / restricted FS
+    end
+    return "ipc://$(joinpath(dir, "signals.ipc"))"
+end
+
 """
     SignalBroadcaster
 
@@ -29,14 +53,16 @@ mutable struct SignalBroadcaster
     context::ZMQ.Context
     socket::ZMQ.Socket
     message_count::Int64
+    endpoint::String
 
-    function SignalBroadcaster()
+    function SignalBroadcaster(endpoint::Union{Nothing,String}=nothing)
         context = ZMQ.Context()
         socket = ZMQ.Socket(context, ZMQ.PUB)
-        ZMQ.bind(socket, "ipc:///tmp/spikenaut_signals.ipc")
+        ep = something(endpoint, default_json_ipc_endpoint())
+        ZMQ.bind(socket, ep)
 
-        println("[$(now())] SignalBroadcaster initialized at ipc:///tmp/spikenaut_signals.ipc")
-        new(context, socket, 0)
+        println("[$(now())] SignalBroadcaster initialized at $ep")
+        new(context, socket, 0, ep)
     end
 end
 
@@ -124,4 +150,4 @@ function test_broadcast()
 end
 
 # Export public API
-export SignalBroadcaster, broadcast_trade, shutdown, test_broadcast
+export SignalBroadcaster, broadcast_trade, shutdown, test_broadcast, default_json_ipc_endpoint

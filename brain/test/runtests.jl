@@ -29,6 +29,39 @@ include(joinpath(BRAIN, "market_encoder.jl"))
     @test_throws ErrorException decode_market_pulse(zeros(UInt8, 64))
 end
 
+@testset "MarketPulse validation" begin
+    good = MarketPulse(
+        UInt64(1),
+        1.0f0, 0.5f0, 1.0f0, 0.0f0, 1.0f0, 0.0f0, 1.0f0, 0.0f0,
+        1.0f0, 0.0f0, 1.0f0, 0.0f0, 1.0f0, 0.0f0,
+        0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0,
+        40.0f0, 100.0f0, 0.0f0, 0.0f0,
+        0.0f0, 0.0f0,
+    )
+    buf = pack_market_pulse(good)
+
+    # NaN price
+    bad_nan = copy(buf)
+    bad_nan[9:12] = reinterpret(UInt8, [NaN32])
+    @test_throws ErrorException decode_market_pulse(bad_nan)
+
+    # Inf vol
+    bad_inf = copy(buf)
+    bad_inf[13:16] = reinterpret(UInt8, [Inf32])
+    @test_throws ErrorException decode_market_pulse(bad_inf)
+
+    # Non-positive price
+    bad_price = copy(buf)
+    bad_price[9:12] = reinterpret(UInt8, [0.0f0])
+    @test_throws ErrorException decode_market_pulse(bad_price)
+
+    # Vol > 1 soft-clamped
+    high_vol = copy(buf)
+    high_vol[13:16] = reinterpret(UInt8, [2.5f0])  # dnx_vol
+    clamped = decode_market_pulse(high_vol)
+    @test clamped.dnx_vol == 1.0f0
+end
+
 @testset "MarketEncoder" begin
     rng = MersenneTwister(42)
     enc = MarketEncoder(7; delta=0.001f0, rng=rng)
@@ -206,24 +239,18 @@ end
     end
 end
 
-@testset "TemporalFocus (optional)" begin
-    tf_src = abspath(joinpath(BRAIN, "..", "..", "Limen-Neural", "NeuroPulse.jl", "src", "TemporalFocus.jl"))
-    if isfile(tf_src)
-        try
-            include(tf_src)
-            router = TemporalFocus.RegionRouter(; n_regions=4, n_out=16)
-            regions = [TemporalFocus.ActivityRegion(Float32(0.1 * i), Float32.(randn(16))) for i in 1:4]
-            TemporalFocus.update_routing!(router, regions)
-            w = router.routing_weights
-            @test length(w) == 4
-            @test abs(sum(w) - 1.0f0) < 1.0f-3
-            @test all(w .>= 0.0f0)
-        catch e
-            @info "TemporalFocus load skipped" exception = e
-            @test true
-        end
-    else
-        @info "TemporalFocus source missing; skip" path=tf_src
+@testset "TemporalFocus (optional, Pkg git dep)" begin
+    try
+        @eval using TemporalFocus
+        router = TemporalFocus.RegionRouter(; n_regions=4, n_out=16)
+        regions = [TemporalFocus.ActivityRegion(Float32(0.1 * i), Float32.(randn(16))) for i in 1:4]
+        TemporalFocus.update_routing!(router, regions)
+        w = router.routing_weights
+        @test length(w) == 4
+        @test abs(sum(w) - 1.0f0) < 1.0f-3
+        @test all(w .>= 0.0f0)
+    catch e
+        @info "TemporalFocus not loaded (optional); skip" exception = e
         @test true
     end
 end

@@ -61,4 +61,4 @@ ticker     = asset name for primary (Residual → "RESIDUAL")
 ## Adapters
 
 1. **Binary TCP** — research primary path  
-2. **JSON IPC** — secondary (`ipc:///tmp/spikenaut_signals.ipc`, lowercase `side`)
+2. **JSON IPC** — secondary (`LIMEN_JSON_IPC` or user-scoped default under `$XDG_RUNTIME_DIR/limen-capital/`, lowercase `side`)

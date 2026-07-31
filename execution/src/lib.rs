@@ -11,6 +11,7 @@
 //! this module's PositionSizer is the **policy surface** for confidence→size
 //! and soft limits, logged on every fill.
 
+pub mod binary_wire;
 pub mod dydx;
 pub mod kelly;
 pub mod wire;

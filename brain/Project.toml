@@ -14,13 +14,13 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 ZMQ = "c2297ded-f4af-51ae-bb23-16f91089e4e1"
 
-# Limen-Neural packages (local path via [sources]; `Pkg.instantiate()` resolves)
+# Limen-Neural packages (validated git+rev via [sources]; no sibling clones)
 LiquidCortex = "1f75a0df-502a-4be0-9310-97a9e2e7f166"
 TemporalFocus = "b7e4c3f2-1d2e-4a5b-8c9d-0e1f2a3b4c5e"
 
 [sources]
-LiquidCortex = {path = "../../Limen-Neural/LiquidCortex.jl"}
-TemporalFocus = {path = "../../Limen-Neural/NeuroPulse.jl"}
+LiquidCortex = {url = "https://github.com/Limen-Neural/LiquidCortex.jl", rev = "4e2698cbbec98d8f6687eeb6c1570f588bb950d9"}
+TemporalFocus = {url = "https://github.com/Limen-Neural/NeuroPulse.jl", rev = "40e39206ca59f8d0fad0cd85e3b37520d7bfcedb"}
 
 [compat]
 CUDA = "5"

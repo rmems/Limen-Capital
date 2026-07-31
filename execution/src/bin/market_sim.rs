@@ -4,7 +4,7 @@
 //!   cargo run --bin market_sim
 //!   LIMEN_SIM_HZ=10 cargo run --bin market_sim
 
-use corpus_ipc::MarketPulse;
+use spikenaut_execution_engine::wire::MarketPulse;
 use std::f32::consts::PI;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
