@@ -52,19 +52,29 @@ echo ""
 echo "Test 2: Limen-Neural dependencies..."
 # Portable hex rev match (mawk lacks {7,} interval quantifiers).
 _HEX7='[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*'
+# Extract quoted field values with fixed-string compare (not unescaped regex URL match).
 assert_cargo_git_rev() {
-    local crate="$1" url_substr="$2"
-    # Require line-anchored crate = { git = "…url…", rev = "hex…" }.
-    # URL must sit inside the quoted git value (not a comment coincidence).
-    if awk -v crate="$crate" -v url="$url_substr" -v hex7="$_HEX7" '
+    local crate="$1" expected_url="$2"
+    if awk -v crate="$crate" -v expected="$expected_url" -v hex7="$_HEX7" '
+        function extract_quoted(s, key,   re, rest, q) {
+            re = key "[[:space:]]*=[[:space:]]*\""
+            if (match(s, re)) {
+                rest = substr(s, RSTART + RLENGTH)
+                q = index(rest, "\"")
+                if (q > 0) return substr(rest, 1, q - 1)
+            }
+            return ""
+        }
         BEGIN { ok = 0 }
         $0 ~ "^"crate"[[:space:]]*=" {
             block = $0
             while (block !~ /}/ && (getline line) > 0) {
                 block = block " " line
             }
-            if (block ~ ("git[[:space:]]*=[[:space:]]*\"[^\"]*" url "[^\"]*\"") &&
-                block ~ ("rev[[:space:]]*=[[:space:]]*\"" hex7 "\"")) {
+            gitv = extract_quoted(block, "git")
+            revv = extract_quoted(block, "rev")
+            if ((gitv == expected || gitv == expected ".git") &&
+                revv ~ ("^" hex7 "$")) {
                 ok = 1
             }
         }
@@ -72,21 +82,31 @@ assert_cargo_git_rev() {
     ' "$ROOT/execution/Cargo.toml"; then
         pass "$crate git+rev pin present"
     else
-        fail "$crate missing git URL and/or rev pin in execution/Cargo.toml"
+        fail "$crate missing exact git URL and/or rev pin in execution/Cargo.toml"
     fi
 }
 assert_julia_source_rev() {
-    local pkg="$1" url_substr="$2"
-    # Only accept [sources] rows with url="…expected…" and rev="hex…".
-    if awk -v pkg="$pkg" -v url="$url_substr" -v hex7="$_HEX7" '
+    local pkg="$1" expected_url="$2"
+    if awk -v pkg="$pkg" -v expected="$expected_url" -v hex7="$_HEX7" '
+        function extract_quoted(s, key,   re, rest, q) {
+            re = key "[[:space:]]*=[[:space:]]*\""
+            if (match(s, re)) {
+                rest = substr(s, RSTART + RLENGTH)
+                q = index(rest, "\"")
+                if (q > 0) return substr(rest, 1, q - 1)
+            }
+            return ""
+        }
         BEGIN { ok = 0; in_sources = 0 }
         /^\[/ {
             in_sources = ($0 ~ /^\[sources\]/)
             next
         }
         in_sources && $0 ~ "^"pkg"[[:space:]]*=" {
-            if ($0 ~ ("url[[:space:]]*=[[:space:]]*\"[^\"]*" url "[^\"]*\"") &&
-                $0 ~ ("rev[[:space:]]*=[[:space:]]*\"" hex7 "\"")) {
+            urlv = extract_quoted($0, "url")
+            revv = extract_quoted($0, "rev")
+            if ((urlv == expected || urlv == expected ".git") &&
+                revv ~ ("^" hex7 "$")) {
                 ok = 1
             }
         }
@@ -94,14 +114,14 @@ assert_julia_source_rev() {
     ' "$ROOT/brain/Project.toml"; then
         pass "Julia $pkg [sources] url+rev pin present"
     else
-        fail "Julia $pkg missing url and/or rev in brain/Project.toml [sources]"
+        fail "Julia $pkg missing exact url and/or rev in brain/Project.toml [sources]"
     fi
 }
-assert_cargo_git_rev "metabolic-ledger" "github.com/Limen-Neural/metabolic-ledger"
-assert_cargo_git_rev "kinetic-signals" "github.com/Limen-Neural/kinetic-signals"
-assert_cargo_git_rev "neuromod" "github.com/Limen-Neural/neuromod"
-assert_julia_source_rev "LiquidCortex" "github.com/Limen-Neural/LiquidCortex.jl"
-assert_julia_source_rev "TemporalFocus" "github.com/Limen-Neural/NeuroPulse.jl"
+assert_cargo_git_rev "metabolic-ledger" "https://github.com/Limen-Neural/metabolic-ledger"
+assert_cargo_git_rev "kinetic-signals" "https://github.com/Limen-Neural/kinetic-signals"
+assert_cargo_git_rev "neuromod" "https://github.com/Limen-Neural/neuromod"
+assert_julia_source_rev "LiquidCortex" "https://github.com/Limen-Neural/LiquidCortex.jl"
+assert_julia_source_rev "TemporalFocus" "https://github.com/Limen-Neural/NeuroPulse.jl"
 if [ -n "$LIMEN_NEURAL" ] && [ -d "$LIMEN_NEURAL" ]; then
     pass "Optional Limen-Neural sibling found at $LIMEN_NEURAL"
     for lib in metabolic-ledger LiquidCortex.jl NeuroPulse.jl kinetic-signals; do

@@ -304,6 +304,21 @@ mod tests {
         // first relevance float at offset 8 + 16*4 = 72
         bytes[72..76].copy_from_slice(&2.0f32.to_le_bytes());
         assert!(decode_readout(&bytes).is_err());
+
+        let mut bytes_neg = std::fs::read(fixture("readout.bin")).expect("fixture");
+        bytes_neg[72..76].copy_from_slice(&(-0.1f32).to_le_bytes());
+        assert!(decode_readout(&bytes_neg).is_err());
+    }
+
+    #[test]
+    fn readout_rejects_relevance_not_normalized() {
+        let mut bytes = std::fs::read(fixture("readout.bin")).expect("fixture");
+        // all four relevance slots = 1.0 → sum 4.0 (malformed simplex)
+        for i in 0..4 {
+            let off = 72 + i * 4;
+            bytes[off..off + 4].copy_from_slice(&1.0f32.to_le_bytes());
+        }
+        assert!(decode_readout(&bytes).is_err());
     }
 
     #[test]

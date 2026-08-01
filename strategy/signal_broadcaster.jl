@@ -101,44 +101,121 @@ mutable struct SignalBroadcaster
     socket::ZMQ.Socket
     message_count::Int64
     endpoint::String
+    owner_lock_path::Union{Nothing,String}
 
     function SignalBroadcaster(endpoint::Union{Nothing,String}=nothing)
         context = ZMQ.Context()
         socket = ZMQ.Socket(context, ZMQ.PUB)
         ep = something(endpoint, default_json_ipc_endpoint())
-        # Never unlink a live publisher's socket. Bind first; only if the operator
-        # sets LIMEN_JSON_IPC_REPLACE=1 do we remove a pre-existing Unix socket
-        # (stale crash recovery). Active endpoints must fail closed on collision.
+        owner_lock_path = nothing
+        # libzmq ipc:// bind will *unlink* an existing path before binding, so a
+        # second publisher can steal a live endpoint. Hold an exclusive owner lock
+        # *before* bind; only then clear a stale socket file and bind.
+        if startswith(ep, "ipc://")
+            sock_path = ep[7:end]
+            owner_lock_path = acquire_ipc_owner_lock(sock_path)
+            if ispath(sock_path)
+                # Lock proves no live owner (or we reclaimed a dead lock). Safe
+                # to remove a leftover Unix socket so bind does not fail.
+                remove_unix_socket_if_present!(sock_path)
+            end
+        end
         try
             ZMQ.bind(socket, ep)
         catch e
-            if startswith(ep, "ipc://") && get(ENV, "LIMEN_JSON_IPC_REPLACE", "0") == "1"
-                try
-                    remove_stale_ipc_socket!(ep[7:end])
-                    ZMQ.bind(socket, ep)
-                catch e2
-                    error(
-                        "SignalBroadcaster bind failed at $ep after LIMEN_JSON_IPC_REPLACE=1 " *
-                        "(original: $e; retry: $e2). Confirm no live publisher holds the path, " *
-                        "parent dir exists with correct ownership, and path is a Unix socket.",
-                    )
-                end
-            else
-                error(
-                    "SignalBroadcaster bind failed at $ep: $e. " *
-                    "If this is a stale socket from a crashed publisher, remove it " *
-                    "or set LIMEN_JSON_IPC_REPLACE=1 only when no live publisher holds the path.",
-                )
+            if owner_lock_path !== nothing
+                release_ipc_owner_lock(owner_lock_path)
             end
+            error(
+                "SignalBroadcaster bind failed at $ep: $e. " *
+                "Check parent directory permissions/ownership.",
+            )
         end
 
         println("[$(now())] SignalBroadcaster initialized at $ep")
-        new(context, socket, 0, ep)
+        new(context, socket, 0, ep, owner_lock_path)
     end
 end
 
-"""Remove a Unix socket at `path` only when explicitly requested (REPLACE=1)."""
-function remove_stale_ipc_socket!(path::AbstractString)
+"""True if `pid` appears to be a live process (Linux `/proc`, else best-effort)."""
+function process_appears_alive(pid::Integer)::Bool
+    pid <= 0 && return false
+    return isdir("/proc/$(pid)")
+end
+
+"""
+Exclusive owner lock beside the IPC socket (`path.owner.lock`).
+
+Prevents concurrent publishers: libzmq would otherwise unlink a live socket on
+bind. Stale locks from dead PIDs are reclaimed. `LIMEN_JSON_IPC_REPLACE=1` forces
+lock reclaim even if a PID file claims a live process (operator override only).
+"""
+function acquire_ipc_owner_lock(sock_path::AbstractString)::String
+    lock_path = sock_path * ".owner.lock"
+    force = get(ENV, "LIMEN_JSON_IPC_REPLACE", "0") == "1"
+    if ispath(lock_path)
+        old = try
+            strip(read(lock_path, String))
+        catch
+            ""
+        end
+        old_pid = try
+            parse(Int, old)
+        catch
+            nothing
+        end
+        if old_pid !== nothing && process_appears_alive(old_pid) && !force
+            error(
+                "IPC endpoint already owned by live pid=$old_pid (lock $lock_path). " *
+                "Refusing to steal; stop that broadcaster or set LIMEN_JSON_IPC_REPLACE=1 " *
+                "only if you intend to take over.",
+            )
+        end
+        # Stale lock (dead pid) or forced REPLACE.
+        try
+            rm(lock_path; force=true)
+        catch e
+            error("Could not clear IPC owner lock $lock_path: $e")
+        end
+    end
+    # Exclusive create (O_WRONLY|O_CREAT|O_EXCL) — Linux research hosts.
+    o_wronly = Cint(1)
+    o_creat = Cint(64)
+    o_excl = Cint(128)
+    fd = ccall(
+        :open,
+        Cint,
+        (Cstring, Cint, Cint),
+        lock_path,
+        o_wronly | o_creat | o_excl,
+        0o600,
+    )
+    if fd < 0
+        error(
+            "IPC owner lock race at $lock_path (another broadcaster won). " *
+            "Endpoint remains exclusive.",
+        )
+    end
+    try
+        pid_bytes = Vector{UInt8}(string(getpid()))
+        ccall(:write, Cssize_t, (Cint, Ptr{UInt8}, Csize_t), fd, pid_bytes, length(pid_bytes))
+    finally
+        ccall(:close, Cint, (Cint,), fd)
+    end
+    return lock_path
+end
+
+function release_ipc_owner_lock(lock_path::AbstractString)
+    try
+        rm(lock_path; force=true)
+    catch
+        # Best-effort cleanup on bind failure / shutdown.
+    end
+    return nothing
+end
+
+"""Remove a Unix socket at `path` if present; refuse regular files/dirs/symlinks."""
+function remove_unix_socket_if_present!(path::AbstractString)
     ispath(path) || return nothing
     islink(path) && error("IPC path $path is a symlink — refusing to delete")
     isdir(path) && error("IPC path $path is a directory — refusing to delete")
@@ -219,6 +296,10 @@ function shutdown(broadcaster::SignalBroadcaster)
     try
         ZMQ.close(broadcaster.socket)
         ZMQ.term(broadcaster.context)
+        if broadcaster.owner_lock_path !== nothing
+            release_ipc_owner_lock(broadcaster.owner_lock_path)
+            broadcaster.owner_lock_path = nothing
+        end
         @info "SignalBroadcaster shut down (sent $(broadcaster.message_count) signals)"
     catch e
         @warn "Error during shutdown: $e"

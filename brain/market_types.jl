@@ -74,8 +74,8 @@ function decode_market_pulse(buf::Vector{UInt8})
 
     ts = reinterpret(UInt64, view(buf, 1:8))[1]
     # One allocation: collect 25 LE Float32 words from a view (no 25×4-byte temps).
+    # Length is enforced inside validate_market_pulse_fields! (wire is fixed 100 bytes → 25 f32).
     f = collect(reinterpret(Float32, view(buf, 9:108)))
-    length(f) == 25 || error("Expected 25 Float32 fields, got $(length(f))")
     validate_market_pulse_fields!(f)
 
     return MarketPulse(

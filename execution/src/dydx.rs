@@ -223,20 +223,20 @@ impl MarketFeed {
 mod tests {
     use super::*;
 
+    /// Live network call — not run in default/CI `cargo test` (no timeout / flaky).
+    /// Run with: `cargo test test_dydx_price_fetch -- --ignored --nocapture`
     #[tokio::test]
+    #[ignore = "live dYdX network call; exclude from CI"]
     async fn test_dydx_price_fetch() {
-        // This test requires internet access to dydx API
-        // Run with: cargo test --test dydx -- --ignored --nocapture
         let client = DydxClient::new();
 
-        // Test fetching BTC price
         match client.get_price("BTC").await {
             Ok(price) => {
                 println!("BTC Price: ${:.2}", price.price);
                 assert!(price.price > 0.0);
                 assert!(!price.ticker.is_empty());
             }
-            Err(e) => eprintln!("Error (might be network): {}", e),
+            Err(e) => panic!("dYdX fetch failed: {e}"),
         }
     }
 

@@ -247,6 +247,14 @@ impl ReadoutPacket {
                 ));
             }
         }
+        // Protocol: trailer is a weight simplex with sum ≈ 1 (see wire docs).
+        // Reject grossly non-normalized frames; tolerance covers f32 rounding.
+        let rel_sum: f32 = relevance.iter().sum();
+        if !rel_sum.is_finite() || (rel_sum - 1.0).abs() > 0.05 {
+            return Err(format!(
+                "ReadoutPacket relevance must sum to ~1.0 (±0.05), got {rel_sum}"
+            ));
+        }
         Ok(Self {
             tick,
             readout,
@@ -304,8 +312,8 @@ pub fn readout_to_trade(packet: &ReadoutPacket) -> MappedTrade {
     }
 
     // Derived overflow / NaN must not become max-confidence trades.
-    if scores.iter().any(|s| !s.is_finite()) {
-        return neutral_trade(packet, 0);
+    if let Some(i) = scores.iter().position(|s| !s.is_finite()) {
+        return neutral_trade(packet, i);
     }
 
     let mut primary = 0usize;
@@ -331,16 +339,19 @@ pub fn readout_to_trade(packet: &ReadoutPacket) -> MappedTrade {
         return neutral_trade(packet, primary);
     }
     // Defense in depth if a packet bypassed decode validation.
+    let rel_sum: f32 = packet.relevance.iter().sum();
     if packet
         .relevance
         .iter()
         .any(|r| !r.is_finite() || !(0.0..=1.0).contains(r))
+        || !rel_sum.is_finite()
+        || (rel_sum - 1.0).abs() > 0.05
     {
         return neutral_trade(packet, primary);
     }
     let mag = l2.tanh();
     let max_rel = packet.relevance.iter().cloned().fold(0.0f32, f32::max);
-    // max_rel already in [0,1]; mag in (0,1] for finite l2 — product is finite.
+    // max_rel already in [0,1]; mag in [0,1] for finite l2 (incl. zero scores).
     let confidence = (max_rel * mag).clamp(0.0, 1.0);
 
     let ticker = if primary < ASSET_TICKERS.len() {
