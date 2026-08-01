@@ -55,7 +55,7 @@ end
     bad_price[9:12] = reinterpret(UInt8, [0.0f0])
     @test_throws ErrorException decode_market_pulse(bad_price)
 
-    # Vol > 1 soft-clamped
+    # Vol > 1 clamped
     high_vol = copy(buf)
     high_vol[13:16] = reinterpret(UInt8, [2.5f0])  # dnx_vol
     clamped = decode_market_pulse(high_vol)

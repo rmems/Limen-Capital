@@ -299,6 +299,14 @@ mod tests {
     }
 
     #[test]
+    fn readout_rejects_relevance_out_of_range() {
+        let mut bytes = std::fs::read(fixture("readout.bin")).expect("fixture");
+        // first relevance float at offset 8 + 16*4 = 72
+        bytes[72..76].copy_from_slice(&2.0f32.to_le_bytes());
+        assert!(decode_readout(&bytes).is_err());
+    }
+
+    #[test]
     fn json_ipc_rejects_traversal() {
         assert!(validate_json_ipc_endpoint("ipc:///tmp/../etc/passwd").is_err());
         assert!(validate_json_ipc_endpoint("tcp://127.0.0.1:1").is_err());

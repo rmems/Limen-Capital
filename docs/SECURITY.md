@@ -42,8 +42,11 @@ Do not use a world-predictable path such as `/tmp/spikenaut_signals.ipc`.
 - **Override:** `LIMEN_JSON_IPC` must be `ipc://` + absolute filesystem path with no `..` segments
   (e.g. `ipc:///run/user/1000/limen-capital/signals.ipc`). Invalid overrides are rejected.
   **Override parent directories are not auto-created or `chmod`’d** — the operator must secure them.
-- Bind collisions: publisher does **not** unlink a live Unix socket. Set `LIMEN_JSON_IPC_REPLACE=1`
-  only to clear a known-stale path after a crash.
+- Bind collisions (default): publisher does **not** unlink any existing socket; bind fails closed.
+- `LIMEN_JSON_IPC_REPLACE=1`: after a failed bind, Capital may unlink a pre-existing **Unix socket**
+  at that path and retry once. This **cannot distinguish active vs stale** publishers — if another
+  process still holds the endpoint, REPLACE can steal it. Only enable after confirming no live
+  broadcaster is running (or you intentionally replace it).
 - Publisher (`strategy/signal_broadcaster.jl`) and consumer (`execution`, `LIMEN_WIRE=json`) must agree.
 
 ## Untrusted / multi-user hosts

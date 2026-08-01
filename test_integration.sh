@@ -54,17 +54,16 @@ echo "Test 2: Limen-Neural dependencies..."
 _HEX7='[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*'
 assert_cargo_git_rev() {
     local crate="$1" url_substr="$2"
-    # Require git = "…url…" and rev = "hex…" on the same dependency block.
+    # Require line-anchored crate = { git = "…url…", rev = "hex…" }.
+    # URL must sit inside the quoted git value (not a comment coincidence).
     if awk -v crate="$crate" -v url="$url_substr" -v hex7="$_HEX7" '
         BEGIN { ok = 0 }
-        $0 ~ crate"[[:space:]]*=" {
+        $0 ~ "^"crate"[[:space:]]*=" {
             block = $0
             while (block !~ /}/ && (getline line) > 0) {
                 block = block " " line
             }
-            # Must have git = "…url…" (not path= or a comment coincidence).
-            if (block ~ /git[[:space:]]*=[[:space:]]*"[^"]*"/ &&
-                block ~ url &&
+            if (block ~ ("git[[:space:]]*=[[:space:]]*\"[^\"]*" url "[^\"]*\"") &&
                 block ~ ("rev[[:space:]]*=[[:space:]]*\"" hex7 "\"")) {
                 ok = 1
             }
@@ -78,7 +77,7 @@ assert_cargo_git_rev() {
 }
 assert_julia_source_rev() {
     local pkg="$1" url_substr="$2"
-    # Only accept [sources] table entries (url=…, rev=…), not [deps] UUID lines.
+    # Only accept [sources] rows with url="…expected…" and rev="hex…".
     if awk -v pkg="$pkg" -v url="$url_substr" -v hex7="$_HEX7" '
         BEGIN { ok = 0; in_sources = 0 }
         /^\[/ {
@@ -86,8 +85,7 @@ assert_julia_source_rev() {
             next
         }
         in_sources && $0 ~ "^"pkg"[[:space:]]*=" {
-            if ($0 ~ /url[[:space:]]*=/ &&
-                $0 ~ url &&
+            if ($0 ~ ("url[[:space:]]*=[[:space:]]*\"[^\"]*" url "[^\"]*\"") &&
                 $0 ~ ("rev[[:space:]]*=[[:space:]]*\"" hex7 "\"")) {
                 ok = 1
             }
@@ -134,7 +132,7 @@ fi
 # Test 4: Rust compilation
 echo ""
 echo "Test 4: Rust compilation (cargo check)..."
-if (cd "$ROOT/execution" && cargo check --quiet 2>/tmp/limen_cargo_check.err); then
+if (cd "$ROOT/execution" && cargo check --locked --quiet 2>/tmp/limen_cargo_check.err); then
     pass "Rust execution engine compiles"
 else
     fail "Rust compilation failed (see /tmp/limen_cargo_check.err)"

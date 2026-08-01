@@ -113,13 +113,21 @@ mutable struct SignalBroadcaster
             ZMQ.bind(socket, ep)
         catch e
             if startswith(ep, "ipc://") && get(ENV, "LIMEN_JSON_IPC_REPLACE", "0") == "1"
-                remove_stale_ipc_socket!(ep[7:end])
-                ZMQ.bind(socket, ep)
+                try
+                    remove_stale_ipc_socket!(ep[7:end])
+                    ZMQ.bind(socket, ep)
+                catch e2
+                    error(
+                        "SignalBroadcaster bind failed at $ep after LIMEN_JSON_IPC_REPLACE=1 " *
+                        "(original: $e; retry: $e2). Confirm no live publisher holds the path, " *
+                        "parent dir exists with correct ownership, and path is a Unix socket.",
+                    )
+                end
             else
                 error(
                     "SignalBroadcaster bind failed at $ep: $e. " *
                     "If this is a stale socket from a crashed publisher, remove it " *
-                    "or set LIMEN_JSON_IPC_REPLACE=1 (never auto-steals a live endpoint).",
+                    "or set LIMEN_JSON_IPC_REPLACE=1 only when no live publisher holds the path.",
                 )
             end
         end

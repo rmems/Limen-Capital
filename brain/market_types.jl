@@ -38,10 +38,10 @@ end
 """
     validate_market_pulse_fields!(f::AbstractVector{Float32}) -> AbstractVector{Float32}
 
-In-place validation on `f` (no intermediate copy): all floats finite;
+In-place validation on a settable vector `f`: all floats finite;
 non-positive prices rejected; vols clamped to `[0, 1]`.
 Layout of `f` matches decode: 7×(price, vol) + 11 trailing signals.
-Returns `f` for chaining.
+Returns `f` for chaining. Callers must pass a mutable dense vector (not a range).
 """
 function validate_market_pulse_fields!(f::AbstractVector{Float32})
     length(f) == 25 || error("Expected 25 Float32 fields, got $(length(f))")
@@ -59,11 +59,6 @@ function validate_market_pulse_fields!(f::AbstractVector{Float32})
     return f
 end
 
-# Non-mutating name kept for tests/docs: allocates once, then validates in place.
-function validate_market_pulse_fields(f::AbstractVector{Float32})
-    return validate_market_pulse_fields!(copy(f))
-end
-
 """
     decode_market_pulse(buf::Vector{UInt8}) -> MarketPulse
 
@@ -71,18 +66,16 @@ Decode the 120-byte little-endian MarketPulse packet.
 Bytes [108..120] are reserved (not decoded into fields today).
 
 Rejects non-finite floats and non-positive prices; clamps asset vols to [0, 1].
-Hot path: one small `Float32` buffer for the 25 field words (no double-copy).
+Hot path: one `Vector{Float32}` for the 25 field words (bulk reinterpret; no
+per-field byte slices).
 """
 function decode_market_pulse(buf::Vector{UInt8})
     length(buf) == 120 || error("Expected 120 bytes, got $(length(buf))")
 
     ts = reinterpret(UInt64, view(buf, 1:8))[1]
-    # Single allocation for LE Float32 words; validate in place (no second vector).
-    f = Vector{Float32}(undef, 25)
-    for i in 1:25
-        off = 8 + (i - 1) * 4
-        f[i] = reinterpret(Float32, buf[off+1:off+4])[1]
-    end
+    # One allocation: collect 25 LE Float32 words from a view (no 25×4-byte temps).
+    f = collect(reinterpret(Float32, view(buf, 9:108)))
+    length(f) == 25 || error("Expected 25 Float32 fields, got $(length(f))")
     validate_market_pulse_fields!(f)
 
     return MarketPulse(
