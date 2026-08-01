@@ -2,7 +2,7 @@
 name = "spikenaut-execution-engine"
 version = "0.1.0"
 edition = "2021"
-# CI installs latest stable; keep MSRV aligned with current stable tooling.
+# CI pins Rust 1.97.1; declared MSRV floor is 1.97.
 rust-version = "1.97"
 description = "Limen-Capital Rust muscle — ZMQ signal consumer, gates, metabolic-ledger ghost execution"
 license = "MIT"

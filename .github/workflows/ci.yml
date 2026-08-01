@@ -90,3 +90,30 @@ jobs:
         run: |
           julia --color=yes --project=. test/runtests.jl
         working-directory: brain
+
+  # Structure + git-only dep pins (no full GPU instantiate).
+  integration:
+    name: Integration structure gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [rust, julia]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Install Rust 1.97.1
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable (1.97.1+)
+        with:
+          toolchain: 1.97.1
+
+      - name: Cache Cargo + target
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          workspaces: execution -> target
+          shared-key: limen-capital-execution-cache
+          cache-on-failure: true
+
+      - name: Run test_integration.sh
+        run: ./test_integration.sh

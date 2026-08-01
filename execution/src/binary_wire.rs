@@ -132,8 +132,8 @@ impl MarketPulse {
         Ok(pulse)
     }
 
-    /// Finite check on all f32 fields; reject price ≤ 0; soft-clamp vols to [0, 1].
-    /// Order matches Julia `validate_market_pulse_fields`: finite-all first, then prices.
+    /// Finite check on all f32 fields; reject price ≤ 0; clamp vols to [0, 1].
+    /// Order matches Julia `validate_market_pulse_fields!`: finite-all first, then prices.
     pub fn validate_and_clamp(&mut self) -> Result<(), String> {
         for (i, &p) in self.prices.iter().enumerate() {
             if !p.is_finite() {
@@ -268,12 +268,27 @@ pub struct MappedTrade {
 }
 
 /// Map readout + NERO relevance → trade side/confidence (NervousWire v1).
+///
+/// Finite extremes (e.g. `f32::MAX - (-f32::MAX)`) can overflow to non-finite
+/// scores; those map to Neutral with zero confidence (fail closed).
 pub fn readout_to_trade(packet: &ReadoutPacket) -> MappedTrade {
     let mut scores = [0f32; N_PAIRS];
     for (i, score) in scores.iter_mut().enumerate() {
         let bull = packet.readout[2 * i];
         let bear = packet.readout[2 * i + 1];
         *score = bull - bear;
+    }
+
+    // Derived overflow / NaN must not become max-confidence trades.
+    if scores.iter().any(|s| !s.is_finite()) {
+        return MappedTrade {
+            ticker: ASSET_TICKERS[0].to_string(),
+            side: WireSide::Neutral,
+            confidence: 0.0,
+            score: 0.0,
+            pair_index: 0,
+            tick: packet.tick,
+        };
     }
 
     let mut primary = 0usize;
@@ -295,6 +310,20 @@ pub fn readout_to_trade(packet: &ReadoutPacket) -> MappedTrade {
     };
 
     let l2 = scores.iter().map(|s| s * s).sum::<f32>().sqrt();
+    if !l2.is_finite() {
+        return MappedTrade {
+            ticker: if primary < ASSET_TICKERS.len() {
+                ASSET_TICKERS[primary].to_string()
+            } else {
+                "RESIDUAL".to_string()
+            },
+            side: WireSide::Neutral,
+            confidence: 0.0,
+            score: 0.0,
+            pair_index: primary,
+            tick: packet.tick,
+        };
+    }
     let mag = l2.tanh();
     let max_rel = packet
         .relevance
@@ -303,6 +332,20 @@ pub fn readout_to_trade(packet: &ReadoutPacket) -> MappedTrade {
         .fold(0.0f32, f32::max)
         .clamp(0.0, 1.0);
     let confidence = (max_rel * mag).clamp(0.0, 1.0);
+    if !confidence.is_finite() {
+        return MappedTrade {
+            ticker: if primary < ASSET_TICKERS.len() {
+                ASSET_TICKERS[primary].to_string()
+            } else {
+                "RESIDUAL".to_string()
+            },
+            side: WireSide::Neutral,
+            confidence: 0.0,
+            score: 0.0,
+            pair_index: primary,
+            tick: packet.tick,
+        };
+    }
 
     let ticker = if primary < ASSET_TICKERS.len() {
         ASSET_TICKERS[primary].to_string()

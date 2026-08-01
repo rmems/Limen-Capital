@@ -50,17 +50,22 @@ done
 # Test 2: Limen-Neural quality deps — require git URL + rev pins (sibling optional)
 echo ""
 echo "Test 2: Limen-Neural dependencies..."
+# Portable hex rev match (mawk lacks {7,} interval quantifiers).
+_HEX7='[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*'
 assert_cargo_git_rev() {
     local crate="$1" url_substr="$2"
-    # Note: awk END always runs after exit from main — do not force exit 1 there.
-    if awk -v crate="$crate" -v url="$url_substr" '
+    # Require git = "…url…" and rev = "hex…" on the same dependency block.
+    if awk -v crate="$crate" -v url="$url_substr" -v hex7="$_HEX7" '
         BEGIN { ok = 0 }
         $0 ~ crate"[[:space:]]*=" {
             block = $0
             while (block !~ /}/ && (getline line) > 0) {
                 block = block " " line
             }
-            if (block ~ url && block ~ /rev[[:space:]]*=[[:space:]]*"[0-9a-fA-F]{7,}"/) {
+            # Must have git = "…url…" (not path= or a comment coincidence).
+            if (block ~ /git[[:space:]]*=[[:space:]]*"[^"]*"/ &&
+                block ~ url &&
+                block ~ ("rev[[:space:]]*=[[:space:]]*\"" hex7 "\"")) {
                 ok = 1
             }
         }
@@ -74,14 +79,16 @@ assert_cargo_git_rev() {
 assert_julia_source_rev() {
     local pkg="$1" url_substr="$2"
     # Only accept [sources] table entries (url=…, rev=…), not [deps] UUID lines.
-    if awk -v pkg="$pkg" -v url="$url_substr" '
+    if awk -v pkg="$pkg" -v url="$url_substr" -v hex7="$_HEX7" '
         BEGIN { ok = 0; in_sources = 0 }
         /^\[/ {
             in_sources = ($0 ~ /^\[sources\]/)
             next
         }
         in_sources && $0 ~ "^"pkg"[[:space:]]*=" {
-            if ($0 ~ url && $0 ~ /rev[[:space:]]*=[[:space:]]*"[0-9a-fA-F]{7,}"/) {
+            if ($0 ~ /url[[:space:]]*=/ &&
+                $0 ~ url &&
+                $0 ~ ("rev[[:space:]]*=[[:space:]]*\"" hex7 "\"")) {
                 ok = 1
             }
         }
@@ -93,6 +100,8 @@ assert_julia_source_rev() {
     fi
 }
 assert_cargo_git_rev "metabolic-ledger" "github.com/Limen-Neural/metabolic-ledger"
+assert_cargo_git_rev "kinetic-signals" "github.com/Limen-Neural/kinetic-signals"
+assert_cargo_git_rev "neuromod" "github.com/Limen-Neural/neuromod"
 assert_julia_source_rev "LiquidCortex" "github.com/Limen-Neural/LiquidCortex.jl"
 assert_julia_source_rev "TemporalFocus" "github.com/Limen-Neural/NeuroPulse.jl"
 if [ -n "$LIMEN_NEURAL" ] && [ -d "$LIMEN_NEURAL" ]; then

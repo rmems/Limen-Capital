@@ -106,19 +106,30 @@ mutable struct SignalBroadcaster
         context = ZMQ.Context()
         socket = ZMQ.Socket(context, ZMQ.PUB)
         ep = something(endpoint, default_json_ipc_endpoint())
-        # Drop only a stale Unix-domain *socket* from a prior crashed publisher.
-        # Never delete regular files / dirs / symlinks (typo-safe fail-closed).
-        if startswith(ep, "ipc://")
-            remove_stale_ipc_socket!(ep[7:end])
+        # Never unlink a live publisher's socket. Bind first; only if the operator
+        # sets LIMEN_JSON_IPC_REPLACE=1 do we remove a pre-existing Unix socket
+        # (stale crash recovery). Active endpoints must fail closed on collision.
+        try
+            ZMQ.bind(socket, ep)
+        catch e
+            if startswith(ep, "ipc://") && get(ENV, "LIMEN_JSON_IPC_REPLACE", "0") == "1"
+                remove_stale_ipc_socket!(ep[7:end])
+                ZMQ.bind(socket, ep)
+            else
+                error(
+                    "SignalBroadcaster bind failed at $ep: $e. " *
+                    "If this is a stale socket from a crashed publisher, remove it " *
+                    "or set LIMEN_JSON_IPC_REPLACE=1 (never auto-steals a live endpoint).",
+                )
+            end
         end
-        ZMQ.bind(socket, ep)
 
         println("[$(now())] SignalBroadcaster initialized at $ep")
         new(context, socket, 0, ep)
     end
 end
 
-"""Remove a stale Unix socket at `path`; refuse regular files/dirs/symlinks."""
+"""Remove a Unix socket at `path` only when explicitly requested (REPLACE=1)."""
 function remove_stale_ipc_socket!(path::AbstractString)
     ispath(path) || return nothing
     islink(path) && error("IPC path $path is a symlink — refusing to delete")
@@ -136,7 +147,7 @@ function remove_stale_ipc_socket!(path::AbstractString)
     try
         rm(path)
     catch e
-        error("Could not remove stale IPC socket $path: $e")
+        error("Could not remove IPC socket $path: $e")
     end
     return nothing
 end

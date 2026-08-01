@@ -284,6 +284,21 @@ mod tests {
     }
 
     #[test]
+    fn readout_overflow_scores_fail_closed() {
+        let mut packet = ReadoutPacket {
+            tick: 1,
+            readout: [0.0; 16],
+            relevance: [1.0; 4],
+        };
+        // bull=MAX, bear=-MAX → score overflows to non-finite
+        packet.readout[0] = f32::MAX;
+        packet.readout[1] = -f32::MAX;
+        let m = readout_to_trade(&packet);
+        assert_eq!(m.side, WireSide::Neutral);
+        assert_eq!(m.confidence, 0.0);
+    }
+
+    #[test]
     fn json_ipc_rejects_traversal() {
         assert!(validate_json_ipc_endpoint("ipc:///tmp/../etc/passwd").is_err());
         assert!(validate_json_ipc_endpoint("tcp://127.0.0.1:1").is_err());
