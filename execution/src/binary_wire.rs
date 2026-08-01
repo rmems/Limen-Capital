@@ -248,9 +248,9 @@ impl ReadoutPacket {
             }
         }
         // Protocol: trailer is a weight simplex with sum ≈ 1 (see wire docs).
-        // Reject grossly non-normalized frames; tolerance covers f32 rounding.
+        // Inclusive [0.95, 1.05] avoids f32 edge where abs(0.95-1.0) slightly exceeds 0.05.
         let rel_sum: f32 = relevance.iter().sum();
-        if !rel_sum.is_finite() || (rel_sum - 1.0).abs() > 0.05 {
+        if !(0.95..=1.05).contains(&rel_sum) {
             return Err(format!(
                 "ReadoutPacket relevance must sum to ~1.0 (±0.05), got {rel_sum}"
             ));
@@ -282,14 +282,17 @@ pub struct MappedTrade {
     pub tick: i64,
 }
 
-fn neutral_trade(packet: &ReadoutPacket, pair_index: usize) -> MappedTrade {
-    let ticker = if pair_index < ASSET_TICKERS.len() {
+fn ticker_for_pair(pair_index: usize) -> String {
+    if pair_index < ASSET_TICKERS.len() {
         ASSET_TICKERS[pair_index].to_string()
     } else {
         "RESIDUAL".to_string()
-    };
+    }
+}
+
+fn neutral_trade(packet: &ReadoutPacket, pair_index: usize) -> MappedTrade {
     MappedTrade {
-        ticker,
+        ticker: ticker_for_pair(pair_index),
         side: WireSide::Neutral,
         confidence: 0.0,
         score: 0.0,
@@ -344,8 +347,7 @@ pub fn readout_to_trade(packet: &ReadoutPacket) -> MappedTrade {
         .relevance
         .iter()
         .any(|r| !r.is_finite() || !(0.0..=1.0).contains(r))
-        || !rel_sum.is_finite()
-        || (rel_sum - 1.0).abs() > 0.05
+        || !(0.95..=1.05).contains(&rel_sum)
     {
         return neutral_trade(packet, primary);
     }
@@ -354,14 +356,8 @@ pub fn readout_to_trade(packet: &ReadoutPacket) -> MappedTrade {
     // max_rel already in [0,1]; mag in [0,1] for finite l2 (incl. zero scores).
     let confidence = (max_rel * mag).clamp(0.0, 1.0);
 
-    let ticker = if primary < ASSET_TICKERS.len() {
-        ASSET_TICKERS[primary].to_string()
-    } else {
-        "RESIDUAL".to_string()
-    };
-
     MappedTrade {
-        ticker,
+        ticker: ticker_for_pair(primary),
         side,
         confidence,
         score,

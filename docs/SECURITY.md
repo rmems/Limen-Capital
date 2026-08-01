@@ -10,7 +10,7 @@ exchange gateway. Default configuration assumes a **single-user, loopback-trust*
 | Binary ZMQ MarketPulse / ReadoutPacket | `tcp://127.0.0.1:5555` / `:5556` | Only local processes publish; plain ZMQ (no CURVE) |
 | JSON TradeSignal adapter | User-scoped IPC under `$XDG_RUNTIME_DIR/limen-capital/` (or `/tmp/limen-capital-$UID/`) | Same OS UID; override with validated `LIMEN_JSON_IPC` |
 | Ghost wallet (metabolic-ledger) | Local JSONL paper ledger | No exchange credentials |
-| MarketPulse floats | Validated finite; prices `> 0`; vols clamped to `[0, 1]` | Malformed frames fail closed |
+| MarketPulse floats | Finite required; prices `> 0` rejected otherwise; vols **clamped** to `[0, 1]` (accepted after clamp, not fail-closed) | Non-finite / non-positive price fail closed |
 
 ## What this stack does **not** do
 
@@ -41,13 +41,13 @@ Do not use a world-predictable path such as `/tmp/spikenaut_signals.ipc`.
   creates the directory and requires mode `0700` (failures abort setup).
 - **Override:** `LIMEN_JSON_IPC` must be `ipc://` + absolute filesystem path with no `..` segments
   (e.g. `ipc:///run/user/1000/limen-capital/signals.ipc`). Invalid overrides are rejected.
-  **Override parent directories are not auto-created or `chmod`’d** — the operator must secure them.
-- **IPC ownership:** before `ipc://` bind, the publisher takes an exclusive
-  `*.owner.lock` (PID file + `O_EXCL`). This counters libzmq’s behavior of unlinking an
-  existing IPC path on bind (which would otherwise let a second process steal a live endpoint).
-- Stale locks from dead PIDs are reclaimed; a lock whose PID still looks live fails closed.
-- `LIMEN_JSON_IPC_REPLACE=1`: force reclaim of an owner lock even if a PID file claims a live
-  process (operator takeover only — can interrupt a running broadcaster).
+  An **empty** override is treated as unset (falls back to defaults).
+  **Same-UID isolation applies to default endpoints**; override parents are **not** auto-created
+  or `chmod`’d — the operator must secure them.
+- **IPC ownership:** before `ipc://` bind, the publisher holds `flock(LOCK_EX|LOCK_NB)` on
+  `*.owner.lock` for the process lifetime. This counters libzmq’s unlink-on-bind steal of a
+  live socket. Lock ends when the process exits or `shutdown` closes the fd (no PID-reuse /
+  shutdown-steal of a replacement owner).
 - Publisher (`strategy/signal_broadcaster.jl`) and consumer (`execution`, `LIMEN_WIRE=json`) must agree.
 
 ## Untrusted / multi-user hosts

@@ -56,10 +56,12 @@ _HEX7='[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-f
 assert_cargo_git_rev() {
     local crate="$1" expected_url="$2"
     if awk -v crate="$crate" -v expected="$expected_url" -v hex7="$_HEX7" '
-        function extract_quoted(s, key,   re, rest, q) {
-            re = key "[[:space:]]*=[[:space:]]*\""
+        function extract_quoted(s, key,   re, rest, q, start) {
+            # Left field boundary so "notgit" / "notrev" cannot match.
+            re = "(^|[^A-Za-z0-9_])" key "[[:space:]]*=[[:space:]]*\""
             if (match(s, re)) {
-                rest = substr(s, RSTART + RLENGTH)
+                start = RSTART + RLENGTH
+                rest = substr(s, start)
                 q = index(rest, "\"")
                 if (q > 0) return substr(rest, 1, q - 1)
             }
@@ -88,10 +90,11 @@ assert_cargo_git_rev() {
 assert_julia_source_rev() {
     local pkg="$1" expected_url="$2"
     if awk -v pkg="$pkg" -v expected="$expected_url" -v hex7="$_HEX7" '
-        function extract_quoted(s, key,   re, rest, q) {
-            re = key "[[:space:]]*=[[:space:]]*\""
+        function extract_quoted(s, key,   re, rest, q, start) {
+            re = "(^|[^A-Za-z0-9_])" key "[[:space:]]*=[[:space:]]*\""
             if (match(s, re)) {
-                rest = substr(s, RSTART + RLENGTH)
+                start = RSTART + RLENGTH
+                rest = substr(s, start)
                 q = index(rest, "\"")
                 if (q > 0) return substr(rest, 1, q - 1)
             }

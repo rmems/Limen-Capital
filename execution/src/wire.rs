@@ -285,10 +285,11 @@ mod tests {
 
     #[test]
     fn readout_overflow_scores_fail_closed() {
+        // Valid simplex relevance so only score overflow trips fail-closed mapping.
         let mut packet = ReadoutPacket {
             tick: 1,
             readout: [0.0; 16],
-            relevance: [1.0; 4],
+            relevance: [0.4, 0.3, 0.2, 0.1],
         };
         // bull=MAX, bear=-MAX → score overflows to non-finite
         packet.readout[0] = f32::MAX;
@@ -296,6 +297,7 @@ mod tests {
         let m = readout_to_trade(&packet);
         assert_eq!(m.side, WireSide::Neutral);
         assert_eq!(m.confidence, 0.0);
+        assert_eq!(m.pair_index, 0);
     }
 
     #[test]
@@ -303,11 +305,19 @@ mod tests {
         let mut bytes = std::fs::read(fixture("readout.bin")).expect("fixture");
         // first relevance float at offset 8 + 16*4 = 72
         bytes[72..76].copy_from_slice(&2.0f32.to_le_bytes());
-        assert!(decode_readout(&bytes).is_err());
+        let err = decode_readout(&bytes).unwrap_err();
+        assert!(
+            err.contains("must be in [0, 1]"),
+            "expected range error, got: {err}"
+        );
 
         let mut bytes_neg = std::fs::read(fixture("readout.bin")).expect("fixture");
         bytes_neg[72..76].copy_from_slice(&(-0.1f32).to_le_bytes());
-        assert!(decode_readout(&bytes_neg).is_err());
+        let err_neg = decode_readout(&bytes_neg).unwrap_err();
+        assert!(
+            err_neg.contains("must be in [0, 1]"),
+            "expected range error, got: {err_neg}"
+        );
     }
 
     #[test]
