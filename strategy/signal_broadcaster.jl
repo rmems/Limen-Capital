@@ -164,19 +164,60 @@ mutable struct SignalBroadcaster
 end
 
 """
+Open flags for the IPC owner-lock sidecar (portable O_CREAT; Linux adds O_CLOEXEC|O_NOFOLLOW).
+"""
+function ipc_owner_lock_open_flags()::Cint
+    # O_RDWR is 2 on Linux, Darwin, and FreeBSD.
+    o_rdwr = Cint(2)
+    # O_CREAT: Linux 0o100 (64); Darwin/BSD 0x200 (512).
+    o_creat = if Sys.islinux()
+        Cint(64)
+    elseif Sys.isapple() || Sys.isbsd()
+        Cint(0x200)
+    else
+        Cint(64)
+    end
+    flags = o_rdwr | o_creat
+    if Sys.islinux()
+        # O_CLOEXEC=0o2000000, O_NOFOLLOW=0o400000 — atomic vs post-open fcntl races.
+        flags |= Cint(0o2000000) | Cint(0o400000)
+    end
+    return flags
+end
+
+"""
 Acquire exclusive IPC ownership via `flock(LOCK_EX|LOCK_NB)` on `path.owner.lock`.
 
 The file descriptor is held open for the broadcaster lifetime so the lock ends
-with the process (no PID-reuse / shutdown-steal races). Kernel flock also
-collapses the check-then-rm-then-create TOCTOU of path-based O_EXCL reclaim.
+with the process (kernel drops flock on last close). The lock *file* is never
+unlinked on release: ownership is the exclusive flock on a stable inode, not
+path existence. Deleting the path after unlock races with a second opener and
+can leave two owners on different inodes for the same endpoint name.
+
+Cooperative protocol among Capital publishers only; non-flock binders are outside
+this ownership contract (libzmq may still unlink-on-bind against them).
 """
 function acquire_ipc_owner_lock(sock_path::AbstractString)::Tuple{String,Cint}
     lock_path = sock_path * ".owner.lock"
-    o_rdwr = Cint(2)
-    o_creat = Cint(64)
-    fd = ccall(:open, Cint, (Cstring, Cint, Cint), lock_path, o_rdwr | o_creat, 0o600)
+    # Refuse symlink targets before open (all Unix); Linux also uses O_NOFOLLOW.
+    islink(lock_path) && error(
+        "IPC owner lock $lock_path is a symlink — refusing to open (symlink attack surface)",
+    )
+    flags = ipc_owner_lock_open_flags()
+    fd = ccall(:open, Cint, (Cstring, Cint, Cint), lock_path, flags, 0o600)
     if fd < 0
         error("Cannot open IPC owner lock $lock_path")
+    end
+    # Non-Linux: set FD_CLOEXEC after open (best-effort).
+    if !Sys.islinux()
+        try
+            # F_GETFD=1, F_SETFD=2, FD_CLOEXEC=1
+            cur = ccall(:fcntl, Cint, (Cint, Cint), fd, Cint(1))
+            if cur >= 0
+                ccall(:fcntl, Cint, (Cint, Cint, Cint), fd, Cint(2), cur | Cint(1))
+            end
+        catch
+        end
     end
     # LOCK_EX=2, LOCK_NB=4
     if ccall(:flock, Cint, (Cint, Cint), fd, Cint(6)) != 0
@@ -196,10 +237,15 @@ function acquire_ipc_owner_lock(sock_path::AbstractString)::Tuple{String,Cint}
     return lock_path, fd
 end
 
+"""
+Release exclusive flock and close the fd. Does **not** unlink `*.owner.lock`
+(see acquire docstring — stable inode is required for mutual exclusion).
+"""
 function release_ipc_owner_lock(
     lock_path::Union{Nothing,AbstractString},
     fd::Cint,
 )
+    # lock_path retained for API stability / logging; file stays on disk.
     if fd >= 0
         try
             ccall(:flock, Cint, (Cint, Cint), fd, Cint(8))  # LOCK_UN
@@ -207,12 +253,6 @@ function release_ipc_owner_lock(
         end
         try
             ccall(:close, Cint, (Cint,), fd)
-        catch
-        end
-    end
-    if lock_path !== nothing
-        try
-            rm(String(lock_path); force=true)
         catch
         end
     end

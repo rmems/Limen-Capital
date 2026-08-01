@@ -46,8 +46,10 @@ Do not use a world-predictable path such as `/tmp/spikenaut_signals.ipc`.
   or `chmod`’d — the operator must secure them.
 - **IPC ownership:** before `ipc://` bind, the publisher holds `flock(LOCK_EX|LOCK_NB)` on
   `*.owner.lock` for the process lifetime. This counters libzmq’s unlink-on-bind steal of a
-  live socket. Lock ends when the process exits or `shutdown` closes the fd (no PID-reuse /
-  shutdown-steal of a replacement owner).
+  live socket among **cooperative Capital publishers**. The lock file is left on disk (not
+  deleted on shutdown) so ownership stays tied to a stable inode; the flock ends when the
+  process exits or `shutdown` closes the fd. Non-flock binders on the same path are outside
+  this protocol and are not protected.
 - Publisher (`strategy/signal_broadcaster.jl`) and consumer (`execution`, `LIMEN_WIRE=json`) must agree.
 
 ## Untrusted / multi-user hosts

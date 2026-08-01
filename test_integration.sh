@@ -47,36 +47,49 @@ for d in execution brain math strategy proto; do
     fi
 done
 
-# Test 2: Limen-Neural quality deps — require git URL + rev pins (sibling optional)
+# Test 2: Limen-Neural quality deps — require git URL + full 40-char rev pins (sibling optional)
 echo ""
 echo "Test 2: Limen-Neural dependencies..."
-# Portable hex rev match (mawk lacks {7,} interval quantifiers).
-_HEX7='[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*'
-# Extract quoted field values with fixed-string compare (not unescaped regex URL match).
+# Portable full-SHA match (mawk lacks {40} interval quantifiers): exactly 40 hex chars.
+_HEX40='[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]'
+# Shared awk helper (one copy so Cargo + Julia gates cannot drift).
+# Strips `#` comments; left field boundary so "notgit"/"notrev" cannot match.
+_AWK_EXTRACT_QUOTED='
+function strip_comment(s,   h) {
+    h = index(s, "#")
+    if (h > 0) return substr(s, 1, h - 1)
+    return s
+}
+function extract_quoted(s, key,   re, rest, q, start) {
+    re = "(^|[^A-Za-z0-9_])" key "[[:space:]]*=[[:space:]]*\""
+    if (match(s, re)) {
+        start = RSTART + RLENGTH
+        rest = substr(s, start)
+        q = index(rest, "\"")
+        if (q > 0) return substr(rest, 1, q - 1)
+    }
+    return ""
+}
+'
 assert_cargo_git_rev() {
     local crate="$1" expected_url="$2"
-    if awk -v crate="$crate" -v expected="$expected_url" -v hex7="$_HEX7" '
-        function extract_quoted(s, key,   re, rest, q, start) {
-            # Left field boundary so "notgit" / "notrev" cannot match.
-            re = "(^|[^A-Za-z0-9_])" key "[[:space:]]*=[[:space:]]*\""
-            if (match(s, re)) {
-                start = RSTART + RLENGTH
-                rest = substr(s, start)
-                q = index(rest, "\"")
-                if (q > 0) return substr(rest, 1, q - 1)
-            }
-            return ""
+    if awk -v crate="$crate" -v expected="$expected_url" -v hex40="$_HEX40" '
+'"$_AWK_EXTRACT_QUOTED"'
+        BEGIN { ok = 0; in_deps = 0 }
+        /^\[/ {
+            # Only accept pins under [dependencies] (not package metadata / other tables).
+            in_deps = ($0 ~ /^\[dependencies\]/)
+            next
         }
-        BEGIN { ok = 0 }
-        $0 ~ "^"crate"[[:space:]]*=" {
-            block = $0
+        in_deps && $0 ~ "^"crate"[[:space:]]*=" {
+            block = strip_comment($0)
             while (block !~ /}/ && (getline line) > 0) {
-                block = block " " line
+                block = block " " strip_comment(line)
             }
             gitv = extract_quoted(block, "git")
             revv = extract_quoted(block, "rev")
             if ((gitv == expected || gitv == expected ".git") &&
-                revv ~ ("^" hex7 "$")) {
+                revv ~ ("^" hex40 "$")) {
                 ok = 1
             }
         }
@@ -84,32 +97,24 @@ assert_cargo_git_rev() {
     ' "$ROOT/execution/Cargo.toml"; then
         pass "$crate git+rev pin present"
     else
-        fail "$crate missing exact git URL and/or rev pin in execution/Cargo.toml"
+        fail "$crate missing exact git URL and/or full 40-char rev pin in execution/Cargo.toml"
     fi
 }
 assert_julia_source_rev() {
     local pkg="$1" expected_url="$2"
-    if awk -v pkg="$pkg" -v expected="$expected_url" -v hex7="$_HEX7" '
-        function extract_quoted(s, key,   re, rest, q, start) {
-            re = "(^|[^A-Za-z0-9_])" key "[[:space:]]*=[[:space:]]*\""
-            if (match(s, re)) {
-                start = RSTART + RLENGTH
-                rest = substr(s, start)
-                q = index(rest, "\"")
-                if (q > 0) return substr(rest, 1, q - 1)
-            }
-            return ""
-        }
+    if awk -v pkg="$pkg" -v expected="$expected_url" -v hex40="$_HEX40" '
+'"$_AWK_EXTRACT_QUOTED"'
         BEGIN { ok = 0; in_sources = 0 }
         /^\[/ {
             in_sources = ($0 ~ /^\[sources\]/)
             next
         }
         in_sources && $0 ~ "^"pkg"[[:space:]]*=" {
-            urlv = extract_quoted($0, "url")
-            revv = extract_quoted($0, "rev")
+            line = strip_comment($0)
+            urlv = extract_quoted(line, "url")
+            revv = extract_quoted(line, "rev")
             if ((urlv == expected || urlv == expected ".git") &&
-                revv ~ ("^" hex7 "$")) {
+                revv ~ ("^" hex40 "$")) {
                 ok = 1
             }
         }
@@ -117,7 +122,7 @@ assert_julia_source_rev() {
     ' "$ROOT/brain/Project.toml"; then
         pass "Julia $pkg [sources] url+rev pin present"
     else
-        fail "Julia $pkg missing exact url and/or rev in brain/Project.toml [sources]"
+        fail "Julia $pkg missing exact url and/or full 40-char rev in brain/Project.toml [sources]"
     fi
 }
 assert_cargo_git_rev "metabolic-ledger" "https://github.com/Limen-Neural/metabolic-ledger"
