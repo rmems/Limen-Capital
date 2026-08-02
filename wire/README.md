@@ -3,7 +3,7 @@
 Canonical binary layouts for experimental SNN-HFT between Julia brain and Rust muscle.
 
 **Source of truth (docs):** [docs/wire-protocol-v1.md](../docs/wire-protocol-v1.md)  
-**Shared Rust types:** Limen-Neural `corpus-ipc` (`MarketPulse`, `ReadoutPacket`)  
+**Rust types:** `execution/src/binary_wire.rs` (`MarketPulse`, `ReadoutPacket`) — in-tree until corpus-ipc publishes them  
 **Golden fixtures:** `fixtures/marketpulse.bin` (120 B), `fixtures/readout.bin` (88 B)
 
 ## Endpoints
@@ -32,7 +32,7 @@ Assets (order): `DNX, Quai, Qubic, Kaspa, Monero, Ocean, Verus`.
 | 8–71 | 16×f32 | lobe readout |
 | 72–87 | 4×f32 | relevance trailer [Scalper, Day, Swing, Macro] |
 
-**Trailer note:** `corpus-ipc::RuntimeSnapshot` is a *view adapter* over the same 4 floats (neuromod naming). HFT code should use `ReadoutPacket.relevance_*` / lobe names.
+**Trailer note:** relevance floats are Scalper/Day/Swing/Macro. A neuromod-style view is optional consumer naming only.
 
 ## Causal aggregation (C3)
 
@@ -61,4 +61,4 @@ ticker     = asset name for primary (Residual → "RESIDUAL")
 ## Adapters
 
 1. **Binary TCP** — research primary path  
-2. **JSON IPC** — secondary (`ipc:///tmp/spikenaut_signals.ipc`, lowercase `side`)
+2. **JSON IPC** — secondary (`LIMEN_JSON_IPC` must be `ipc://` + absolute path; else `$XDG_RUNTIME_DIR/limen-capital/signals.ipc` or `/tmp/limen-capital-$UID/signals.ipc` with dir mode `0700`; lowercase `side`)

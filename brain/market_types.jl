@@ -36,16 +36,47 @@ struct MarketPulse
 end
 
 """
+    validate_market_pulse_fields!(f::AbstractVector{Float32}) -> AbstractVector{Float32}
+
+In-place validation on a settable vector `f`: all floats finite;
+non-positive prices rejected; vols clamped to `[0, 1]`.
+Layout of `f` matches decode: 7×(price, vol) + 11 trailing signals.
+Returns `f` for chaining. Callers must pass a mutable dense vector (not a range).
+"""
+function validate_market_pulse_fields!(f::AbstractVector{Float32})
+    length(f) == 25 || error("Expected 25 Float32 fields, got $(length(f))")
+    for (i, x) in enumerate(f)
+        isfinite(x) || error("MarketPulse field $i is not finite: $x")
+    end
+    # Prices at odd indices 1,3,5,...,13 must be > 0
+    for i in 1:2:13
+        f[i] > 0 || error("MarketPulse price at field $i must be > 0, got $(f[i])")
+    end
+    # Clamp volumes (indices 2,4,...,14) into [0, 1]
+    for i in 2:2:14
+        f[i] = clamp(f[i], 0.0f0, 1.0f0)
+    end
+    return f
+end
+
+"""
     decode_market_pulse(buf::Vector{UInt8}) -> MarketPulse
 
 Decode the 120-byte little-endian MarketPulse packet.
 Bytes [108..120] are reserved (not decoded into fields today).
+
+Rejects non-finite floats and non-positive prices; clamps asset vols to [0, 1].
+Hot path: one `Vector{Float32}` for the 25 field words (bulk reinterpret; no
+per-field byte slices).
 """
 function decode_market_pulse(buf::Vector{UInt8})
     length(buf) == 120 || error("Expected 120 bytes, got $(length(buf))")
 
     ts = reinterpret(UInt64, view(buf, 1:8))[1]
-    f = reinterpret(Float32, view(buf, 9:108))  # 25 Float32 values
+    # One allocation: collect 25 LE Float32 words from a view (no 25×4-byte temps).
+    # Length is enforced inside validate_market_pulse_fields! (wire is fixed 100 bytes → 25 f32).
+    f = collect(reinterpret(Float32, view(buf, 9:108)))
+    validate_market_pulse_fields!(f)
 
     return MarketPulse(
         ts,

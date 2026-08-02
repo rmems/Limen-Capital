@@ -4,57 +4,46 @@ This repository is **not** part of the Limen-Neural GitHub organization. It is a
 standalone research app that **consumes** Limen-Neural libraries (and local
 `brain/` / `math/` code).
 
-**Default layout for local path deps** (sibling directories):
+**Policy:** only **validated** Limen-Neural packages, as **`git` + `rev` pins**.
+No sibling path clones (`../Limen-Neural/...`) are required or supported as the
+default workflow.
 
-```text
-parent/
-  Limen-Capital/     ← this repo
-  Limen-Neural/      ← library checkouts (or set LIMEN_NEURAL)
-    metabolic-ledger/
-    corpus-ipc/
-    LiquidCortex.jl/
-    NeuroPulse.jl/   # package name: TemporalFocus
-    ...
-```
-
-Quality policy: prefer Limen-Neural packages that have tests + a clear API.
-Use **path** deps for multi-repo development on one machine. For a machine
-without siblings, switch to `git` + `rev` pins against public Limen-Neural URLs
-(see below) — still keeping **this** repo under your personal/org remote.
+Quality bar: tests + a clear package boundary + API stable enough for experimental use.
 
 ## Rust (`execution/Cargo.toml`)
 
-| Crate | Role | Local path | Status |
-|-------|------|------------|--------|
-| **metabolic-ledger** | Ghost wallet, ATP gates, JSONL | `$LIMEN_NEURAL/metabolic-ledger` | **Required** |
-| **corpus-ipc** | MarketPulse 120B, ReadoutPacket 88B | `$LIMEN_NEURAL/corpus-ipc` | **Required** |
-| kinetic-signals | Streaming Hawkes / surprise | optional feature `kinetic` | Optional |
-| neuromod | Reference LIF/STDP | optional feature `snn` | Optional |
-
-Cargo currently uses relative paths `../../Limen-Neural/...` from `execution/`.
-If your layout differs, set `LIMEN_NEURAL` and adjust paths or use `[patch]`.
-
-### Example git pins (when not using sibling trees)
+| Crate | Role | Pin (rev) | Status |
+|-------|------|-----------|--------|
+| **metabolic-ledger** | Ghost wallet, ATP gates, JSONL | `91822f842c13…` (2026-07-11) | **Required** |
+| kinetic-signals | Streaming Hawkes / surprise | `b00a35afe7d2…` | Optional feature `kinetic` |
+| neuromod | Reference LIF/STDP | `2a548da6006f…` | Optional feature `snn` |
+| corpus-ipc | Shared IPC models | — | **Not yet:** public main lacks MarketPulse/ReadoutPacket; Capital owns `execution/src/binary_wire.rs` |
 
 ```toml
-metabolic-ledger = { git = "https://github.com/Limen-Neural/metabolic-ledger", rev = "<pin>" }
-corpus-ipc = { git = "https://github.com/Limen-Neural/corpus-ipc", rev = "<pin>" }
+metabolic-ledger = { git = "https://github.com/Limen-Neural/metabolic-ledger", rev = "91822f842c13b0a2b5d8d7b75160933fab2459d6" }
 ```
+
+`cargo test` / `cargo build` will fetch these over the network on first resolve.
 
 ## Julia (`brain/Project.toml`)
 
-| Package | Role | Local path | Status |
-|---------|------|------------|--------|
-| **LiquidCortex** | Sparse CUDA LSM | `$LIMEN_NEURAL/LiquidCortex.jl` | Preferred |
-| **TemporalFocus** | Relevance routing | `$LIMEN_NEURAL/NeuroPulse.jl` | Preferred |
+Requires **Julia 1.12+** (`[compat] julia = "1.12"`). Pkg `[sources]` git pins need
+Julia ≥ 1.11; CI and local research target **1.12**.
+
+| Package | Role | Pin (rev) | Status |
+|---------|------|-----------|--------|
+| **LiquidCortex** | Sparse CUDA LSM | `4e2698cbbec9…` (2026-07-16) | Preferred |
+| **TemporalFocus** | Relevance routing (repo **NeuroPulse.jl**) | `40e39206ca59…` (2026-07-29) | Preferred |
 | CUDA / ZMQ / … | Runtime | registry | Required |
 
-**Naming note:** package `TemporalFocus` lives in the **NeuroPulse.jl** repo.
+```toml
+[sources]
+LiquidCortex = {url = "https://github.com/Limen-Neural/LiquidCortex.jl", rev = "4e2698cbbec98d8f6687eeb6c1570f588bb950d9"}
+TemporalFocus = {url = "https://github.com/Limen-Neural/NeuroPulse.jl", rev = "40e39206ca59f8d0fad0cd85e3b37520d7bfcedb"}
+```
 
-```julia
-# Path develop (local)
-pkg> develop $(ENV["LIMEN_NEURAL"])/LiquidCortex.jl
-pkg> develop $(ENV["LIMEN_NEURAL"])/NeuroPulse.jl
+```bash
+cd brain && julia --project=. -e 'using Pkg; Pkg.instantiate()'
 ```
 
 Fallback: `LIMEN_RESERVOIR=naut_core` uses in-tree `brain/naut_core.jl` without LiquidCortex.
@@ -63,20 +52,28 @@ Fallback: `LIMEN_RESERVOIR=naut_core` uses in-tree `brain/naut_core.jl` without 
 
 | Variable | Meaning | Default |
 |----------|---------|---------|
-| `LIMEN_NEURAL` | Root of library checkouts | `../Limen-Neural` relative to Capital |
 | `LIMEN_VAULT_DIR` | DuckDB vault directory | `data/vault` under Capital |
 | `LIMEN_IPC_SUB` | MarketPulse PUB endpoint | `tcp://127.0.0.1:5555` |
 | `LIMEN_IPC_PUB` | ReadoutPacket PUB endpoint | `tcp://127.0.0.1:5556` |
+| `LIMEN_JSON_IPC` | JSON TradeSignal IPC (`ipc://` + absolute path) | `$XDG_RUNTIME_DIR/limen-capital/signals.ipc` or `/tmp/limen-capital-$UID/signals.ipc` |
 | `LIMEN_RESERVOIR` | `auto` / `liquid_cortex` / `naut_core` | `auto` |
 | `LIMEN_AGG_MODE` | `relevance` / `static` / `blend` | `relevance` |
 | `LIMEN_MC_PATHS` | Monte Carlo paths (0 = off) | `0` |
 | `LIMEN_USE_REFLEX` | FastReflex preprocessor | `0` |
 | `LIMEN_WIRE` | `binary` / `json` on muscle | `binary` |
-| `LIMEN_CONFIDENCE_THRESHOLD` | Execution gate | `0.15` (main) |
+| `LIMEN_CONFIDENCE_THRESHOLD` | Execution gate | `0.15` (research default) |
 | `ZMQ_CURVE` | Enable CURVE (`1`) | `0` |
 | `ZMQ_SERVER_KEY` / `ZMQ_CLIENT_KEY` | CURVE material | empty (required if CURVE on) |
+
+See also **[docs/SECURITY.md](SECURITY.md)**.
+
+## Explicit non-deps
+
+Do not add path or git deps for silicon-*, brainstem-daemon, engram-parser,
+cortex-tensor, hybrid-fusion, thalamic-relay, or retired `spikenaut-*` crates
+unless quality-validated for a concrete Capital role.
 
 ## License note
 
 Limen-Capital is **MIT** (see root `LICENSE`). Limen-Neural libraries are typically
-MIT/Apache-2.0 — compatible with this project license.
+dual MIT/Apache-2.0 — check each package’s license file when redistributing.

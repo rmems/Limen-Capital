@@ -36,3 +36,9 @@ deps/
 
 # Local Codex Security bulk-scan artifacts (outside commit)
 security-scans/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+.beads/*.db
+.beads/**/*.db
+.beads-credential-key

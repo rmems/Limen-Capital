@@ -47,20 +47,100 @@ for d in execution brain math strategy proto; do
     fi
 done
 
-# Test 2: Limen-Neural quality deps
+# Test 2: Limen-Neural quality deps — require git URL + full 40-char rev pins (sibling optional)
 echo ""
 echo "Test 2: Limen-Neural dependencies..."
+# Portable full-SHA match (mawk lacks {40} interval quantifiers): exactly 40 hex chars.
+_HEX40='[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]'
+# Shared awk helper (one copy so Cargo + Julia gates cannot drift).
+# Strips `#` comments; left field boundary so "notgit"/"notrev" cannot match.
+_AWK_EXTRACT_QUOTED='
+function strip_comment(s,   h) {
+    h = index(s, "#")
+    if (h > 0) return substr(s, 1, h - 1)
+    return s
+}
+function extract_quoted(s, key,   re, rest, q, start) {
+    re = "(^|[^A-Za-z0-9_])" key "[[:space:]]*=[[:space:]]*\""
+    if (match(s, re)) {
+        start = RSTART + RLENGTH
+        rest = substr(s, start)
+        q = index(rest, "\"")
+        if (q > 0) return substr(rest, 1, q - 1)
+    }
+    return ""
+}
+'
+assert_cargo_git_rev() {
+    local crate="$1" expected_url="$2"
+    if awk -v crate="$crate" -v expected="$expected_url" -v hex40="$_HEX40" '
+'"$_AWK_EXTRACT_QUOTED"'
+        BEGIN { ok = 0; in_deps = 0 }
+        /^\[/ {
+            # Only accept pins under [dependencies] (not package metadata / other tables).
+            in_deps = ($0 ~ /^\[dependencies\]/)
+            next
+        }
+        in_deps && $0 ~ "^"crate"[[:space:]]*=" {
+            block = strip_comment($0)
+            while (block !~ /}/ && (getline line) > 0) {
+                block = block " " strip_comment(line)
+            }
+            gitv = extract_quoted(block, "git")
+            revv = extract_quoted(block, "rev")
+            if ((gitv == expected || gitv == expected ".git") &&
+                revv ~ ("^" hex40 "$")) {
+                ok = 1
+            }
+        }
+        END { exit(ok ? 0 : 1) }
+    ' "$ROOT/execution/Cargo.toml"; then
+        pass "$crate git+rev pin present"
+    else
+        fail "$crate missing exact git URL and/or full 40-char rev pin in execution/Cargo.toml"
+    fi
+}
+assert_julia_source_rev() {
+    local pkg="$1" expected_url="$2"
+    if awk -v pkg="$pkg" -v expected="$expected_url" -v hex40="$_HEX40" '
+'"$_AWK_EXTRACT_QUOTED"'
+        BEGIN { ok = 0; in_sources = 0 }
+        /^\[/ {
+            in_sources = ($0 ~ /^\[sources\]/)
+            next
+        }
+        in_sources && $0 ~ "^"pkg"[[:space:]]*=" {
+            line = strip_comment($0)
+            urlv = extract_quoted(line, "url")
+            revv = extract_quoted(line, "rev")
+            if ((urlv == expected || urlv == expected ".git") &&
+                revv ~ ("^" hex40 "$")) {
+                ok = 1
+            }
+        }
+        END { exit(ok ? 0 : 1) }
+    ' "$ROOT/brain/Project.toml"; then
+        pass "Julia $pkg [sources] url+rev pin present"
+    else
+        fail "Julia $pkg missing exact url and/or full 40-char rev in brain/Project.toml [sources]"
+    fi
+}
+assert_cargo_git_rev "metabolic-ledger" "https://github.com/Limen-Neural/metabolic-ledger"
+assert_cargo_git_rev "kinetic-signals" "https://github.com/Limen-Neural/kinetic-signals"
+assert_cargo_git_rev "neuromod" "https://github.com/Limen-Neural/neuromod"
+assert_julia_source_rev "LiquidCortex" "https://github.com/Limen-Neural/LiquidCortex.jl"
+assert_julia_source_rev "TemporalFocus" "https://github.com/Limen-Neural/NeuroPulse.jl"
 if [ -n "$LIMEN_NEURAL" ] && [ -d "$LIMEN_NEURAL" ]; then
-    pass "Limen-Neural root found"
+    pass "Optional Limen-Neural sibling found at $LIMEN_NEURAL"
     for lib in metabolic-ledger LiquidCortex.jl NeuroPulse.jl kinetic-signals; do
         if [ -d "$LIMEN_NEURAL/$lib" ]; then
-            pass "$lib present"
+            pass "sibling $lib present"
         else
-            fail "$lib missing under $LIMEN_NEURAL"
+            warn "sibling $lib missing under $LIMEN_NEURAL (ok if using git pins only)"
         fi
     done
 else
-    fail "Limen-Neural sibling not found (set LIMEN_NEURAL=...)"
+    warn "No Limen-Neural sibling (set LIMEN_NEURAL=... only if developing against local clones)"
 fi
 
 # Test 3: Cargo.toml uses metabolic-ledger
@@ -80,7 +160,7 @@ fi
 # Test 4: Rust compilation
 echo ""
 echo "Test 4: Rust compilation (cargo check)..."
-if (cd "$ROOT/execution" && cargo check --quiet 2>/tmp/limen_cargo_check.err); then
+if (cd "$ROOT/execution" && cargo check --locked --quiet 2>/tmp/limen_cargo_check.err); then
     pass "Rust execution engine compiles"
 else
     fail "Rust compilation failed (see /tmp/limen_cargo_check.err)"

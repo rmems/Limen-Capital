@@ -46,18 +46,19 @@ Published by `spike_helm.jl` → `publish_readout!`.
 
 | Path | Status |
 |------|--------|
-| JSON over `ipc:///tmp/spikenaut_signals.ipc` (`signal_broadcaster.jl` + older `main.rs`) | **Adapter only** — not the primary research contract. Side field is **lowercase** (`buy`/`sell`/`neutral`) if used. |
+| JSON over IPC (`signal_broadcaster.jl` + `LIMEN_WIRE=json`) | **Adapter only** — default `$XDG_RUNTIME_DIR/limen-capital/signals.ipc` or `/tmp/limen-capital-$UID/signals.ipc` (mode `0700`); override `LIMEN_JSON_IPC` (`ipc://` + absolute path, no `..`). Side field is **lowercase** (`buy`/`sell`/`neutral`). |
 | FlatBuffers `proto/signal.fbs` | Reserved for TradeSignal v2; not required for v1 binary path. |
 | corpus-ipc models | Future shared schema; extend when packets stabilize. |
 
 ## Mapping readout → TradeSignal (v1 — implemented)
 
-See `wire/README.md` and `corpus_ipc::readout_to_trade`:
+See `wire/README.md` and `execution/src/binary_wire.rs::readout_to_trade`:
 
 1. 16 floats = 8 × (bull, bear); assets DNX…Verus + Residual.
 2. `score_i = bull_i - bear_i`; primary = argmax |score|.
 3. `confidence = clamp(max(relevance) * tanh(‖score‖₂), 0, 1)`.
 4. Muscle: binary SUB on `LIMEN_IPC_PUB` → gates → **metabolic-ledger**.
 
-Shared types: Limen-Neural `corpus-ipc` (`MarketPulse`, `ReadoutPacket`).
+Shared types: Capital `execution/src/binary_wire.rs` (`MarketPulse`, `ReadoutPacket`);
+re-export for consumers when corpus-ipc publishes equivalent types.
 Golden fixtures: `wire/fixtures/*.bin`.

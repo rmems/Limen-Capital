@@ -13,6 +13,7 @@ use std::io::{BufRead, BufReader};
 use tracing::{info, warn};
 
 #[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)] // fields deserialized for future offline training features
 struct GhostTradeRecord {
     timestamp: String,
     step: u64,
@@ -41,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let log_path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "ghost_trades.jsonl".to_string());
-    
+
     let epochs = std::env::args()
         .nth(2)
         .and_then(|s| s.parse::<usize>().ok())
@@ -65,7 +66,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|t| compute_reward(t.realized_pnl_usdt))
         .collect();
 
-    info!("Reward stats: min={:.4}, max={:.4}, mean={:.4}",
+    info!(
+        "Reward stats: min={:.4}, max={:.4}, mean={:.4}",
         rewards.iter().cloned().fold(f32::INFINITY, f32::min),
         rewards.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
         rewards.iter().sum::<f32>() / rewards.len() as f32

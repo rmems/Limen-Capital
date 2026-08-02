@@ -45,26 +45,29 @@ impl KellyCriterion {
     ///   b = odds (payoff_ratio)
     ///
     /// # Returns
-    /// Kelly fraction (0.0 - 1.0+): how much of bankroll to risk
+    /// Kelly fraction in `0.0..=1.0` (invalid inputs fail closed to `0.0`).
     pub fn calculate_fraction(&self, win_probability: f32) -> f64 {
         let p = win_probability as f64;
-        let q = 1.0 - p;
         let b = self.expected_payoff_ratio;
 
+        // Fail closed on non-probability inputs and non-positive odds.
+        if !p.is_finite() || !(0.0..=1.0).contains(&p) || !b.is_finite() || b <= 0.0 {
+            return 0.0;
+        }
+
+        let q = 1.0 - p;
         // Kelly Formula: F = (p*b - q) / b
         let kelly_frac = (p * b - q) / b;
 
-        // Clamp to sensible bounds (never exceed 100% of bankroll)
-        kelly_frac.max(0.0).min(1.0)
+        if !kelly_frac.is_finite() {
+            return 0.0;
+        }
+
+        kelly_frac.clamp(0.0, 1.0)
     }
 
     /// Position size given Kelly fraction and account balance
-    pub fn position_size(
-        &self,
-        kelly_fraction: f64,
-        account_balance: f64,
-        price: f64,
-    ) -> f64 {
+    pub fn position_size(&self, kelly_fraction: f64, account_balance: f64, price: f64) -> f64 {
         // position_size = (kelly_fraction * account_balance) / price
         (kelly_fraction * account_balance) / price
     }
@@ -155,10 +158,10 @@ impl PositionSizer {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RiskTier {
-    Aggressive,  // 0.95+
-    Moderate,    // 0.85 - 0.94
+    Aggressive,   // 0.95+
+    Moderate,     // 0.85 - 0.94
     Conservative, // 0.70 - 0.84
-    Minimal,     // < 0.70
+    Minimal,      // < 0.70
 }
 
 #[derive(Debug, Clone)]
@@ -182,7 +185,10 @@ mod tests {
         // b=0.05 → breakeven p ≈ 0.952; p=0.98 yields positive fraction
         let kelly = KellyCriterion::new(0.05);
         let frac = kelly.calculate_fraction(0.98);
-        assert!(frac > 0.5, "high p with b=0.05 should be substantial: got {frac}");
+        assert!(
+            frac > 0.5,
+            "high p with b=0.05 should be substantial: got {frac}"
+        );
     }
 
     #[test]
@@ -223,5 +229,20 @@ mod tests {
         let mut sizer = PositionSizer::new(100.0, 0.05, 0.25);
         sizer.set_account_balance(500.0);
         assert_eq!(sizer.account_balance(), 500.0);
+    }
+
+    #[test]
+    fn test_kelly_rejects_negative_payoff_ratio() {
+        // Without validation, b=-1 and p=0.5 clamped to max (1.0); must fail closed.
+        let kelly = KellyCriterion::new(-1.0);
+        assert_eq!(kelly.calculate_fraction(0.5), 0.0);
+    }
+
+    #[test]
+    fn test_kelly_rejects_out_of_range_probability() {
+        let kelly = KellyCriterion::new(0.05);
+        assert_eq!(kelly.calculate_fraction(-0.1), 0.0);
+        assert_eq!(kelly.calculate_fraction(1.5), 0.0);
+        assert_eq!(kelly.calculate_fraction(f32::NAN), 0.0);
     }
 }

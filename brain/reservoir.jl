@@ -15,26 +15,13 @@ if !@isdefined(hft_inhibition)
     include(joinpath(@__DIR__, "hft_inhibition.jl"))
 end
 
-const _LIMEN_NEURAL = get(ENV, "LIMEN_NEURAL",
-    abspath(joinpath(@__DIR__, "..", "..", "Limen-Neural")))
-
+# LiquidCortex resolves via brain/Project.toml [sources] (git+rev). No path clones.
 function _try_load_liquid_cortex()::Bool
     try
         @eval Main using LiquidCortex
         return true
-    catch
-        lc = joinpath(_LIMEN_NEURAL, "LiquidCortex.jl")
-        if isdir(lc)
-            try
-                if !(lc in LOAD_PATH)
-                    push!(LOAD_PATH, lc)
-                end
-                @eval Main using LiquidCortex
-                return true
-            catch e
-                @warn "LiquidCortex path present but failed to load" exception = e
-            end
-        end
+    catch e
+        @debug "LiquidCortex not available via Pkg; using naut_core fallback" exception = e
         return false
     end
 end

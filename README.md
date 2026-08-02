@@ -7,23 +7,20 @@ This repo is a **standalone application** (your personal/org remote). It is **no
 published under the Limen-Neural GitHub organization. It *depends on* Limen-Neural
 libraries when you want the shared packages; in-tree `naut_core` works without them.
 
-## Dependencies (sibling layout)
+## Dependencies (git pins only)
 
-```text
-parent/
-  Limen-Capital/     # this repository
-  Limen-Neural/      # library checkouts (metabolic-ledger, corpus-ipc, …)
-```
+Validated **Limen-Neural** packages are pulled by **`git` + `rev`** (Cargo / Julia
+`[sources]`). No sibling `Limen-Neural/` checkout is required.
 
 | Package | Role |
 |---------|------|
-| **corpus-ipc** | Binary wire (MarketPulse / ReadoutPacket) |
-| **metabolic-ledger** | Ghost wallet, ATP gates, JSONL |
+| **metabolic-ledger** | Ghost wallet, ATP gates, JSONL (git pin) |
 | **LiquidCortex.jl** | Preferred CUDA LSM (optional; else `naut_core`) |
 | **TemporalFocus** (NeuroPulse.jl) | Optional relevance package |
+| **binary_wire** (in-tree) | MarketPulse 120B / ReadoutPacket 88B until corpus-ipc publishes them |
 
-Override root with `LIMEN_NEURAL`. See **[docs/deps.md](docs/deps.md)** and
-**[docs/wire-protocol-v1.md](docs/wire-protocol-v1.md)**.
+See **[docs/deps.md](docs/deps.md)**, **[docs/wire-protocol-v1.md](docs/wire-protocol-v1.md)**,
+and **[docs/SECURITY.md](docs/SECURITY.md)**.
 
 ## Architecture
 
@@ -65,16 +62,16 @@ Limen-Capital/
 
 ### Prerequisites
 
-- Julia 1.10+, Rust stable
+- Julia **1.12+** (Pkg `[sources]` pins; CI uses 1.12), Rust **stable** (latest), network for first-time git deps
 - Optional: NVIDIA GPU for full EnsembleBrain / research runs
-- Optional: sibling `../Limen-Neural` (or `LIMEN_NEURAL`) for path deps
 
 ### 1. Structure + unit tests
 
 ```bash
 ./test_integration.sh
-cd execution && cargo test
-cd ../brain && julia --project=. test/runtests.jl
+cd execution && cargo test          # fetches metabolic-ledger (+ optional feature deps)
+cd ../brain && julia --project=. -e 'using Pkg; Pkg.instantiate()'
+julia --project=. test/runtests.jl
 # or: ./scripts/smoke_wire_local.sh
 ```
 
@@ -182,13 +179,10 @@ Optional Limen-Neural dependencies are typically MIT/Apache-2.0 as well.
 - [x] Reservoir façade + causal NERO + FeatureStream (Hawkes)
 - [x] ExperimentRunner metrics artifacts
 - [x] Decision path: fractional Kelly + metabolic-ledger
-- [ ] Optional: git rev pins when publishing without sibling trees
+- [x] Git rev pins for validated Limen-Neural deps (no sibling clones)
 - [ ] Replace JSON serialization with FlatBuffers (proto/signal.fbs)
 - [ ] Add WebSocket streaming for dydx (replace REST polling)
 - [ ] Fix CUDA RNG (remove host-side random number generation)
 - [ ] Implement stop-loss and risk management gates in Rust
 - [ ] Backtest framework with historical data
 
-## License
-
-GPL-3.0

@@ -12,7 +12,7 @@ Use before creating/updating a **personal** GitHub remote (e.g. `rmems/...`).
 - [x] `quantum_navigator.jl` removed
 - [x] README states this is **not** the Limen-Neural org
 - [ ] Remote URL is **your** user/org — not `github.com/Limen-Neural/...`
-- [ ] Limen-Neural libraries remain separate checkouts (or git deps)
+- [x] Limen-Neural deps are **git+rev** only (no sibling path clones required)
 - [ ] `git status` clean of secrets, runs, jsonl
 - [ ] Local: `cargo test` + `julia --project=brain test/runtests.jl`
 
@@ -20,15 +20,13 @@ Use before creating/updating a **personal** GitHub remote (e.g. `rmems/...`).
 
 Source + docs + fixtures + lockfile; no `target/`, no agent tooling, no vault DBs.
 
-## Clone layout for collaborators
+## Clone for collaborators
 
 ```text
 git clone <your-remote> Limen-Capital
-# optional libraries (public Limen-Neural repos or your mirrors):
-git clone https://github.com/Limen-Neural/metabolic-ledger Limen-Neural/metabolic-ledger
-git clone https://github.com/Limen-Neural/corpus-ipc Limen-Neural/corpus-ipc
-# …
-export LIMEN_NEURAL=$PWD/Limen-Neural
+cd Limen-Capital/execution && cargo test   # fetches validated LN crates by rev
+cd ../brain && julia --project=. -e 'using Pkg; Pkg.instantiate()'
+julia --project=. test/runtests.jl
 ```
 
-Path deps in Cargo/Project.toml assume `Limen-Neural` next to `Limen-Capital` by default.
+Pins and package list: **[docs/deps.md](deps.md)**. No `Limen-Neural/` sibling tree required.
