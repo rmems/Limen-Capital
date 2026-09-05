@@ -129,7 +129,7 @@ assert_cargo_git_rev "metabolic-ledger" "https://github.com/Limen-Neural/metabol
 assert_cargo_git_rev "kinetic-signals" "https://github.com/Limen-Neural/kinetic-signals"
 assert_cargo_git_rev "neuromod" "https://github.com/Limen-Neural/neuromod"
 assert_julia_source_rev "LiquidCortex" "https://github.com/Limen-Neural/LiquidCortex.jl"
-assert_julia_source_rev "TemporalFocus" "https://github.com/Limen-Neural/NeuroPulse.jl"
+assert_julia_source_rev "TemporalFocus" "https://github.com/rmems/NeuroPulse.jl"
 if [ -n "$LIMEN_NEURAL" ] && [ -d "$LIMEN_NEURAL" ]; then
     pass "Optional Limen-Neural sibling found at $LIMEN_NEURAL"
     for lib in metabolic-ledger LiquidCortex.jl NeuroPulse.jl kinetic-signals; do

@@ -33,13 +33,13 @@ Julia ≥ 1.11; CI and local research target **1.12**.
 | Package | Role | Pin (rev) | Status |
 |---------|------|-----------|--------|
 | **LiquidCortex** | Sparse CUDA LSM | `4e2698cbbec9…` (2026-07-16) | Preferred |
-| **TemporalFocus** | Relevance routing (repo **NeuroPulse.jl**) | `40e39206ca59…` (2026-07-29) | Preferred |
+| **TemporalFocus** | Relevance routing (repo **NeuroPulse.jl**) | `ac4aa2ca4c28…` (2026-09-05) | Preferred |
 | CUDA / ZMQ / … | Runtime | registry | Required |
 
 ```toml
 [sources]
 LiquidCortex = {url = "https://github.com/Limen-Neural/LiquidCortex.jl", rev = "4e2698cbbec98d8f6687eeb6c1570f588bb950d9"}
-TemporalFocus = {url = "https://github.com/Limen-Neural/NeuroPulse.jl", rev = "40e39206ca59f8d0fad0cd85e3b37520d7bfcedb"}
+TemporalFocus = {url = "https://github.com/rmems/NeuroPulse.jl", rev = "ac4aa2ca4c28e63b7a9d2980f5d27348629476b3"}
 ```
 
 ```bash
