@@ -8,12 +8,13 @@ description = "Limen-Capital Rust muscle — ZMQ signal consumer, gates, metabol
 license = "MIT"
 
 [dependencies]
-# Limen-Neural (validated, git+rev only — no sibling path clones)
-metabolic-ledger = { git = "https://github.com/Limen-Neural/metabolic-ledger", rev = "91822f842c13b0a2b5d8d7b75160933fab2459d6" }
+# Validated git+rev library pins — no sibling path clones
+metabolic-ledger = { git = "https://github.com/rmems/metabolic-ledger", rev = "91822f842c13b0a2b5d8d7b75160933fab2459d6" }
 # MarketPulse/ReadoutPacket: in-tree `src/binary_wire.rs` until corpus-ipc publishes them.
 
-# Optional Limen-Neural packages (enable via features)
-kinetic-signals = { git = "https://github.com/Limen-Neural/kinetic-signals", rev = "b00a35afe7d26b24af5b82684c795ed9745f6138", optional = true }
+# Optional validated packages (enable via features)
+kinetic-signals = { git = "https://github.com/rmems/kinetic-signals", rev = "ccc883107e6763969179f036ac33ae22dffdc865", optional = true }
+# neuromod has no rmems transfer; still hosted at Limen-Neural
 neuromod = { git = "https://github.com/Limen-Neural/neuromod", rev = "2a548da6006fedb732b07491b69023476b0cc339", optional = true }
 
 # ZMQ bridge for Julia → Rust signal flow
@@ -41,7 +42,7 @@ bytes = "1.5"
 
 [features]
 default = []
-# Streaming Hawkes / surprise features from Limen-Neural
+# Streaming Hawkes / surprise features from kinetic-signals
 kinetic = ["dep:kinetic-signals"]
 # Reference LIF primitives (research helpers)
 snn = ["dep:neuromod"]
