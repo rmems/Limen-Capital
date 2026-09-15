@@ -663,7 +663,7 @@ dependencies = [
 [[package]]
 name = "kinetic-signals"
 version = "0.4.0"
-source = "git+https://github.com/Limen-Neural/kinetic-signals?rev=b00a35afe7d26b24af5b82684c795ed9745f6138#b00a35afe7d26b24af5b82684c795ed9745f6138"
+source = "git+https://github.com/rmems/kinetic-signals?rev=ccc883107e6763969179f036ac33ae22dffdc865#ccc883107e6763969179f036ac33ae22dffdc865"
 
 [[package]]
 name = "lazy_static"
@@ -719,7 +719,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 [[package]]
 name = "metabolic-ledger"
 version = "0.1.0"
-source = "git+https://github.com/Limen-Neural/metabolic-ledger?rev=91822f842c13b0a2b5d8d7b75160933fab2459d6#91822f842c13b0a2b5d8d7b75160933fab2459d6"
+source = "git+https://github.com/rmems/metabolic-ledger?rev=91822f842c13b0a2b5d8d7b75160933fab2459d6#91822f842c13b0a2b5d8d7b75160933fab2459d6"
 dependencies = [
  "chrono",
  "serde",

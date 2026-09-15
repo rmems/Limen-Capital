@@ -47,9 +47,9 @@ for d in execution brain math strategy proto; do
     fi
 done
 
-# Test 2: Limen-Neural quality deps — require git URL + full 40-char rev pins (sibling optional)
+# Test 2: validated git+rev pins — require git URL + full 40-char rev (sibling optional)
 echo ""
-echo "Test 2: Limen-Neural dependencies..."
+echo "Test 2: validated git+rev library pins..."
 # Portable full-SHA match (mawk lacks {40} interval quantifiers): exactly 40 hex chars.
 _HEX40='[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]'
 # Shared awk helper (one copy so Cargo + Julia gates cannot drift).
@@ -125,11 +125,11 @@ assert_julia_source_rev() {
         fail "Julia $pkg missing exact url and/or full 40-char rev in brain/Project.toml [sources]"
     fi
 }
-assert_cargo_git_rev "metabolic-ledger" "https://github.com/Limen-Neural/metabolic-ledger"
-assert_cargo_git_rev "kinetic-signals" "https://github.com/Limen-Neural/kinetic-signals"
+assert_cargo_git_rev "metabolic-ledger" "https://github.com/rmems/metabolic-ledger"
+assert_cargo_git_rev "kinetic-signals" "https://github.com/rmems/kinetic-signals"
 assert_cargo_git_rev "neuromod" "https://github.com/Limen-Neural/neuromod"
-assert_julia_source_rev "LiquidCortex" "https://github.com/Limen-Neural/LiquidCortex.jl"
-assert_julia_source_rev "TemporalFocus" "https://github.com/Limen-Neural/NeuroPulse.jl"
+assert_julia_source_rev "LiquidCortex" "https://github.com/rmems/LiquidCortex.jl"
+assert_julia_source_rev "TemporalFocus" "https://github.com/rmems/NeuroPulse.jl"
 if [ -n "$LIMEN_NEURAL" ] && [ -d "$LIMEN_NEURAL" ]; then
     pass "Optional Limen-Neural sibling found at $LIMEN_NEURAL"
     for lib in metabolic-ledger LiquidCortex.jl NeuroPulse.jl kinetic-signals; do
@@ -145,7 +145,7 @@ fi
 
 # Test 3: Cargo.toml uses metabolic-ledger
 echo ""
-echo "Test 3: Cargo.toml Limen-Neural wiring..."
+echo "Test 3: Cargo.toml library pin wiring..."
 if grep -q 'metabolic-ledger' "$ROOT/execution/Cargo.toml"; then
     pass "metabolic-ledger dependency configured"
 else

@@ -4,12 +4,13 @@ Hybrid research stack: **Julia neuromorphic strategy** + **Rust deterministic ex
 Built for experimental spiking / liquid-state market research — **not live capital**.
 
 This repo is a **standalone application** (your personal/org remote). It is **not**
-published under the Limen-Neural GitHub organization. It *depends on* Limen-Neural
-libraries when you want the shared packages; in-tree `naut_core` works without them.
+published under the Limen-Neural GitHub organization. It *depends on* validated
+git+rev library pins (most now under `rmems/`; `neuromod` remains on Limen-Neural);
+in-tree `naut_core` works without them.
 
 ## Dependencies (git pins only)
 
-Validated **Limen-Neural** packages are pulled by **`git` + `rev`** (Cargo / Julia
+Validated packages are pulled by **`git` + `rev`** (Cargo / Julia
 `[sources]`). No sibling `Limen-Neural/` checkout is required.
 
 | Package | Role |
@@ -179,7 +180,7 @@ Optional Limen-Neural dependencies are typically MIT/Apache-2.0 as well.
 - [x] Reservoir façade + causal NERO + FeatureStream (Hawkes)
 - [x] ExperimentRunner metrics artifacts
 - [x] Decision path: fractional Kelly + metabolic-ledger
-- [x] Git rev pins for validated Limen-Neural deps (no sibling clones)
+- [x] Git rev pins for validated library deps (no sibling clones)
 - [ ] Replace JSON serialization with FlatBuffers (proto/signal.fbs)
 - [ ] Add WebSocket streaming for dydx (replace REST polling)
 - [ ] Fix CUDA RNG (remove host-side random number generation)
