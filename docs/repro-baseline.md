@@ -46,3 +46,9 @@ removes or gates them.
   `hft_inhibition` (`brain/experiment_runner.jl:104`,
   `brain/spike_helm.jl:254-256`), so telemetry affects decisions today.
   Fix deferred to the integration issue.
+- **M-7**: Audit-ID contract not yet implemented — the `run_id`
+  assignment (`brain/metrics.jl:259-260`) uses local `Dates.now()` +
+  `-s<seed>` with no random suffix (same-second collisions share an
+  artifact dir), and
+  `decision_id`/`fill_id` are not carried through execution/ledger paths.
+  Required by ADR 0001; enforcement lands with the integration issue.

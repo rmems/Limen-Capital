@@ -53,9 +53,15 @@ This ADR fixes the ownership contract before any dependency integration.
 
 ## Identifiers, units, clocks
 
-- `run_id`: UTC timestamp + random suffix (`runs/<run_id>/` convention in
-  `ExperimentRunner`); `decision_id` and `fill_id` monotonically increasing
-  integers per run, carried through the JSONL audit trail.
+- Identifiers by contract: `run_id` must be a unique UTC timestamp +
+  random suffix (`runs/<run_id>/` convention); `decision_id` and `fill_id`
+  monotonically increasing integers per run, carried through the JSONL
+  audit trail. **Current violation:** the `run_id` assignment
+  (`brain/metrics.jl`) builds it from local `Dates.now()` + `-s<seed>`
+  (no random suffix — two same-second runs share an artifact dir), and
+  execution/ledger paths do not carry `decision_id`/`fill_id` today.
+  Recorded as mismatch M-7;
+  enforcement lands with the integration issue.
 - Assets: venue-native symbols (`BTC-USD` form). Canonical replay types use
   **integer ticks** for price and integer units for size (DendriteTrader
   `Market` convention); float quantities are allowed only at the proposal
