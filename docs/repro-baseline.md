@@ -13,8 +13,8 @@ Recorded 2026-09-28 on a fresh checkout of `rmems/Limen-Capital`
 | Check | Command | Result |
 |---|---|---|
 | Rust fmt | `cd execution && cargo fmt --all -- --check` | **pass** |
-| Rust clippy | `cargo clippy --all-targets --all-features --locked -- -D warnings` | **pass** |
-| Rust unit tests | `cargo test --locked` | **pass** — 26 passed, 0 failed, 1 ignored |
+| Rust clippy | `cd execution && cargo clippy --all-targets --all-features --locked -- -D warnings` | **pass** |
+| Rust unit tests | `cd execution && cargo test --locked` | **pass** — 26 passed, 0 failed, 1 ignored |
 | Julia brain unit tests (CPU) | `cd brain && LIMEN_RESERVOIR=naut_core julia --project=. test/runtests.jl` | **pass** — all suites green; TemporalFocus optional probe skipped by design |
 | Structure gate | `./test_integration.sh` | **pass** — 25 passed, 0 failed |
 | Wire smoke | `LIMEN_RESERVOIR=naut_core ./scripts/smoke_wire_local.sh` | **pass** — fixtures verified; corpus-ipc sibling check **skipped** (no `../Limen-Neural` checkout, expected) |
