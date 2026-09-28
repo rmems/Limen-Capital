@@ -41,3 +41,8 @@ removes or gates them.
   (`gpu_temp_c`/`gpu_power_w`/`gpu_util_pct`/`basys_buffer_load`, bytes
   84–99); telemetry must not feed market features in research runs
   (ADR 0001).
+- **M-6**: Current integrated path violates that separation —
+  `reservoir_step!` feeds `gpu_temp_c`/`basys_buffer_load` to
+  `hft_inhibition` (`brain/experiment_runner.jl:104`,
+  `brain/spike_helm.jl:254-256`), so telemetry affects decisions today.
+  Fix deferred to the integration issue.
