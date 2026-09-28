@@ -68,9 +68,10 @@ This ADR fixes the ownership contract before any dependency integration.
   (gate output), `event_ts` (fill application). `latency_ns` measures
   decision−observed. Do not mix clocks in ordering keys.
 - Market features and hardware telemetry are separate streams by default;
-  the current MarketPulse fields at bytes 80–100 (GPU temp/power/util, FPGA
-  buffer load) are telemetry and must not feed market features in research
-  runs.
+  the MarketPulse hardware fields — `gpu_temp_c`, `gpu_power_w`,
+  `gpu_util_pct`, `basys_buffer_load` (bytes 84–99) — are telemetry and must
+  not feed market features in research runs. `l3_order_imbalance` (bytes
+  80–83) and the dYdX fields (bytes 100–107) are market signals.
 
 ## Initial supported instrument/position subset
 

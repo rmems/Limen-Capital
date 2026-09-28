@@ -38,5 +38,6 @@ removes or gates them.
 - **M-4**: `spikenaut-execution-engine` crate name predates the rebrand —
   tracked by Limen-Capital #7, not this issue.
 - **M-5**: MarketPulse mixes market features and hardware telemetry
-  (bytes 80–100); telemetry must not feed market features in research runs
+  (`gpu_temp_c`/`gpu_power_w`/`gpu_util_pct`/`basys_buffer_load`, bytes
+  84–99); telemetry must not feed market features in research runs
   (ADR 0001).
