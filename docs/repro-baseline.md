@@ -18,7 +18,7 @@ Recorded 2026-09-28 on a fresh checkout of `rmems/Limen-Capital`
 | Julia brain unit tests (CPU) | `cd brain && LIMEN_RESERVOIR=naut_core julia --project=. test/runtests.jl` | **pass** — all suites green; TemporalFocus optional probe skipped by design |
 | Structure gate | `./test_integration.sh` | **pass** — 25 passed, 0 failed |
 | Wire smoke | `LIMEN_RESERVOIR=naut_core ./scripts/smoke_wire_local.sh` | **pass** — fixtures verified; corpus-ipc sibling check **skipped** (no `../Limen-Neural` checkout, expected) |
-| DendriteTrader suite | `cd DendriteTrader.jl && julia --project=. -e 'using Pkg; Pkg.test()'` @ `07e0d29` | **pass** — all suites green; dYdX v4 integration **skipped** (`DYDX_INTEGRATION` unset) |
+| DendriteTrader suite | `git clone https://github.com/rmems/DendriteTrader.jl && cd DendriteTrader.jl && git checkout 07e0d29 && julia --project=. -e 'using Pkg; Pkg.test()'` | **pass** — all suites green; dYdX v4 integration **skipped** (`DYDX_INTEGRATION` unset) |
 
 Not run (documented skips): GPU EnsembleBrain health check
 (`brain/test_brain.jl`, needs NVIDIA GPU), live ZMQ E2E helm, FlatBuffers
