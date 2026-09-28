@@ -34,12 +34,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust 1.97.1 (MSRV / latest stable pin)
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable (1.97.1+)
+      - name: Install Rust 1.98.1 (MSRV / latest stable pin)
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
         with:
-          # Pin exact version so CI verifies declared rust-version = "1.97"
+          # Pin exact version so CI verifies declared rust-version = "1.98"
           # rather than a floating `stable` channel.
-          toolchain: 1.97.1
+          toolchain: 1.98.1
           components: rustfmt, clippy
 
       - name: Cache Cargo + target
@@ -68,7 +68,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        julia-version: ['1.12']
+        julia-version: ['1.13']
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -103,10 +103,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust 1.97.1
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable (1.97.1+)
+      - name: Install Rust 1.98.1
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.1
 
       - name: Cache Cargo + target
         uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
