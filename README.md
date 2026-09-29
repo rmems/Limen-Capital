@@ -124,7 +124,7 @@ julia --project=. spike_helm.jl
 ```
 [0..8]    timestamp_ns (UInt64)
 [8..64]   7 assets × (price f32, vol f32) = DNX,Quai,Qubic,Kaspa,XMR,Ocean,Verus
-[64..80]  funding_rate, liquidation_vol, liquidity_delta, order_imbalance
+[64..80]  confidence_signal, funding_rate, liquidation_vol, liquidity_delta
 [80..84]  l3_order_imbalance (market signal)
 [84..100] GPU temp/power/util, Basys buffer load (hardware telemetry)
 [100..120] dydx OI delta, dydx funding rate, Qubic fields (108–120 reserved)

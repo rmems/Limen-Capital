@@ -105,7 +105,7 @@ This ADR fixes the ownership contract before any dependency integration.
 | `rmems/NeuroPulse.jl` (TemporalFocus) | `ac4aa2ca4c28e63b7a9d2980f5d27348629476b3` (`[sources]` pin, optional) |
 | `rmems/kinetic-signals` | `ccc883107e6763969179f036ac33ae22dffdc865` (optional feature `kinetic`) |
 | `Limen-Neural/neuromod` | `2a548da6006fedb732b07491b69023476b0cc339` (optional feature `snn`) |
-| Julia | 1.13.1 (`[compat] julia = "1.12, 1.13"`; DendriteTrader floor 1.10, CI 1.13) |
+| Julia | 1.13.1 (`[compat] julia = "~1.12, ~1.13"`; DendriteTrader floor 1.10, CI 1.13) |
 | Rust | 1.98.1 (execution `rust-version = "1.98"`, CI pin) |
 | Lockfiles | `execution/Cargo.lock` committed; Julia `Manifest.toml` **not** committed — `[sources]` revs above are the pins of record |
 
