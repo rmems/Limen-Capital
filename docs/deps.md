@@ -30,8 +30,8 @@ neuromod = { git = "https://github.com/Limen-Neural/neuromod", rev = "2a548da600
 
 ## Julia (`brain/Project.toml`)
 
-Requires **Julia 1.12+** (`[compat] julia = "1.12"`). Pkg `[sources]` git pins need
-Julia ≥ 1.11; CI and local research target **1.12**.
+Requires **Julia 1.12 or 1.13** (`[compat] julia = "~1.12, ~1.13"`). Pkg `[sources]` git
+pins need Julia ≥ 1.11; CI and local research target **1.13** (latest stable).
 
 | Package | Role | Pin (rev) | Status |
 |---------|------|-----------|--------|

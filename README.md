@@ -21,7 +21,9 @@ Validated packages are pulled by **`git` + `rev`** (Cargo / Julia
 | **binary_wire** (in-tree) | MarketPulse 120B / ReadoutPacket 88B until corpus-ipc publishes them |
 
 See **[docs/deps.md](docs/deps.md)**, **[docs/wire-protocol-v1.md](docs/wire-protocol-v1.md)**,
-and **[docs/SECURITY.md](docs/SECURITY.md)**.
+**[docs/SECURITY.md](docs/SECURITY.md)**, the ownership contract in
+**[docs/adr/0001-strategy-layer-ownership.md](docs/adr/0001-strategy-layer-ownership.md)**,
+and the CPU baseline in **[docs/repro-baseline.md](docs/repro-baseline.md)**.
 
 ## Architecture
 
@@ -63,7 +65,7 @@ Limen-Capital/
 
 ### Prerequisites
 
-- Julia **1.12+** (Pkg `[sources]` pins; CI uses 1.12), Rust **stable** (latest), network for first-time git deps
+- Julia **1.13** (Pkg `[sources]` pins; CI uses latest stable 1.13), Rust **1.98+** (CI pins 1.98.1), network for first-time git deps
 - Optional: NVIDIA GPU for full EnsembleBrain / research runs
 
 ### 1. Structure + unit tests
@@ -122,9 +124,10 @@ julia --project=. spike_helm.jl
 ```
 [0..8]    timestamp_ns (UInt64)
 [8..64]   7 assets × (price f32, vol f32) = DNX,Quai,Qubic,Kaspa,XMR,Ocean,Verus
-[64..80]  funding_rate, liquidation_vol, liquidity_delta, order_imbalance
-[80..100] GPU temp/power/util, FPGA buffer load
-[100..120] dydx OI delta, dydx funding rate, Qubic fields
+[64..80]  confidence_signal, funding_rate, liquidation_vol, liquidity_delta
+[80..84]  l3_order_imbalance (market signal)
+[84..100] GPU temp/power/util, Basys buffer load (hardware telemetry)
+[100..120] dydx OI delta, dydx funding rate, Qubic fields (108–120 reserved)
 ```
 
 ### Output: 88-byte readout (Julia → Rust)
