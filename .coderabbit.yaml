@@ -1,0 +1,39 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# Draft CodeRabbit config for rmems/Limen-Capital (generated locally, not pushed).
+language: en-US
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  fail_commit_status: false
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+  - '!**/target/**'
+  - '!.beads/**/*.jsonl'
+  path_instructions:
+  - path: execution/**/*.rs
+    instructions: 'Rust edition 2021 (this crate is not on 2024); `rust-version = "1.98"`; CI toolchain 1.98.1. Do not suggest downgrading the edition or using std/language APIs newer than the pinned toolchain/MSRV. CI gate: (run in `execution/`) `cargo clippy --all-targets --all-features --locked -- -D warnings`, `cargo test --locked`. Flag anything that would fail `cargo fmt --check` or clippy `-D warnings`. Features `kinetic` and `snn` are optional and must stay behind cfg gates.'
+  - path: execution/src/wire.rs
+    instructions: 'Scrutinize every `unsafe` block (currently in `execution/src/wire.rs`): require a written safety justification covering aliasing, lifetimes, alignment and bounds; prefer a safe abstraction when one exists. Flag any new `unsafe` outside these files. The binary wire format is pinned by `wire/fixtures/*.bin` and `proto/`; layout changes need matching fixture and schema updates.'
+  - path: '{brain,math,strategy,test}/**/*.jl'
+    instructions: 'Julia package code. `[compat] julia = "~1.12, ~1.13 (brain)"`; CI runs Julia 1.13 ("brain CPU" job). Do not use Base/stdlib APIs newer than the compat floor without raising it. Review for type stability in hot paths (concrete struct field types, no abstractly typed containers, no non-`const` globals, no `Any`-returning branches), avoidable allocations in inner loops, and changes to exported API. CUDA.jl is a dependency but CI only runs the CPU job: GPU code must be guarded by `CUDA.functional()` so `julia --project=. test/runtests.jl` passes without a GPU.'
+  - path: '**/Project.toml'
+    instructions: Julia Project.toml. New `[deps]` entries should get a `[compat]` bound; flag widened or dropped bounds and any UUID change (UUIDs are immutable once registered).
+  - path: '**/*.sh'
+    instructions: Shell scripts. Must pass shellcheck; quote expansions and never echo secrets or tokens. `test_integration.sh` is part of the local gate.
+  - path: .github/workflows/**
+    instructions: GitHub Actions workflows. Keep `permissions:` least-privilege and job commands in sync with the local gates documented in the repo. Every `uses:` is pinned to a full commit SHA today; new or bumped actions must be too.
+  tools:
+    clippy:
+      enabled: true
+    shellcheck:
+      enabled: true
+    actionlint:
+      enabled: true
+    yamllint:
+      enabled: true
+    markdownlint:
+      enabled: true
+    biome:
+      enabled: false
