@@ -42,8 +42,11 @@ apt_install() {
 apt_install build-essential pkg-config libssl-dev curl ca-certificates
 
 # --- Rust (rustup) ---
+# Toolchains install under $HOME; Cursor snapshots the build user's home, and we also
+# symlink entry points into /usr/local/bin (absolute targets) for non-login shells.
 export PATH="$HOME/.cargo/bin:$PATH"
 if ! command -v rustup >/dev/null 2>&1; then
+  # Official bootstrap (https://rustup.rs); HTTPS only, no upstream-published checksum to pin.
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
     sh -s -- -y --default-toolchain none --profile minimal
 fi
@@ -56,9 +59,10 @@ rustup default 1.98.1
 JULIA_CHANNEL="1.13"
 export PATH="$HOME/.juliaup/bin:$PATH"
 if ! command -v juliaup >/dev/null 2>&1; then
+  # Official bootstrap (https://julialang.org/downloads/); HTTPS only, no upstream-published checksum to pin.
   curl -fsSL https://install.julialang.org | sh -s -- --yes --default-channel "$JULIA_CHANNEL"
 fi
-if ! juliaup status | awk -v ch="$JULIA_CHANNEL" '{for (i = 1; i <= NF; i++) if ($i == ch) found = 1} END {exit !found}'; then
+if ! juliaup list | awk -v ch="$JULIA_CHANNEL" '$1 == ch {found = 1} END {exit !found}'; then
   juliaup add "$JULIA_CHANNEL"
 fi
 juliaup default "$JULIA_CHANNEL"
@@ -66,7 +70,9 @@ juliaup default "$JULIA_CHANNEL"
 # heavy and the CPU unit tests only need Test + Random), so this script does too.
 
 # --- Prefetch crates (no build, no tests) ---
-cargo fetch --locked --manifest-path execution/Cargo.toml
+if [ -f execution/Cargo.toml ]; then
+  cargo fetch --locked --manifest-path execution/Cargo.toml
+fi
 
 # --- Expose the tools to later shells ---
 # The PATH exports above last only for this script; Cursor starts the agent's shells
@@ -79,6 +85,7 @@ printf 'export PATH="%s:$PATH"\n' "$(IFS=:; echo "${tool_dirs[*]}")" |
 for dir in "${tool_dirs[@]}"; do
   [ -d "$dir" ] || continue
   for tool in "$dir"/*; do
+    [ -e "$tool" ] || continue
     name="${tool##*/}"
     case "$name" in
       python* | pip* | activate* | deactivate | Activate.ps1) continue ;;
