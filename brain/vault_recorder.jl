@@ -142,8 +142,11 @@ end
 """
 function close_vault!(vr::VaultRecorder)
     flush_vault!(vr)
-    DuckDB.disconnect(vr.con)
-    # DuckDB.close(vr.db) # Close DB when completely done
+    # DuckDB.jl 2.x exposes teardown through DBInterface.close! (there is no
+    # DuckDB.disconnect / DuckDB.close). Close the connection, then the DB
+    # handle so the WAL is flushed and the file handle released.
+    DBInterface.close!(vr.con)
+    DBInterface.close!(vr.db)
     println("[vault] Spikenaut-Vault closed gracefully.")
 end
 
