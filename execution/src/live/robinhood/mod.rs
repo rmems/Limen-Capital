@@ -318,7 +318,7 @@ impl RobinhoodClient {
     // Read-only endpoints
     // ----------------------------------------------------------------------
 
-    /// All crypto trading accounts for the key.
+    /// Crypto trading accounts for the key (first page; a key normally has one).
     pub async fn get_accounts(&self) -> Result<Vec<Account>, ClientError> {
         let page: Paginated<Account> = self.get(PATH_ACCOUNTS).await?;
         Ok(page.results)

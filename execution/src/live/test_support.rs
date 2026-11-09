@@ -90,6 +90,14 @@ pub struct MockServer {
     addr: std::net::SocketAddr,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
     _routes: Arc<Mutex<Vec<Route>>>,
+    accept_loop: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for MockServer {
+    fn drop(&mut self) {
+        // Stop accepting so the listener is released with the server.
+        self.accept_loop.abort();
+    }
 }
 
 impl MockServer {
@@ -100,7 +108,7 @@ impl MockServer {
         let routes = Arc::new(Mutex::new(routes));
         let req_c = requests.clone();
         let routes_c = routes.clone();
-        tokio::spawn(async move {
+        let accept_loop = tokio::spawn(async move {
             loop {
                 let Ok((mut sock, _)) = listener.accept().await else {
                     break;
@@ -201,6 +209,7 @@ impl MockServer {
             addr,
             requests,
             _routes: routes,
+            accept_loop,
         }
     }
 

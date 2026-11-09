@@ -184,10 +184,11 @@ impl RequestSigner {
 /// Show only a short prefix of a secret-ish identifier.
 pub fn redact(s: &str) -> String {
     const KEEP: usize = 10;
-    if s.len() <= KEEP {
+    if s.chars().count() <= KEEP {
         return "…".to_string();
     }
-    format!("{}…", &s[..KEEP])
+    let kept: String = s.chars().take(KEEP).collect();
+    format!("{kept}…")
 }
 
 #[cfg(test)]
@@ -298,6 +299,14 @@ mod tests {
     fn trims_whitespace_around_env_value() {
         let signer = RequestSigner::new(DOC_API_KEY, &format!("  {DOC_PRIVATE_KEY}\n")).unwrap();
         assert_eq!(signer.public_key_b64(), DOC_PUBLIC_KEY);
+    }
+
+    #[test]
+    fn redact_is_char_boundary_safe() {
+        assert_eq!(redact("short"), "…");
+        assert_eq!(redact("rh-api-6148effc-c0b1"), "rh-api-614…");
+        // Multi-byte characters around the cut must not panic.
+        assert_eq!(redact("ééééééééééééé"), "éééééééééé…");
     }
 
     #[test]

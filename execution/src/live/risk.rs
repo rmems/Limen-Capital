@@ -318,13 +318,22 @@ pub fn pre_tick_check(limits: &RiskLimits, inputs: &RiskInputs) -> Option<RiskRe
     None
 }
 
-/// Number of decimals implied by an increment (`0.01` → 2, `1e-8` → 8).
+/// Number of decimals needed to represent multiples of an increment exactly
+/// (`0.01` → 2, `1e-8` → 8, `0.25` → 2, `0.5` → 1, `1` → 0).
 pub fn decimals_for_increment(inc: f64) -> usize {
     if !(inc.is_finite() && inc > 0.0) {
         return 8;
     }
-    let d = (-inc.log10()).ceil();
-    d.clamp(0.0, 18.0) as usize
+    for d in 0..=18usize {
+        let scaled = inc * 10f64.powi(d as i32);
+        let r = scaled.round();
+        // `scaled` must be a positive integer: a tiny increment scaled by a
+        // small power rounds to 0, which must not count as representable.
+        if r >= 1.0 && (scaled - r).abs() < 1e-6 {
+            return d;
+        }
+    }
+    18
 }
 
 /// Round `x` down to a multiple of `inc` (with a tiny epsilon so exact
@@ -1039,6 +1048,15 @@ mod tests {
         assert_eq!(decimals_for_increment(0.01), 2);
         assert_eq!(decimals_for_increment(1e-8), 8);
         assert_eq!(decimals_for_increment(1.0), 0);
+        assert_eq!(decimals_for_increment(0.25), 2);
+        assert_eq!(decimals_for_increment(0.5), 1);
+        assert_eq!(decimals_for_increment(0.001), 3);
+        // Non-power-of-ten steps stay on grid and never round upwards.
+        assert_eq!(round_down_to_increment(0.75, 0.25), 0.75);
+        assert_eq!(round_down_to_increment(0.8, 0.25), 0.75);
+        assert_eq!(round_down_to_increment(100.9, 0.25), 100.75);
+        assert_eq!(round_up_to_increment(100.8, 0.25), 101.0);
+        assert_eq!(format_at_increment(0.75, 0.25), "0.75");
         assert_eq!(round_down_to_increment(0.123456789, 1e-8), 0.12345678);
         assert_eq!(round_down_to_increment(100.0, 0.01), 100.0);
         assert_eq!(round_up_to_increment(100.001, 0.01), 100.01);

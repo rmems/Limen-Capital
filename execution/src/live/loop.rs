@@ -270,6 +270,8 @@ pub async fn run_with_parts(
             Err(e) => {
                 warn!("quote failed: {e}");
                 summary.ticks = tick;
+                summary.realized_pnl_usd = book.realized_pnl_usd;
+                summary.fees_paid_usd = book.fees_paid_usd;
                 if max_ticks != 0 && tick >= max_ticks {
                     break;
                 }
@@ -443,12 +445,18 @@ pub async fn run_with_parts(
                     let placed = book.place(order, tick);
                     last_order_secs = Some(now);
                     summary.orders_placed += 1;
-                    row.order = format!(
+                    // Keep any fill/cancel recorded earlier this tick alongside the new order.
+                    let placed_col = format!(
                         "{}:{} cid={}",
                         placed.id,
                         placed.state,
                         short_id(&order.client_order_id)
                     );
+                    row.order = if row.order.is_empty() {
+                        placed_col
+                    } else {
+                        format!("{}; {placed_col}", row.order)
+                    };
                     info!(
                         "PAPER ORDER {} {} {} @ {} (${:.4}) cid={}",
                         placed.id,
