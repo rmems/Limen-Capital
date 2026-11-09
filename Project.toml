@@ -4,13 +4,31 @@ version = "0.1.0"
 
 [deps]
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
-Dates = "ade2ca70-3891-5945-98fb-dc099432e06b"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 ZMQ = "c2297ded-f4af-51ae-bb23-16f91089e4e1"
+DendriteTrader = "b2c3d4e5-f6a7-8901-bcde-f01234567892"
+LiquidCortex = "1f75a0df-502a-4be0-9310-97a9e2e7f166"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+
+[sources]
+DendriteTrader = {url = "https://github.com/rmems/DendriteTrader.jl", rev = "16231a4e3898632418b6d2a764551c997f552d69"}
+LiquidCortex = {url = "https://github.com/rmems/LiquidCortex.jl", rev = "2637b921ca3890086053e09f24636660a453cd34"}
+
+[compat]
+julia = "1.12, 1.13"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
 
 [package]
 license = "MIT"

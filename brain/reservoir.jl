@@ -8,8 +8,11 @@
 # Backends:
 #   :liquid_cortex — Limen-Neural LiquidCortex.jl (preferred when loadable)
 #   :naut_core     — local brain/naut_core.jl EnsembleBrain
+#   :reference_cpu — explicit small LiquidCortex reference reservoir (root project)
 #
 # Env: LIMEN_RESERVOIR=auto|liquid_cortex|naut_core  (default auto)
+
+using Random
 
 if !@isdefined(hft_inhibition)
     include(joinpath(@__DIR__, "hft_inhibition.jl"))
@@ -41,9 +44,17 @@ end
 """
     build_reservoir(; backend=:auto, n_in=28, n_out=16) -> Reservoir
 
-Construct a 4-lobe ensemble. Prefer LiquidCortex when available and backend is `:auto`.
+Construct a 4-lobe ensemble, or a small CPU reference instance when explicitly
+requested with `backend=:reference_cpu`. The CPU backend ignores helm overrides.
 """
-function build_reservoir(; backend::Symbol=:auto, n_in::Int=28, n_out::Int=16)
+function build_reservoir(; backend::Symbol=:auto, n_in::Int=28, n_out::Int=16,
+    neurons::Int=32, rng=Random.default_rng())
+    # Explicit research backend never inherits the live helm's environment override.
+    if backend === :reference_cpu
+        @eval import LiquidCortex
+        ens = LiquidCortex.ReferenceLSM(; n_in, n_out, N=neurons, rng, gpu=false)
+        return Reservoir(:reference_cpu, ens, n_in, n_out)
+    end
     pref = Symbol(get(ENV, "LIMEN_RESERVOIR", String(backend)))
     if pref === :auto
         pref = :auto
@@ -103,7 +114,9 @@ function reservoir_step!(res::Reservoir, u;
         inhibition
     end
 
-    if res.backend === :liquid_cortex
+    if res.backend === :reference_cpu
+        LiquidCortex.run_lsm_step!(res.ensemble, u, inhib)
+    elseif res.backend === :liquid_cortex
         Main.LiquidCortex.ensemble_step!(res.ensemble, u;
             inhibition=inhib, reflex_signal=liquidity_delta)
     else
@@ -126,15 +139,27 @@ function reservoir_step!(res::Reservoir, u, pulse)
 end
 
 function reservoir_output(res::Reservoir)
-    if res.backend === :liquid_cortex
+    if res.backend === :reference_cpu
+        return Array(res.ensemble.Wout * res.ensemble.x)
+    elseif res.backend === :liquid_cortex
         return Main.LiquidCortex.get_ensemble_output(res.ensemble)
     else
         return get_ensemble_output(res.ensemble)
     end
 end
 
+"""Reset CPU reference state, retaining seeded weights. No online plasticity."""
+function reset_reservoir!(res::Reservoir)
+    res.backend === :reference_cpu || throw(ArgumentError("reset not qualified for $(res.backend)"))
+    fill!(res.ensemble.x, 0.0f0)
+    return res
+end
+
 function reservoir_diagnostics(res::Reservoir)
-    if res.backend === :liquid_cortex
+    if res.backend === :reference_cpu
+        return (backend=res.backend, n_in=res.n_in, n_out=res.n_out,
+            neurons=length(res.ensemble.x), finite_state=all(isfinite, res.ensemble.x))
+    elseif res.backend === :liquid_cortex
         return Main.LiquidCortex.ensemble_diagnostics(res.ensemble)
     else
         return ensemble_diagnostics(res.ensemble)
@@ -145,7 +170,11 @@ end
 reservoir_ensemble(res::Reservoir) = res.ensemble
 
 """Lobe list for spike recording / NERO (both backends expose `.lobes`)."""
-reservoir_lobes(res::Reservoir) = res.ensemble.lobes
+function reservoir_lobes(res::Reservoir)
+    res.backend === :reference_cpu &&
+        throw(ArgumentError("CPU reference reservoir has no ensemble lobes"))
+    return res.ensemble.lobes
+end
 
 function reservoir_status(res::Reservoir)
     return (backend=res.backend, n_in=res.n_in, n_out=res.n_out)
