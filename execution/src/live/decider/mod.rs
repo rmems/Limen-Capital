@@ -2,6 +2,8 @@
 //! size; `risk::check` owns execution and may reject or shrink nothing — it
 //! only approves or rejects.
 
+pub mod rules;
+
 use crate::live::market_state::MarketState;
 use serde::{Deserialize, Serialize};
 use std::fmt;

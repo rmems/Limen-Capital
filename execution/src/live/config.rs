@@ -3,6 +3,7 @@
 //! Caps and venue settings are **configuration**, never constants in the
 //! decider, and the decider never sees them. Secrets never live in TOML.
 
+use crate::live::decider::rules::RulesConfig;
 use crate::live::risk::RiskLimits;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -93,6 +94,17 @@ impl MarketSourceConfig {
     }
 }
 
+/// Which decider proposes actions.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DeciderKind {
+    /// Deterministic mean-reversion toy (tests, paper default, LLM fallback).
+    #[default]
+    Rules,
+    /// Claude API decision loop (later step).
+    Claude,
+}
+
 /// Top-level configuration for one run.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -111,8 +123,14 @@ pub struct LiveConfig {
     pub journal_path: String,
     /// Starting cash for the paper book (paper mode only).
     pub paper_starting_cash_usd: f64,
+    /// Fee ratio charged on paper fills (Robinhood's entry API tier is ~0.45%).
+    pub paper_fee_ratio: f64,
     /// Quote source.
     pub market: MarketSourceConfig,
+    /// Which decider to run.
+    pub decider: DeciderKind,
+    /// Parameters for the rules decider.
+    pub rules: RulesConfig,
     /// Hard caps enforced by `risk::check`.
     pub risk: RiskLimits,
 }
@@ -127,7 +145,10 @@ impl Default for LiveConfig {
             paper: true,
             journal_path: "journal.md".to_string(),
             paper_starting_cash_usd: 10.0,
+            paper_fee_ratio: 0.0045,
             market: MarketSourceConfig::Robinhood,
+            decider: DeciderKind::Rules,
+            rules: RulesConfig::default(),
             risk: RiskLimits::default(),
         }
     }
@@ -181,6 +202,16 @@ impl LiveConfig {
         if !(self.paper_starting_cash_usd.is_finite() && self.paper_starting_cash_usd > 0.0) {
             return Err(ConfigError::Invalid(
                 "paper_starting_cash_usd must be positive".into(),
+            ));
+        }
+        if !(self.paper_fee_ratio.is_finite() && (0.0..0.1).contains(&self.paper_fee_ratio)) {
+            return Err(ConfigError::Invalid(
+                "paper_fee_ratio must be in [0, 0.1)".into(),
+            ));
+        }
+        if !(self.rules.order_usd.is_finite() && self.rules.order_usd > 0.0) {
+            return Err(ConfigError::Invalid(
+                "rules.order_usd must be positive".into(),
             ));
         }
         if self.model.trim().is_empty() {
@@ -260,6 +291,8 @@ mod tests {
         assert_eq!(c.tick_interval_secs, 900);
         assert_eq!(c.model, DEFAULT_MODEL);
         assert_eq!(c.market, MarketSourceConfig::Robinhood);
+        assert_eq!(c.decider, DeciderKind::Rules);
+        assert_eq!(c.paper_fee_ratio, 0.0045);
         assert_eq!(c.asset_code(), "BTC");
         c.validate().unwrap();
     }
@@ -311,6 +344,11 @@ max_daily_loss_usd = 2.0
         assert_eq!(c.risk.max_daily_loss_usd, 2.0);
         assert_eq!(c.risk.max_position_usd, 10.0);
         assert!(LiveConfig::from_toml_str("[risk]\nmax_order_usd = 50.0").is_err());
+        let c =
+            LiveConfig::from_toml_str("decider = \"claude\"\n[rules]\nentry_bps = 25.0").unwrap();
+        assert_eq!(c.decider, DeciderKind::Claude);
+        assert_eq!(c.rules.entry_bps, 25.0);
+        assert!(LiveConfig::from_toml_str("decider = \"random\"").is_err());
     }
 
     #[test]

@@ -1,0 +1,326 @@
+//! Append-only markdown journal (`journal.md`).
+//!
+//! One table row per tick: state summary, decision + reason, risk verdict,
+//! order id/status, fill, PnL and LLM cost. The file is created with a header
+//! block (mode, source, symbol, caps, disclaimer) the first time it is written.
+//! `tail(n)` returns the last `n` rows for the decider prompt.
+
+use crate::live::risk::RiskLimits;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+
+pub const COLUMNS: &[&str] = &[
+    "ts (UTC)",
+    "tick",
+    "symbol",
+    "bid",
+    "ask",
+    "mid",
+    "spread bps",
+    "pos qty",
+    "pos $",
+    "cash $",
+    "realized $",
+    "decider",
+    "action",
+    "size $",
+    "reason",
+    "risk",
+    "order",
+    "fill",
+    "pnl $",
+    "llm $",
+];
+
+/// Run metadata written once at the top of a fresh journal.
+#[derive(Debug, Clone)]
+pub struct JournalHeader {
+    pub started_utc: String,
+    pub mode: String,
+    pub market_source: String,
+    pub symbol: String,
+    pub decider: String,
+    pub model: Option<String>,
+    pub limits: RiskLimits,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct JournalRow {
+    pub ts_utc: String,
+    pub tick: u64,
+    pub symbol: String,
+    pub bid: f64,
+    pub ask: f64,
+    pub mid: f64,
+    pub spread_bps: f64,
+    pub position_qty: f64,
+    pub position_usd: f64,
+    pub cash_usd: f64,
+    pub realized_pnl_usd: f64,
+    pub decider: String,
+    pub action: String,
+    pub size_usd: f64,
+    pub reason: String,
+    pub risk: String,
+    /// `id:state` or `-`.
+    pub order: String,
+    /// `qty @ price` or `-`.
+    pub fill: String,
+    /// Realized PnL *this tick*.
+    pub pnl_usd: f64,
+    pub llm_cost_usd: f64,
+}
+
+fn cell(s: &str) -> String {
+    let one_line: String = s
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    one_line.replace('|', "\\|").trim().to_string()
+}
+
+fn dash_if_empty(s: &str) -> String {
+    if s.trim().is_empty() {
+        "-".to_string()
+    } else {
+        cell(s)
+    }
+}
+
+impl JournalRow {
+    pub fn to_markdown(&self) -> String {
+        let cells = [
+            cell(&self.ts_utc),
+            self.tick.to_string(),
+            cell(&self.symbol),
+            format!("{:.2}", self.bid),
+            format!("{:.2}", self.ask),
+            format!("{:.2}", self.mid),
+            format!("{:.2}", self.spread_bps),
+            format!("{:.8}", self.position_qty),
+            format!("{:.4}", self.position_usd),
+            format!("{:.4}", self.cash_usd),
+            format!("{:.4}", self.realized_pnl_usd),
+            dash_if_empty(&self.decider),
+            dash_if_empty(&self.action),
+            format!("{:.4}", self.size_usd),
+            dash_if_empty(&self.reason),
+            dash_if_empty(&self.risk),
+            dash_if_empty(&self.order),
+            dash_if_empty(&self.fill),
+            format!("{:+.4}", self.pnl_usd),
+            format!("{:.4}", self.llm_cost_usd),
+        ];
+        format!("| {} |", cells.join(" | "))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Journal {
+    path: PathBuf,
+}
+
+impl Journal {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn is_fresh(&self) -> bool {
+        match fs::metadata(&self.path) {
+            Ok(m) => m.len() == 0,
+            Err(_) => true,
+        }
+    }
+
+    fn header_markdown(h: &JournalHeader) -> String {
+        let l = &h.limits;
+        let model = h.model.as_deref().unwrap_or("-");
+        let mut s = String::new();
+        s.push_str("# limen-live journal\n\n");
+        s.push_str(&format!("- started: {}\n", h.started_utc));
+        s.push_str(&format!(
+            "- mode: **{}** | market: {} | symbol: {} | decider: {} | model: {}\n",
+            h.mode, h.market_source, h.symbol, h.decider, model
+        ));
+        s.push_str(&format!(
+            "- caps: max_position_usd={} max_order_usd={} max_daily_loss_usd={} max_llm_cost_usd_per_day={} min_tick_interval_secs={} max_open_orders={} stale_order_ticks={}\n",
+            l.max_position_usd,
+            l.max_order_usd,
+            l.max_daily_loss_usd,
+            l.max_llm_cost_usd_per_day,
+            l.min_tick_interval_secs,
+            l.max_open_orders,
+            l.stale_order_ticks
+        ));
+        s.push_str("- limit orders only (buy @ bid, sell @ ask); no leverage; no shorts; one instrument.\n");
+        s.push_str(
+            "- **Not a research result.** Journal/LLM output never enters any training set.\n\n",
+        );
+        s.push_str(&format!("| {} |\n", COLUMNS.join(" | ")));
+        s.push_str(&format!(
+            "|{}\n",
+            COLUMNS.iter().map(|_| "---|").collect::<String>()
+        ));
+        s
+    }
+
+    /// Create the file with its header if it does not exist or is empty.
+    pub fn ensure_header(&self, header: &JournalHeader) -> io::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        if self.is_fresh() {
+            let mut f = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)?;
+            f.write_all(Self::header_markdown(header).as_bytes())?;
+            f.flush()?;
+        } else {
+            // Appending to an existing journal: mark the new run.
+            let mut f = OpenOptions::new().append(true).open(&self.path)?;
+            writeln!(
+                f,
+                "| {} | 0 | {} | 0.00 | 0.00 | 0.00 | 0.00 | 0.00000000 | 0.0000 | 0.0000 | 0.0000 | - | run_start | 0.0000 | mode={} market={} decider={} | - | - | - | +0.0000 | 0.0000 |",
+                cell(&header.started_utc),
+                cell(&header.symbol),
+                cell(&header.mode),
+                cell(&header.market_source),
+                cell(&header.decider)
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn append(&self, row: &JournalRow) -> io::Result<()> {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        writeln!(f, "{}", row.to_markdown())?;
+        f.flush()
+    }
+
+    /// Last `n` data rows (markdown lines), oldest first.
+    pub fn tail(&self, n: usize) -> io::Result<Vec<String>> {
+        let text = match fs::read_to_string(&self.path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(e) => return Err(e),
+        };
+        let rows: Vec<&str> = text
+            .lines()
+            .filter(|l| l.starts_with("| ") && !l.starts_with("| ts (UTC)"))
+            .collect();
+        let start = rows.len().saturating_sub(n);
+        Ok(rows[start..].iter().map(|s| s.to_string()).collect())
+    }
+
+    /// Total data rows (for tests / summaries).
+    pub fn row_count(&self) -> io::Result<usize> {
+        Ok(self.tail(usize::MAX)?.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "limen_live_journal_{}_{}.md",
+            name,
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&p);
+        p
+    }
+
+    fn header() -> JournalHeader {
+        JournalHeader {
+            started_utc: "2026-11-09T00:00:00Z".into(),
+            mode: "paper".into(),
+            market_source: "synthetic".into(),
+            symbol: "BTC-USD".into(),
+            decider: "rules".into(),
+            model: None,
+            limits: RiskLimits::default(),
+        }
+    }
+
+    fn row(tick: u64, reason: &str) -> JournalRow {
+        JournalRow {
+            ts_utc: "2026-11-09T00:00:01Z".into(),
+            tick,
+            symbol: "BTC-USD".into(),
+            bid: 100.0,
+            ask: 100.1,
+            mid: 100.05,
+            spread_bps: 10.0,
+            position_qty: 0.0,
+            position_usd: 0.0,
+            cash_usd: 10.0,
+            realized_pnl_usd: 0.0,
+            decider: "rules".into(),
+            action: "hold".into(),
+            size_usd: 0.0,
+            reason: reason.into(),
+            risk: "hold".into(),
+            order: String::new(),
+            fill: String::new(),
+            pnl_usd: 0.0,
+            llm_cost_usd: 0.0,
+        }
+    }
+
+    #[test]
+    fn header_then_rows_then_tail() {
+        let p = tmp("basic");
+        let j = Journal::new(&p);
+        j.ensure_header(&header()).unwrap();
+        j.append(&row(1, "a")).unwrap();
+        j.append(&row(2, "b")).unwrap();
+        j.append(&row(3, "c")).unwrap();
+        let text = fs::read_to_string(&p).unwrap();
+        assert!(text.starts_with("# limen-live journal"));
+        assert!(text.contains("Not a research result"));
+        assert!(text.contains("max_order_usd=5"));
+        assert_eq!(text.lines().filter(|l| l.starts_with("|---|")).count(), 1);
+        assert_eq!(j.row_count().unwrap(), 3);
+        let t = j.tail(2).unwrap();
+        assert_eq!(t.len(), 2);
+        assert!(t[0].contains("| 2 |"));
+        assert!(t[1].contains("| 3 |"));
+        // Header is idempotent on a non-empty file: a run_start marker row is added instead.
+        j.ensure_header(&header()).unwrap();
+        let text = fs::read_to_string(&p).unwrap();
+        assert_eq!(text.matches("# limen-live journal").count(), 1);
+        assert!(text.contains("run_start"));
+        assert_eq!(j.row_count().unwrap(), 4);
+        let _ = fs::remove_file(&p);
+    }
+
+    #[test]
+    fn cells_are_single_line_and_pipe_safe() {
+        let r = row(1, "a | b\nc");
+        let md = r.to_markdown();
+        assert_eq!(md.lines().count(), 1);
+        assert!(md.contains("a \\| b c"));
+        assert_eq!(md.matches(" | ").count(), COLUMNS.len() - 1);
+        assert!(md.ends_with(" | 0.0000 |"));
+        assert!(md.contains("| - | - |")); // empty order/fill become dashes
+    }
+
+    #[test]
+    fn tail_on_missing_file_is_empty() {
+        let p = tmp("missing");
+        assert!(Journal::new(&p).tail(5).unwrap().is_empty());
+    }
+}

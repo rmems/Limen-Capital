@@ -15,7 +15,11 @@
 
 pub mod config;
 pub mod decider;
+pub mod journal;
+pub mod r#loop;
+pub mod market;
 pub mod market_state;
+pub mod paper;
 pub mod risk;
 pub mod robinhood;
 #[cfg(test)]
@@ -23,7 +27,9 @@ pub(crate) mod test_support;
 
 pub use config::{LiveConfig, Secrets};
 pub use decider::{Action, Decider, Decision};
+pub use journal::Journal;
 pub use market_state::MarketState;
+pub use r#loop::{run, RunOptions, RunSummary};
 pub use risk::{ApprovedOrder, RiskLimits, RiskReject, RiskVerdict};
 pub use robinhood::sign;
 pub use robinhood::RobinhoodClient;
