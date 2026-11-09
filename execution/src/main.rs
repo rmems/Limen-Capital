@@ -18,12 +18,12 @@
 //!   cargo run --release
 //!   LIMEN_WIRE=json cargo run --release
 
-use spikenaut_execution_engine::wire::{
-    classify_wire_frame, decode_market_pulse, decode_readout, json_ipc_endpoint, load_trade_universe,
-    market_endpoint, pulse_max_age_ns, readout_endpoint, readout_to_trade_signal, resolve_fill_price,
-    MarketPulse,
-};
 use spikenaut_execution_engine::universe::TradeUniverse;
+use spikenaut_execution_engine::wire::{
+    classify_wire_frame, decode_market_pulse, decode_readout, json_ipc_endpoint,
+    load_trade_universe, market_endpoint, pulse_max_age_ns, readout_endpoint,
+    readout_to_trade_signal, resolve_fill_price, MarketPulse,
+};
 use spikenaut_execution_engine::{zmq_curve, ExecutionEngine, TradeSignal};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;

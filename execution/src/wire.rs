@@ -90,7 +90,11 @@ pub fn readout_to_trade_signal(
     }
 }
 
-pub fn price_for_ticker(pulse: &MarketPulse, universe: &TradeUniverse, ticker: &str) -> Option<f64> {
+pub fn price_for_ticker(
+    pulse: &MarketPulse,
+    universe: &TradeUniverse,
+    ticker: &str,
+) -> Option<f64> {
     universe
         .symbols
         .iter()
@@ -301,10 +305,8 @@ mod tests {
     #[test]
     fn v2_roundtrip_market_and_readout() {
         let u7 = universe_7();
-        let u3 =
-            TradeUniverse::load(&fixture("universe_3.toml")).expect("universe_3");
-        let u12 =
-            TradeUniverse::load(&fixture("universe_12.toml")).expect("universe_12");
+        let u3 = TradeUniverse::load(&fixture("universe_3.toml")).expect("universe_3");
+        let u12 = TradeUniverse::load(&fixture("universe_12.toml")).expect("universe_12");
 
         for u in [&u7, &u3, &u12] {
             let mut pulse = MarketPulse::new_for_universe(u);
@@ -391,7 +393,10 @@ mod tests {
         let u = universe_7();
         let p = pulse_at(5_000, &u);
         let sym = u.symbols[1].clone();
-        assert_eq!(resolve_fill_price(Some(&p), &u, &sym, 5_500, 1_000), Ok(11.0));
+        assert_eq!(
+            resolve_fill_price(Some(&p), &u, &sym, 5_500, 1_000),
+            Ok(11.0)
+        );
     }
 
     #[test]
@@ -412,8 +417,7 @@ mod tests {
         let packet = decode_readout(&r, &u).unwrap();
         let pulse = decode_market_pulse(&m, &u).unwrap();
         let sig = readout_to_trade_signal(&packet, &u, 0.0, 1.0, None);
-        let px =
-            resolve_fill_price(Some(&pulse), &u, &sig.ticker, pulse.timestamp_ns, 1).unwrap();
+        let px = resolve_fill_price(Some(&pulse), &u, &sig.ticker, pulse.timestamp_ns, 1).unwrap();
         assert!((px - pulse.prices[0] as f64).abs() < 1e-6);
     }
 

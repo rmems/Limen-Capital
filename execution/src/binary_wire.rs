@@ -178,7 +178,8 @@ impl MarketPulse {
             .map_err(|e| e.to_string())?;
         c.write_all(&(n as u16).to_le_bytes())
             .map_err(|e| e.to_string())?;
-        c.write_all(&0u16.to_le_bytes()).map_err(|e| e.to_string())?;
+        c.write_all(&0u16.to_le_bytes())
+            .map_err(|e| e.to_string())?;
         for i in 0..n {
             c.write_all(&self.prices[i].to_le_bytes())
                 .map_err(|e| e.to_string())?;
@@ -398,7 +399,8 @@ impl ReadoutPacket {
             .map_err(|e| e.to_string())?;
         c.write_all(&(n_pairs as u16).to_le_bytes())
             .map_err(|e| e.to_string())?;
-        c.write_all(&0u16.to_le_bytes()).map_err(|e| e.to_string())?;
+        c.write_all(&0u16.to_le_bytes())
+            .map_err(|e| e.to_string())?;
         for v in &self.readout {
             c.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())?;
         }
