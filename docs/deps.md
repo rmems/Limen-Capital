@@ -53,6 +53,16 @@ Fallback: `LIMEN_RESERVOIR=naut_core` uses in-tree `brain/naut_core.jl` without 
 
 ## Environment
 
+### Root CPU research project
+
+The root `Project.toml` pins **DendriteTrader**
+`16231a4e3898632418b6d2a764551c997f552d69` (forecast/split/simulator interfaces)
+and **LiquidCortex** `2637b921ca3890086053e09f24636660a453cd34`
+(instance-owned CPU `ReferenceLSM`). These separate research pins do not change
+the older CUDA-helm environment above. The CPU candidate still loads CUDA.jl as a
+library dependency, but needs no device or driver. See [cpu-comparison.md](cpu-comparison.md)
+for qualification, commands, and limitations.
+
 | Variable | Meaning | Default |
 |----------|---------|---------|
 | `LIMEN_VAULT_DIR` | DuckDB vault directory | `data/vault` under Capital |

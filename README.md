@@ -25,6 +25,10 @@ See **[docs/deps.md](docs/deps.md)**, **[docs/wire-protocol-v1.md](docs/wire-pro
 **[docs/adr/0001-strategy-layer-ownership.md](docs/adr/0001-strategy-layer-ownership.md)**,
 and the CPU baseline in **[docs/repro-baseline.md](docs/repro-baseline.md)**.
 
+For the small CPU-only reservoir versus shared forecast baselines campaign, see
+**[docs/cpu-comparison.md](docs/cpu-comparison.md)**. It uses a fixed one-lot paper
+policy, not the live helm's confidence/Kelly path.
+
 ## Architecture
 
 ```

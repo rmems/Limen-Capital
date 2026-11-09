@@ -103,6 +103,12 @@ jobs:
           julia --color=yes --project=. test/runtests.jl
         working-directory: brain
 
+      - name: Test pinned CPU forecast adapter and comparison
+        env:
+          JULIA_NUM_PRECOMPILE_TASKS: '2'
+          OPENBLAS_NUM_THREADS: '1'
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
+
   # Structure + git-only dep pins (no full GPU instantiate).
   integration:
     name: Integration structure gate
