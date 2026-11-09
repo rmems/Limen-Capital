@@ -339,27 +339,67 @@ impl Order {
     }
 }
 
+/// The only order type this experiment ever sends. A dedicated marker (rather
+/// than [`OrderType`]) makes a market / stop request unrepresentable.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LimitOnly {
+    #[default]
+    Limit,
+}
+
+/// Exactly one way to size a limit order. Decimals are sent as strings,
+/// matching the docs' request samples (`"asset_quantity": "0.1"`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum LimitSize {
+    QuoteAmount { quote_amount: String },
+    AssetQuantity { asset_quantity: String },
+}
+
 /// Request body for `POST /api/v2/crypto/trading/orders/` (limit orders only).
 ///
-/// Decimals are sent as strings, matching the docs' request samples
-/// (`"asset_quantity": "0.1"`). Exactly one of `quote_amount` /
-/// `asset_quantity` may be set.
+/// The type system enforces the venue's rules: `type` is always `limit`
+/// and exactly one of `quote_amount` / `asset_quantity` is present.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlaceLimitOrderRequest {
     pub client_order_id: String,
     pub side: OrderSide,
     #[serde(rename = "type")]
-    pub order_type: OrderType,
+    pub order_type: LimitOnly,
     pub symbol: String,
     pub limit_order_config: LimitOrderRequestConfig,
 }
 
+impl PlaceLimitOrderRequest {
+    /// GTC limit order sized by asset quantity (what `risk::check` approves).
+    pub fn new(
+        client_order_id: impl Into<String>,
+        side: OrderSide,
+        symbol: impl Into<String>,
+        asset_quantity: impl Into<String>,
+        limit_price: impl Into<String>,
+    ) -> Self {
+        Self {
+            client_order_id: client_order_id.into(),
+            side,
+            order_type: LimitOnly::Limit,
+            symbol: symbol.into(),
+            limit_order_config: LimitOrderRequestConfig {
+                size: LimitSize::AssetQuantity {
+                    asset_quantity: asset_quantity.into(),
+                },
+                limit_price: limit_price.into(),
+                time_in_force: "gtc".to_string(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LimitOrderRequestConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quote_amount: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub asset_quantity: Option<String>,
+    #[serde(flatten)]
+    pub size: LimitSize,
     pub limit_price: String,
     pub time_in_force: String,
 }
@@ -483,18 +523,13 @@ mod tests {
 
     #[test]
     fn place_limit_order_request_serializes_only_one_size_field() {
-        let req = PlaceLimitOrderRequest {
-            client_order_id: "131de903-5a9c-4260-abc1-28d562a5dcf0".into(),
-            side: OrderSide::Buy,
-            order_type: OrderType::Limit,
-            symbol: "BTC-USD".into(),
-            limit_order_config: LimitOrderRequestConfig {
-                quote_amount: None,
-                asset_quantity: Some("0.00001000".into()),
-                limit_price: "99990.50".into(),
-                time_in_force: "gtc".into(),
-            },
-        };
+        let req = PlaceLimitOrderRequest::new(
+            "131de903-5a9c-4260-abc1-28d562a5dcf0",
+            OrderSide::Buy,
+            "BTC-USD",
+            "0.00001000",
+            "99990.50",
+        );
         let s = serde_json::to_string(&req).unwrap();
         assert_eq!(
             s,
@@ -502,6 +537,22 @@ mod tests {
         );
         assert!(!s.contains("quote_amount"));
         assert!(!s.contains("market"));
+        // Round-trips, and a quote-sized variant serializes its one field.
+        let back: PlaceLimitOrderRequest = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, req);
+        let quote = LimitOrderRequestConfig {
+            size: LimitSize::QuoteAmount {
+                quote_amount: "5.00".into(),
+            },
+            limit_price: "1".into(),
+            time_in_force: "gtc".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&quote).unwrap(),
+            r#"{"quote_amount":"5.00","limit_price":"1","time_in_force":"gtc"}"#
+        );
+        // `type` can only ever be "limit".
+        assert!(serde_json::from_str::<LimitOnly>(r#""market""#).is_err());
     }
 
     #[test]
