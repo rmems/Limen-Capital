@@ -114,7 +114,9 @@ async fn main() -> ExitCode {
         .with_target(false)
         .init();
 
-    // Arguments configure the paper run only; they never carry credentials.
+    // Arguments configure the paper run only; they never carry credentials
+    // or drive authorization decisions.
+    // nosemgrep
     let argv = std::env::args_os()
         .skip(1)
         .map(|a| a.into_string())
