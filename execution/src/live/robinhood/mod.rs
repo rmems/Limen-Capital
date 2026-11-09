@@ -63,6 +63,8 @@ pub enum ClientError {
     NotFound(String),
     /// Base URL did not parse.
     BadBaseUrl(String),
+    /// The system clock is before the Unix epoch; no valid `x-timestamp` is possible.
+    Clock(String),
 }
 
 impl fmt::Display for ClientError {
@@ -89,6 +91,7 @@ impl fmt::Display for ClientError {
             ),
             ClientError::NotFound(what) => write!(f, "not found: {what}"),
             ClientError::BadBaseUrl(u) => write!(f, "bad base url: {u}"),
+            ClientError::Clock(e) => write!(f, "system clock error: {e}"),
         }
     }
 }
@@ -225,11 +228,11 @@ impl RobinhoodClient {
             .ok_or(ClientError::MissingAccount)
     }
 
-    fn now_secs() -> u64 {
+    fn now_secs() -> Result<u64, ClientError> {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
-            .unwrap_or(0)
+            .map_err(|e| ClientError::Clock(e.to_string()))
     }
 
     /// Signed request. `path` includes the query string. GETs retry on 429/5xx;
@@ -247,7 +250,7 @@ impl RobinhoodClient {
         };
         let mut attempt = 0u32;
         loop {
-            let ts = Self::now_secs();
+            let ts = Self::now_secs()?;
             let body_str = body.as_deref().unwrap_or("");
             let headers = self.signer.headers(ts, path, method.as_str(), body_str);
             let url = format!("{}{}", self.base_url, path);

@@ -273,7 +273,11 @@ pub async fn run_with_parts(
                 if max_ticks != 0 && tick >= max_ticks {
                     break;
                 }
-                sleep_or_ctrl_c(cfg.tick_interval_secs).await;
+                if !sleep_or_ctrl_c(cfg.tick_interval_secs).await {
+                    info!("ctrl-c: stopping");
+                    summary.halted_reason = Some("ctrl_c".into());
+                    break;
+                }
                 continue;
             }
         };
@@ -401,7 +405,7 @@ pub async fn run_with_parts(
                         "{}:{} cid={}",
                         placed.id,
                         placed.state,
-                        &order.client_order_id[..8]
+                        short_id(&order.client_order_id)
                     );
                     info!(
                         "PAPER ORDER {} {} {} @ {} (${:.4}) cid={}",
@@ -478,11 +482,27 @@ pub async fn run_with_parts(
     Ok(summary)
 }
 
+/// First 8 characters of an id (or the whole id when shorter); never panics.
+fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
+
 /// Sleep for the tick interval; returns `false` if Ctrl-C arrived.
+///
+/// If the signal handler cannot be installed, fall back to a plain sleep so
+/// the loop keeps its tick spacing instead of spinning against the venue.
 async fn sleep_or_ctrl_c(secs: u64) -> bool {
+    let dur = Duration::from_secs(secs);
     tokio::select! {
-        _ = tokio::time::sleep(Duration::from_secs(secs)) => true,
-        r = tokio::signal::ctrl_c() => r.is_err(),
+        _ = tokio::time::sleep(dur) => true,
+        r = tokio::signal::ctrl_c() => match r {
+            Ok(()) => false,
+            Err(e) => {
+                warn!("ctrl-c handler unavailable ({e}); sleeping without it");
+                tokio::time::sleep(dur).await;
+                true
+            }
+        },
     }
 }
 
@@ -510,6 +530,13 @@ mod tests {
             std::env::temp_dir().join(format!("limen_live_loop_{name}_{}.md", std::process::id()));
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    #[test]
+    fn short_id_never_panics() {
+        assert_eq!(short_id("c8f53536-d7b4-44fd-8076-cac31e8f3880"), "c8f53536");
+        assert_eq!(short_id("abc"), "abc");
+        assert_eq!(short_id(""), "");
     }
 
     #[tokio::test]

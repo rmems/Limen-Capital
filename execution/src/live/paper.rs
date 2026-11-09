@@ -127,6 +127,10 @@ impl PaperBook {
                 let realized = match o.side {
                     OrderSide::Buy => {
                         let prev_qty = self.position_qty;
+                        debug_assert!(
+                            prev_qty == 0.0 || self.avg_cost_usd.is_some(),
+                            "avg_cost_usd is None but position_qty={prev_qty} > 0"
+                        );
                         let prev_cost = self.avg_cost_usd.unwrap_or(0.0) * prev_qty;
                         self.cash_usd -= notional + fee;
                         self.position_qty += qty;
