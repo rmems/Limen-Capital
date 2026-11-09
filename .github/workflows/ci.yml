@@ -83,6 +83,18 @@ jobs:
       - name: Cache Julia artifacts
         uses: julia-actions/cache@a45e8fa8be21c18a06b7177052533149e61e9b38 # v3.1.0
 
+      # Resolve gate: proves brain/Project.toml is installable (UUIDs, registry
+      # membership, compat, git [sources]). Pkg.resolve() downloads package
+      # sources and eager artifacts (budgeted here; CUDA runtime artifacts are
+      # lazy and never fetched) but does not precompile. Writes a throwaway
+      # Manifest. A fresh CI depot has no registry, so add General first.
+      - name: Resolve brain Project.toml
+        run: |
+          julia --color=yes --project=. -e 'using Pkg; Pkg.Registry.add("General"); Pkg.resolve()'
+        working-directory: brain
+        env:
+          JULIA_PKG_PRECOMPILE_AUTO: "0"
+
       # Unit tests only need Test + Random + local includes.
       # Skip full Project.toml instantiate (CUDA / DuckDB / LiquidCortex are heavy
       # and optional for the CPU wire/encoder suite).

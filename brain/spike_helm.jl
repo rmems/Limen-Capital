@@ -260,7 +260,7 @@ function main()
                 dydx_oi_delta=pulse.dydx_oi_delta,
                 dydx_funding_rate=pulse.dydx_funding_rate)
 
-            # ── 4.5. Record to Vault (Polars + DuckDB) ───────────────────────
+            # ── 4.5. Record to Vault (DuckDB) ───────────────────────
             record_tick!(vault, pulse, ensemble)
 
             # ── 5. Periodic covariance on each lobe (GPU-intensive) ──────────

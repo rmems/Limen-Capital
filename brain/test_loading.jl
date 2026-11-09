@@ -26,7 +26,7 @@ function validate(check::String, ok::Bool; detail::String="")
     if ok
         println("  $PASS $check")
     else
-        msg = detail.isEmpty ? check : "$check — $detail"
+        msg = isempty(detail) ? check : "$check — $detail"
         println("  $FAIL $msg")
         push!(errors, msg)
     end
@@ -65,24 +65,13 @@ function run_loading_validation()
     # ── 2. Package Resolution ─────────────────────────────────────────────
     println("\n[2/5] Package Resolution")
 
-    required_packages = [:CUDA, :ZMQ, :SparseArrays, :LinearAlgebra, :Statistics, :Printf]
+    required_packages = [:CUDA, :ZMQ, :SparseArrays, :LinearAlgebra, :Statistics, :Printf, :DuckDB, :DataFrames]
     for pkg in required_packages
         try
             @eval using $pkg
             validate("Package $pkg", true)
         catch e
             validate("Package $pkg", false, detail=string(e))
-        end
-    end
-
-    # Optional packages (vault recorder deps)
-    optional_packages = [:Polars, :DuckDB, :DataFrames]
-    for pkg in optional_packages
-        try
-            @eval using $pkg
-            validate("Optional package $pkg", true)
-        catch e
-            println("  $WARN Optional package $pkg not available (vault recorder disabled)")
         end
     end
 
