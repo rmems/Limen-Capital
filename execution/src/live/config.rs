@@ -257,6 +257,10 @@ impl LiveConfig {
 fn is_loopback_url(url: &str) -> bool {
     let rest = url.trim_start_matches("http://");
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Userinfo (`user:pass@host`) would make the text before `@` look like the host.
+    if authority.contains('@') {
+        return false;
+    }
     let host = if let Some(stripped) = authority.strip_prefix('[') {
         stripped.split(']').next().unwrap_or("")
     } else {
@@ -445,6 +449,8 @@ base_url = "http://localhost:9"
             "http://trading.robinhood.com",
             "http://127.0.0.1.evil.example",
             "http://10.0.0.5",
+            "http://127.0.0.1:80@evil.example",
+            "http://localhost@evil.example",
         ] {
             assert!(!is_loopback_url(bad), "{bad}");
             let err = LiveConfig::from_toml_str(&format!("base_url = {bad:?}")).unwrap_err();

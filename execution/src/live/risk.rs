@@ -9,7 +9,7 @@
 //! | cap                          | default |
 //! |------------------------------|---------|
 //! | `max_position_usd`           | 10.0    |
-//! | `max_order_usd`              | 5.0 (buys; sells are bounded by holdings and `max_position_usd`) |
+//! | `max_order_usd`              | 5.0 (buys only; sells are bounded by holdings) |
 //! | `max_daily_loss_usd`         | 4.0 → loop stops for the UTC day |
 //! | `max_llm_cost_usd_per_day`   | 1.0 → decider disabled, loop idles |
 //! | `min_tick_interval_secs`     | 900     |
@@ -393,19 +393,13 @@ pub fn check(
         return Rejected(R::InvalidSize { size_usd: size });
     }
     // `max_order_usd` bounds *new exposure*, i.e. buys. A sell never adds
-    // exposure and the position it reduces was already approved under
-    // `max_position_usd`, so sells are bounded by that cap (and, below, by
-    // holdings). Otherwise a $5 buy that appreciates to $5.03 could never be
-    // exited.
-    let order_cap = match decision.action {
-        Action::Buy => limits.max_order_usd,
-        Action::Sell => limits.max_position_usd,
-        Action::Hold => unreachable!("hold handled above"),
-    };
-    if size > order_cap + 1e-9 {
+    // exposure and is hard-bounded by holdings below (no shorts), so no USD
+    // cap applies to it: otherwise a position that appreciates above the cap
+    // could never be exited.
+    if decision.action == Action::Buy && size > limits.max_order_usd + 1e-9 {
         return Rejected(R::OrderTooLarge {
             size_usd: size,
-            cap_usd: order_cap,
+            cap_usd: limits.max_order_usd,
         });
     }
     if inputs.open_orders >= limits.max_open_orders {
@@ -680,7 +674,8 @@ mod tests {
             "whole position: {}",
             o.asset_qty
         );
-        // But a sell can never exceed max_position_usd either.
+        // A sell is bounded by holdings, not by a USD cap: asking for more
+        // than is held is a short and is rejected as such.
         let r = reject(check(
             &Decision::sell(10.01, "exit"),
             &s,
@@ -688,7 +683,20 @@ mod tests {
             &limits(),
             &inputs(),
         ));
-        assert!(matches!(r, RiskReject::OrderTooLarge { cap_usd, .. } if cap_usd == 10.0));
+        assert!(
+            matches!(r, RiskReject::InsufficientHoldings { .. }),
+            "{r:?}"
+        );
+        // A full-size position that appreciated above max_position_usd can still be exited.
+        let big = state(210_000.0, 210_010.0, 0.00005, 0.0); // $10.50 held, bought at $10
+        let o = approved(check(
+            &Decision::sell(big.position_usd, "exit"),
+            &big,
+            &pair(),
+            &limits(),
+            &inputs(),
+        ));
+        assert!((o.asset_qty - 0.00005).abs() < 1e-12);
         // And buys are still capped at max_order_usd.
         let r = reject(check(
             &Decision::buy(5.3, ""),
