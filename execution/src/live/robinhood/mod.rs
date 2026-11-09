@@ -28,7 +28,8 @@ pub const DEFAULT_BASE_URL: &str = "https://trading.robinhood.com";
 
 const PATH_ACCOUNTS: &str = "/api/v2/crypto/trading/accounts/";
 const PATH_BEST_BID_ASK: &str = "/api/v2/crypto/marketdata/best_bid_ask/";
-const PATH_ESTIMATED_PRICE: &str = "/api/v2/crypto/marketdata/estimated_price/";
+// Note: in V2 only best_bid_ask lives under /marketdata/; estimated_price is under /trading/.
+const PATH_ESTIMATED_PRICE: &str = "/api/v2/crypto/trading/estimated_price/";
 const PATH_TRADING_PAIRS: &str = "/api/v2/crypto/trading/trading_pairs/";
 const PATH_HOLDINGS: &str = "/api/v2/crypto/trading/holdings/";
 const PATH_ORDERS: &str = "/api/v2/crypto/trading/orders/";
@@ -498,6 +499,27 @@ mod tests {
         assert_eq!(q.bid, 100_000.0);
         assert_eq!(q.ask, 100_010.0);
         let reqs = server.requests().await;
+        assert!(reqs[0].verify_signature(API_KEY, PUB));
+    }
+
+    #[tokio::test]
+    async fn estimated_price_uses_the_v2_trading_path() {
+        let server = MockServer::start(vec![Route::ok(
+            "GET",
+            "/api/v2/crypto/trading/estimated_price/?symbol=BTC-USD&side=bid&quantity=0.0001",
+            r#"{"results":[{"symbol":"BTC-USD","side":"bid","quantity":"0.0001","bid":"100000","ask":"100010","fee_ratio":"0.0045","est_fee":"0.045","est_total_credit":"9.955"}]}"#,
+        )])
+        .await;
+        let rows = client(&server)
+            .estimated_price("BTC-USD", "bid", 0.0001)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].est_total_credit, Some(9.955));
+        let reqs = server.requests().await;
+        assert!(reqs[0]
+            .path
+            .starts_with("/api/v2/crypto/trading/estimated_price/"));
         assert!(reqs[0].verify_signature(API_KEY, PUB));
     }
 
