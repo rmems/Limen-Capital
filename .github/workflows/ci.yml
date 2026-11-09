@@ -85,10 +85,11 @@ jobs:
 
       # Resolve-only gate: proves brain/Project.toml is installable (UUIDs,
       # registry membership, compat, git [sources]) without downloading CUDA
-      # artifacts or precompiling. Writes a throwaway Manifest.
+      # artifacts or precompiling. Writes a throwaway Manifest. A fresh CI depot
+      # has no registry, so add General first.
       - name: Resolve brain Project.toml
         run: |
-          julia --color=yes --project=. -e 'using Pkg; Pkg.resolve()'
+          julia --color=yes --project=. -e 'using Pkg; Pkg.Registry.add("General"); Pkg.resolve()'
         working-directory: brain
         env:
           JULIA_PKG_PRECOMPILE_AUTO: "0"
