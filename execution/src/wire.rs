@@ -27,13 +27,27 @@ pub fn readout_endpoint() -> String {
 /// Default maximum age of the last MarketPulse before fills are refused (2 s).
 pub const PULSE_MAX_AGE_MS_DEFAULT: u64 = 2_000;
 
+/// Parse an optional `LIMEN_PULSE_MAX_AGE_MS` value into nanoseconds.
+///
+/// `None` (unset) yields [`PULSE_MAX_AGE_MS_DEFAULT`]. A set-but-invalid value
+/// is an error rather than a silent fallback: an operator who sets the
+/// variable expects it to take effect.
+pub fn parse_pulse_max_age_ms(raw: Option<&str>) -> Result<u64, String> {
+    let ms = match raw {
+        None => PULSE_MAX_AGE_MS_DEFAULT,
+        Some(v) => v.trim().parse::<u64>().map_err(|e| {
+            format!(
+                "LIMEN_PULSE_MAX_AGE_MS={v:?} is not a non-negative integer of milliseconds: {e}"
+            )
+        })?,
+    };
+    Ok(ms.saturating_mul(1_000_000))
+}
+
 /// `LIMEN_PULSE_MAX_AGE_MS` as nanoseconds (default [`PULSE_MAX_AGE_MS_DEFAULT`]).
-pub fn pulse_max_age_ns() -> u64 {
-    std::env::var("LIMEN_PULSE_MAX_AGE_MS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(PULSE_MAX_AGE_MS_DEFAULT)
-        .saturating_mul(1_000_000)
+/// Errors when the variable is set to something that is not a `u64`.
+pub fn pulse_max_age_ns() -> Result<u64, String> {
+    parse_pulse_max_age_ms(std::env::var("LIMEN_PULSE_MAX_AGE_MS").ok().as_deref())
 }
 
 /// Decode MarketPulse with validation (finite fields, prices > 0, vol clamp).
@@ -323,6 +337,19 @@ mod tests {
         assert_eq!(price_for_ticker(&p, "Verus"), Some(16.0));
         assert_eq!(price_for_ticker(&p, "RESIDUAL"), None);
         assert_eq!(price_for_ticker(&p, "nope"), None);
+    }
+
+    #[test]
+    fn pulse_max_age_parses_or_fails_loudly() {
+        assert_eq!(
+            parse_pulse_max_age_ms(None),
+            Ok(PULSE_MAX_AGE_MS_DEFAULT * 1_000_000)
+        );
+        assert_eq!(parse_pulse_max_age_ms(Some("250")), Ok(250_000_000));
+        assert_eq!(parse_pulse_max_age_ms(Some(" 0 ")), Ok(0));
+        assert!(parse_pulse_max_age_ms(Some("2s")).is_err());
+        assert!(parse_pulse_max_age_ms(Some("")).is_err());
+        assert!(parse_pulse_max_age_ms(Some("-1")).is_err());
     }
 
     #[test]
