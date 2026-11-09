@@ -19,6 +19,7 @@ pub mod kelly;
 #[cfg(feature = "live-robinhood")]
 pub mod live;
 pub mod wire;
+pub mod zmq_curve;
 
 pub use metabolic_ledger::{execute_buy, execute_sell, GhostWallet, MarketPrices};
 
