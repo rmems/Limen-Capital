@@ -1,27 +1,27 @@
-# market_types.jl — MarketPulse wire types (no CUDA)
-#
-# Shared by market_encoder, naut_core, and unit tests.
-# Layout: docs/wire-protocol-v1.md
+# market_types.jl — MarketPulse wire types (NervousWire v2 + legacy v1)
 
-# ── MarketPulse packed struct layout (120 bytes from Rust) ────────────────────
-# Canonical channel order: DNX(0), Quai(1), Qubic(2), Kaspa(3), Monero(4), Ocean(5), Verus(6)
+include(joinpath(@__DIR__, "universe.jl"))
+
+const TRADE_UNIVERSE = load_trade_universe()
+const N_ASSETS = length(TRADE_UNIVERSE.symbols)
+const N_PAIRS = N_ASSETS + 1
+const N_IN = 4 * N_ASSETS
+const N_OUT = 2 * N_PAIRS
+
+const WIRE_MAGIC = 0x56524e4c  # "LNRV" LE
+const WIRE_VERSION_V2 = UInt8(2)
+const FRAME_MARKET_PULSE = UInt8(1)
+const FRAME_READOUT = UInt8(2)
+const WIRE_HEADER_BYTES = 8
+const MARKET_PULSE_V1_BYTES = 120
+const READOUT_PACKET_V1_BYTES = 88
+const TRAILING_SIGNAL_COUNT = 11
 
 struct MarketPulse
     timestamp_ns::UInt64
-    dnx_price::Float32
-    dnx_vol::Float32
-    quai_price::Float32
-    quai_vol::Float32
-    qubic_price::Float32
-    qubic_vol::Float32
-    kaspa_price::Float32
-    kaspa_vol::Float32
-    monero_price::Float32
-    monero_vol::Float32
-    ocean_price::Float32
-    ocean_vol::Float32
-    verus_price::Float32
-    verus_vol::Float32
+    symbol_table_hash::UInt64
+    prices::Vector{Float32}
+    vols::Vector{Float32}
     confidence_signal::Float32
     funding_rate::Float32
     liquidation_vol::Float32
@@ -35,121 +35,259 @@ struct MarketPulse
     dydx_funding_rate::Float32
 end
 
-"""
-    validate_market_pulse_fields!(f::AbstractVector{Float32}) -> AbstractVector{Float32}
-
-In-place validation on a settable vector `f`: all floats finite;
-non-positive prices rejected; vols clamped to `[0, 1]`.
-Layout of `f` matches decode: 7×(price, vol) + 11 trailing signals.
-Returns `f` for chaining. Callers must pass a mutable dense vector (not a range).
-"""
-function validate_market_pulse_fields!(f::AbstractVector{Float32})
-    length(f) == 25 || error("Expected 25 Float32 fields, got $(length(f))")
-    for (i, x) in enumerate(f)
-        isfinite(x) || error("MarketPulse field $i is not finite: $x")
-    end
-    # Prices at odd indices 1,3,5,...,13 must be > 0
-    for i in 1:2:13
-        f[i] > 0 || error("MarketPulse price at field $i must be > 0, got $(f[i])")
-    end
-    # Clamp volumes (indices 2,4,...,14) into [0, 1]
-    for i in 2:2:14
-        f[i] = clamp(f[i], 0.0f0, 1.0f0)
-    end
-    return f
-end
-
-"""
-    decode_market_pulse(buf::Vector{UInt8}) -> MarketPulse
-
-Decode the 120-byte little-endian MarketPulse packet.
-Bytes [108..120] are reserved (not decoded into fields today).
-
-Rejects non-finite floats and non-positive prices; clamps asset vols to [0, 1].
-Hot path: one `Vector{Float32}` for the 25 field words (bulk reinterpret; no
-per-field byte slices).
-"""
-function decode_market_pulse(buf::Vector{UInt8})
-    length(buf) == 120 || error("Expected 120 bytes, got $(length(buf))")
-
-    ts = reinterpret(UInt64, view(buf, 1:8))[1]
-    # One allocation: collect 25 LE Float32 words from a view (no 25×4-byte temps).
-    # Length is enforced inside validate_market_pulse_fields! (wire is fixed 100 bytes → 25 f32).
-    f = collect(reinterpret(Float32, view(buf, 9:108)))
-    validate_market_pulse_fields!(f)
-
-    return MarketPulse(
-        ts,
-        f[1], f[2],   # dnx
-        f[3], f[4],   # quai
-        f[5], f[6],   # qubic
-        f[7], f[8],   # kaspa
-        f[9], f[10],  # monero
-        f[11], f[12], # ocean
-        f[13], f[14], # verus
-        f[15],        # confidence_signal
-        f[16],        # funding_rate
-        f[17],        # liquidation_vol
-        f[18],        # liquidity_delta
-        f[19],        # l3_order_imbalance
-        f[20],        # gpu_temp_c
-        f[21],        # gpu_power_w
-        f[22],        # gpu_util_pct
-        f[23],        # basys_buffer_load
-        f[24],        # dydx_oi_delta
-        f[25],        # dydx_funding_rate
+function MarketPulse(;
+    timestamp_ns::UInt64 = 0,
+    prices::AbstractVector{Float32},
+    vols::AbstractVector{Float32},
+    confidence_signal::Float32 = 0.0f0,
+    funding_rate::Float32 = 0.0f0,
+    liquidation_vol::Float32 = 0.0f0,
+    liquidity_delta::Float32 = 0.0f0,
+    l3_order_imbalance::Float32 = 0.0f0,
+    gpu_temp_c::Float32 = 40.0f0,
+    gpu_power_w::Float32 = 0.0f0,
+    gpu_util_pct::Float32 = 0.0f0,
+    basys_buffer_load::Float32 = 0.0f0,
+    dydx_oi_delta::Float32 = 0.0f0,
+    dydx_funding_rate::Float32 = 0.0f0,
+)
+    length(prices) == length(vols) == N_ASSETS ||
+        error("expected $N_ASSETS assets, got $(length(prices)) prices")
+    MarketPulse(
+        timestamp_ns,
+        TRADE_UNIVERSE.hash,
+        collect(Float32, prices),
+        collect(Float32, vols),
+        confidence_signal,
+        funding_rate,
+        liquidation_vol,
+        liquidity_delta,
+        l3_order_imbalance,
+        gpu_temp_c,
+        gpu_power_w,
+        gpu_util_pct,
+        basys_buffer_load,
+        dydx_oi_delta,
+        dydx_funding_rate,
     )
 end
 
-"""
-    pack_market_pulse(pulse::MarketPulse) -> Vector{UInt8}
+function trailing_fields(p::MarketPulse)
+    (
+        p.confidence_signal,
+        p.funding_rate,
+        p.liquidation_vol,
+        p.liquidity_delta,
+        p.l3_order_imbalance,
+        p.gpu_temp_c,
+        p.gpu_power_w,
+        p.gpu_util_pct,
+        p.basys_buffer_load,
+        p.dydx_oi_delta,
+        p.dydx_funding_rate,
+    )
+end
 
-Encode MarketPulse to 120-byte buffer (for tests / mock publishers).
-"""
-function pack_market_pulse(pulse::MarketPulse)
-    buf = zeros(UInt8, 120)
+function validate_market_pulse_fields!(prices::AbstractVector{Float32}, vols::AbstractVector{Float32}, trailing::AbstractVector{Float32})
+    length(prices) == length(vols) || error("prices/vols length mismatch")
+    for (i, x) in enumerate(prices)
+        isfinite(x) || error("MarketPulse price[$i] is not finite: $x")
+        x > 0 || error("MarketPulse price[$i] must be > 0, got $x")
+    end
+    for (i, v) in enumerate(vols)
+        isfinite(v) || error("MarketPulse vol[$i] is not finite: $v")
+        vols[i] = clamp(v, 0.0f0, 1.0f0)
+    end
+    for (i, x) in enumerate(trailing)
+        isfinite(x) || error("MarketPulse trailing field $i is not finite: $x")
+    end
+    return nothing
+end
+
+function _wire_magic(buf::Vector{UInt8})
+    length(buf) < 4 && return UInt32(0)
+    return reinterpret(UInt32, view(buf, 1:4))[1]
+end
+
+function market_pulse_v2_len(n_assets::Int)
+    WIRE_HEADER_BYTES + 8 + 8 + 4 + 8 * n_assets + TRAILING_SIGNAL_COUNT * 4
+end
+
+function pack_market_pulse_v2(pulse::MarketPulse)
+    n = length(pulse.prices)
+    buf = Vector{UInt8}(undef, market_pulse_v2_len(n))
+    off = 1
+    copyto!(buf, off, reinterpret(UInt8, [WIRE_MAGIC]), 1, 4); off += 4
+    buf[off] = WIRE_VERSION_V2; off += 1
+    buf[off] = FRAME_MARKET_PULSE; off += 1
+    buf[off:off+1] .= 0x00; off += 2
+    copyto!(buf, off, reinterpret(UInt8, [pulse.timestamp_ns]), 1, 8); off += 8
+    copyto!(buf, off, reinterpret(UInt8, [pulse.symbol_table_hash]), 1, 8); off += 8
+    copyto!(buf, off, reinterpret(UInt8, [UInt16(n)]), 1, 2); off += 2
+    copyto!(buf, off, reinterpret(UInt8, [UInt16(0)]), 1, 2); off += 2
+    asset_floats = Float32[]
+    for i in 1:n
+        push!(asset_floats, pulse.prices[i], pulse.vols[i])
+    end
+    copyto!(buf, off, reinterpret(UInt8, asset_floats), 1, 8 * n); off += 8 * n
+    trailing = collect(Float32, trailing_fields(pulse))
+    copyto!(buf, off, reinterpret(UInt8, trailing), 1, length(trailing) * 4)
+    return buf
+end
+
+function decode_market_pulse_v2(buf::Vector{UInt8})
+    _wire_magic(buf) == WIRE_MAGIC || error("invalid wire magic")
+    buf[5] == WIRE_VERSION_V2 || error("unsupported wire version $(buf[5])")
+    buf[6] == FRAME_MARKET_PULSE || error("expected MarketPulse frame")
+    off = WIRE_HEADER_BYTES + 1
+    ts = reinterpret(UInt64, view(buf, off:off+7))[1]; off += 8
+    hash = reinterpret(UInt64, view(buf, off:off+7))[1]; off += 8
+    n = Int(reinterpret(UInt16, view(buf, off:off+1))[1]); off += 4
+    hash == TRADE_UNIVERSE.hash ||
+        error("symbol_table_hash mismatch (wire 0x$(string(hash, base=16)) vs universe 0x$(string(TRADE_UNIVERSE.hash, base=16)))")
+    n == N_ASSETS || error("n_assets $n != universe size $N_ASSETS")
+    expected = market_pulse_v2_len(n)
+    length(buf) == expected || error("Expected $expected bytes, got $(length(buf))")
+    asset_words = collect(reinterpret(Float32, view(buf, off:off + 8 * n - 1)))
+    prices = asset_words[1:2:end]
+    vols = asset_words[2:2:end]
+    off += 8 * n
+    trailing = collect(reinterpret(Float32, view(buf, off:off + TRAILING_SIGNAL_COUNT * 4 - 1)))
+    validate_market_pulse_fields!(prices, vols, trailing)
+    return MarketPulse(;
+        timestamp_ns = ts,
+        prices,
+        vols,
+        confidence_signal = trailing[1],
+        funding_rate = trailing[2],
+        liquidation_vol = trailing[3],
+        liquidity_delta = trailing[4],
+        l3_order_imbalance = trailing[5],
+        gpu_temp_c = trailing[6],
+        gpu_power_w = trailing[7],
+        gpu_util_pct = trailing[8],
+        basys_buffer_load = trailing[9],
+        dydx_oi_delta = trailing[10],
+        dydx_funding_rate = trailing[11],
+    )
+end
+
+function pack_market_pulse_v1(pulse::MarketPulse)
+    N_ASSETS == 7 || error("v1 pack requires 7-symbol universe")
+    buf = zeros(UInt8, MARKET_PULSE_V1_BYTES)
     copyto!(buf, 1, reinterpret(UInt8, [pulse.timestamp_ns]), 1, 8)
-    floats = Float32[
-        pulse.dnx_price, pulse.dnx_vol,
-        pulse.quai_price, pulse.quai_vol,
-        pulse.qubic_price, pulse.qubic_vol,
-        pulse.kaspa_price, pulse.kaspa_vol,
-        pulse.monero_price, pulse.monero_vol,
-        pulse.ocean_price, pulse.ocean_vol,
-        pulse.verus_price, pulse.verus_vol,
-        pulse.confidence_signal,
-        pulse.funding_rate, pulse.liquidation_vol,
-        pulse.liquidity_delta, pulse.l3_order_imbalance,
-        pulse.gpu_temp_c, pulse.gpu_power_w, pulse.gpu_util_pct,
-        pulse.basys_buffer_load,
-        pulse.dydx_oi_delta, pulse.dydx_funding_rate,
-    ]
-    copyto!(buf, 9, reinterpret(UInt8, floats), 1, 100)
+    floats = Float32[]
+    for i in 1:N_ASSETS
+        push!(floats, pulse.prices[i], pulse.vols[i])
+    end
+    append!(floats, collect(Float32, trailing_fields(pulse)))
+    copyto!(buf, 9, reinterpret(UInt8, floats), 1, length(floats) * 4)
     return buf
 end
 
-"""
-    pack_readout(tick, output::Vector{Float32}, relevance::Vector{Float32}) -> Vector{UInt8}
+function decode_market_pulse_v1(buf::Vector{UInt8})
+    length(buf) == MARKET_PULSE_V1_BYTES || error("Expected 120 bytes, got $(length(buf))")
+    N_ASSETS == 7 || error("v1 decode requires 7-symbol universe")
+    ts = reinterpret(UInt64, view(buf, 1:8))[1]
+    words = collect(reinterpret(Float32, view(buf, 9:108)))
+    prices = words[1:2:13]
+    vols = words[2:2:14]
+    trailing = words[15:25]
+    validate_market_pulse_fields!(prices, vols, trailing)
+    return MarketPulse(;
+        timestamp_ns = ts,
+        prices,
+        vols,
+        confidence_signal = trailing[1],
+        funding_rate = trailing[2],
+        liquidation_vol = trailing[3],
+        liquidity_delta = trailing[4],
+        l3_order_imbalance = trailing[5],
+        gpu_temp_c = trailing[6],
+        gpu_power_w = trailing[7],
+        gpu_util_pct = trailing[8],
+        basys_buffer_load = trailing[9],
+        dydx_oi_delta = trailing[10],
+        dydx_funding_rate = trailing[11],
+    )
+end
 
-88-byte ReadoutPacket: tick (i64) + 16×f32 readout + 4×f32 relevance.
-"""
+function decode_market_pulse(buf::Vector{UInt8})
+    if length(buf) >= WIRE_HEADER_BYTES && _wire_magic(buf) == WIRE_MAGIC
+        return decode_market_pulse_v2(buf)
+    elseif length(buf) == MARKET_PULSE_V1_BYTES
+        return decode_market_pulse_v1(buf)
+    end
+    error("unrecognized MarketPulse frame ($(length(buf)) bytes)")
+end
+
+pack_market_pulse(p::MarketPulse) = pack_market_pulse_v2(p)
+
+function readout_frame_v2_len(n_pairs::Int)
+    WIRE_HEADER_BYTES + 8 + 8 + 4 + 4 * (2 * n_pairs) + 16
+end
+
 function pack_readout(tick::Int64, output::AbstractVector{Float32}, relevance::AbstractVector{Float32})
-    length(output) == 16 || error("output must be length 16")
     length(relevance) == 4 || error("relevance must be length 4")
-    buf = Vector{UInt8}(undef, 88)
-    copyto!(buf, 1, reinterpret(UInt8, [tick]), 1, 8)
-    copyto!(buf, 9, reinterpret(UInt8, collect(output)), 1, 64)
-    copyto!(buf, 73, reinterpret(UInt8, collect(relevance)), 1, 16)
+    n_pairs = length(output) ÷ 2
+    n_pairs == N_PAIRS || error("output length $(length(output)) != 2×$N_PAIRS")
+    buf = Vector{UInt8}(undef, readout_frame_v2_len(n_pairs))
+    off = 1
+    copyto!(buf, off, reinterpret(UInt8, [WIRE_MAGIC]), 1, 4); off += 4
+    buf[off] = WIRE_VERSION_V2; off += 1
+    buf[off] = FRAME_READOUT; off += 1
+    buf[off:off+1] .= 0x00; off += 2
+    copyto!(buf, off, reinterpret(UInt8, [tick]), 1, 8); off += 8
+    copyto!(buf, off, reinterpret(UInt8, [TRADE_UNIVERSE.hash]), 1, 8); off += 8
+    copyto!(buf, off, reinterpret(UInt8, [UInt16(n_pairs)]), 1, 2); off += 2
+    copyto!(buf, off, reinterpret(UInt8, [UInt16(0)]), 1, 2); off += 2
+    copyto!(buf, off, reinterpret(UInt8, collect(output)), 1, length(output) * 4); off += length(output) * 4
+    copyto!(buf, off, reinterpret(UInt8, collect(relevance)), 1, 16)
     return buf
 end
 
-"""
-    decode_readout(buf::Vector{UInt8}) -> (tick, output, relevance)
-"""
-function decode_readout(buf::Vector{UInt8})
-    length(buf) == 88 || error("Expected 88 bytes, got $(length(buf))")
+function decode_readout_v2(buf::Vector{UInt8})
+    _wire_magic(buf) == WIRE_MAGIC || error("invalid wire magic")
+    off = WIRE_HEADER_BYTES + 1
+    tick = reinterpret(Int64, view(buf, off:off+7))[1]; off += 8
+    hash = reinterpret(UInt64, view(buf, off:off+7))[1]; off += 8
+    hash == TRADE_UNIVERSE.hash || error("readout symbol_table_hash mismatch")
+    n_pairs = Int(reinterpret(UInt16, view(buf, off:off+1))[1]); off += 4
+    n_pairs == N_PAIRS || error("n_pairs $n_pairs != $N_PAIRS")
+    expected = readout_frame_v2_len(n_pairs)
+    length(buf) == expected || error("Expected $expected bytes, got $(length(buf))")
+    n_out = 2 * n_pairs
+    output = collect(reinterpret(Float32, view(buf, off:off + n_out * 4 - 1)))
+    off += n_out * 4
+    relevance = collect(reinterpret(Float32, view(buf, off:off + 15)))
+    return tick, output, relevance
+end
+
+function decode_readout_v1(buf::Vector{UInt8})
+    length(buf) == READOUT_PACKET_V1_BYTES || error("Expected 88 bytes, got $(length(buf))")
+    N_PAIRS == 8 || error("v1 readout requires 8-pair universe")
     tick = reinterpret(Int64, view(buf, 1:8))[1]
     output = collect(reinterpret(Float32, view(buf, 9:72)))
     relevance = collect(reinterpret(Float32, view(buf, 73:88)))
     return tick, output, relevance
+end
+
+function decode_readout(buf::Vector{UInt8})
+    if length(buf) >= WIRE_HEADER_BYTES && _wire_magic(buf) == WIRE_MAGIC
+        return decode_readout_v2(buf)
+    elseif length(buf) == READOUT_PACKET_V1_BYTES
+        return decode_readout_v1(buf)
+    end
+    error("unrecognized Readout frame ($(length(buf)) bytes)")
+end
+
+function classify_wire_frame(buf::Vector{UInt8})
+    if length(buf) >= WIRE_HEADER_BYTES && _wire_magic(buf) == WIRE_MAGIC
+        return buf[6] == FRAME_MARKET_PULSE ? :market_v2 : :readout_v2
+    elseif length(buf) == MARKET_PULSE_V1_BYTES
+        return :market_v1
+    elseif length(buf) == READOUT_PACKET_V1_BYTES
+        return :readout_v1
+    end
+    return :unknown
 end

@@ -1,0 +1,12 @@
+# Runtime tradeable universe — single source of symbol order for brain + muscle.
+# Override path with LIMEN_UNIVERSE (absolute or repo-relative).
+
+symbols = [
+    "DNX",
+    "Quai",
+    "Qubic",
+    "Kaspa",
+    "Monero",
+    "Ocean",
+    "Verus",
+]

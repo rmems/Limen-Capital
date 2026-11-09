@@ -42,6 +42,9 @@ chrono = "0.4"
 # Market feed connectivity
 bytes = "1.5"
 
+# Runtime tradeable universe (`config/universe.toml`)
+toml = "0.8"
+
 # --- live-robinhood (feature-gated; off by default; RM-2436) ---
 # Ed25519 request signing for the Robinhood Crypto Trading API
 ed25519-dalek = { version = "2.1", optional = true }
@@ -50,9 +53,6 @@ base64 = { version = "0.22", optional = true }
 uuid = { version = "1", features = ["v4", "serde"], optional = true }
 # Backoff jitter + synthetic paper quotes
 rand = { version = "0.8", optional = true }
-# LiveConfig TOML
-toml = { version = "0.8", optional = true }
-
 [features]
 default = []
 # Streaming Hawkes / surprise features from kinetic-signals
@@ -65,7 +65,7 @@ axon-encoder = ["dep:axon-encoder"]
 plasticity-lab = ["dep:plasticity-lab"]
 # Live micro-capital experiment: Robinhood Crypto adapter + decision loop (RM-2436).
 # Off by default so `cargo build` compiles no new dependencies.
-live-robinhood = ["dep:ed25519-dalek", "dep:base64", "dep:uuid", "dep:rand", "dep:toml"]
+live-robinhood = ["dep:ed25519-dalek", "dep:base64", "dep:uuid", "dep:rand"]
 
 [[bin]]
 name = "train_ghost"
