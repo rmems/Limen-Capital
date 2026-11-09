@@ -57,3 +57,4 @@ path = "src/bin/market_sim.rs"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+serial_test = "3"

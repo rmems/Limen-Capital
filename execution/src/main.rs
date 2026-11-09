@@ -97,6 +97,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn dispatch_readout_frame(
+    bytes: &[u8],
+    eng: &Arc<tokio::sync::Mutex<ExecutionEngine>>,
+    pulse: &Arc<tokio::sync::Mutex<Option<MarketPulse>>>,
+    unpriced: &Arc<AtomicU64>,
+    max_age_ns: u64,
+) {
+    let packet = match decode_readout(bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            error!("Readout decode failed: {e}");
+            return;
+        }
+    };
+    let mut sig = readout_to_trade_signal(&packet, 0.0, 1.0, None);
+    let engine_clone = eng.clone();
+    let pulse_clone = pulse.clone();
+    let unpriced = unpriced.clone();
+    tokio::spawn(async move {
+        let mut e = engine_clone.lock().await;
+        let priced = {
+            let p = pulse_clone.lock().await;
+            resolve_fill_price(p.as_ref(), &sig.ticker, now_ns(), max_age_ns)
+        };
+        match priced {
+            Ok(px) => sig.price = px,
+            Err(err) => {
+                let n = unpriced.fetch_add(1, Ordering::Relaxed) + 1;
+                if n == 1 || n.is_multiple_of(100) {
+                    warn!(
+                        "[{}] readout refused ({err}); {n} unpriced so far",
+                        sig.ticker
+                    );
+                }
+                return;
+            }
+        }
+        let decision = e.process_signal(sig);
+        tracing::debug!("Decision: {:?}", decision);
+    });
+}
+
 fn process_binary_frame(
     bytes: &[u8],
     eng: &Arc<tokio::sync::Mutex<ExecutionEngine>>,
@@ -104,49 +146,17 @@ fn process_binary_frame(
     unpriced: &Arc<AtomicU64>,
     max_age_ns: u64,
 ) {
-    if bytes.len() == READOUT_PACKET_BYTES {
-        let packet = match decode_readout(bytes) {
-            Ok(p) => p,
-            Err(e) => {
-                error!("Readout decode failed: {e}");
-                return;
-            }
-        };
-        let mut sig = readout_to_trade_signal(&packet, 0.0, 1.0, None);
-        let engine_clone = eng.clone();
-        let pulse_clone = pulse.clone();
-        let unpriced = unpriced.clone();
-        tokio::spawn(async move {
-            let mut e = engine_clone.lock().await;
-            let priced = {
-                let p = pulse_clone.lock().await;
-                resolve_fill_price(p.as_ref(), &sig.ticker, now_ns(), max_age_ns)
-            };
-            match priced {
-                Ok(px) => sig.price = px,
-                Err(err) => {
-                    let n = unpriced.fetch_add(1, Ordering::Relaxed) + 1;
-                    if n == 1 || n.is_multiple_of(100) {
-                        warn!(
-                            "[{}] readout refused ({err}); {n} unpriced so far",
-                            sig.ticker
-                        );
-                    }
-                    return;
-                }
-            }
-            let decision = e.process_signal(sig);
-            tracing::debug!("Decision: {:?}", decision);
-        });
-    } else if bytes.len() == MARKET_PULSE_BYTES {
-        match spikenaut_execution_engine::wire::decode_market_pulse(bytes) {
+    match bytes.len() {
+        READOUT_PACKET_BYTES => {
+            dispatch_readout_frame(bytes, eng, pulse, unpriced, max_age_ns);
+        }
+        MARKET_PULSE_BYTES => match spikenaut_execution_engine::wire::decode_market_pulse(bytes) {
             Ok(mp) => {
                 *pulse.blocking_lock() = Some(mp);
             }
             Err(e) => warn!("MarketPulse decode failed: {e}"),
-        }
-    } else {
-        warn!("Unexpected binary frame {} bytes", bytes.len());
+        },
+        _ => warn!("Unexpected binary frame {} bytes", bytes.len()),
     }
 }
 
