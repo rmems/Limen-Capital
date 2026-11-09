@@ -46,10 +46,8 @@ include(joinpath(@__DIR__, "vault_recorder.jl"))
 # ZMQ configuration (matches Rust side — research defaults are plain TCP)
 const IPC_ENDPOINT = get(ENV, "LIMEN_IPC_SUB", "tcp://127.0.0.1:5555")   # Receive from Rust
 const IPC_PUB_ENDPOINT = get(ENV, "LIMEN_IPC_PUB", "tcp://127.0.0.1:5556") # Send to Rust
-# CURVE encryption is opt-in via ZMQ_CURVE=1 and real keys in env (no secrets in tree)
-const ZMQ_CURVE_ENABLED = get(ENV, "ZMQ_CURVE", "0") == "1"
-const SERVER_SECRET_KEY = get(ENV, "ZMQ_SERVER_KEY", "")
-const CLIENT_PUBLIC_KEY = get(ENV, "ZMQ_CLIENT_KEY", "")
+include(joinpath(@__DIR__, "zmq_curve.jl"))
+using .ZmqCurve
 const COVARIANCE_INTERVAL = 50   # Compute subsampled covariance every N ticks
 # MC off-by-default for experimental iteration; set LIMEN_MC_PATHS to enable
 const MC_PATHS = parse(Int, get(ENV, "LIMEN_MC_PATHS", "0"))
@@ -103,33 +101,40 @@ end
 
 function setup_zmq()
     ctx = ZMQ.Context()
+    zap_state = nothing
 
-    # SUB socket: receive MarketPulse from Rust
+    allowlist = ZmqCurve.curve_enabled() ? ZmqCurve.load_curve_allowlist() : nothing
+    if allowlist !== nothing
+        zap_state = ZmqCurve.start_zap_allowlist!(ctx, allowlist)
+        println("[brain] ZAP allowlist active ($(length(allowlist)) client keys)")
+    end
+
+    # SUB socket: receive MarketPulse from Rust (CURVE client)
     sub = ZMQ.Socket(ctx, ZMQ.SUB)
-    if ZMQ_CURVE_ENABLED
-        isempty(SERVER_SECRET_KEY) && error("ZMQ_CURVE=1 requires ZMQ_SERVER_KEY")
-        ZMQ.set_curve_server(sub, true)
-        ZMQ.set_curve_secretkey(sub, SERVER_SECRET_KEY)
-        println("[brain] CURVE enabled on SUB")
+    if ZmqCurve.curve_enabled()
+        sec = ZmqCurve.client_secret()
+        sec === nothing && error("ZMQ_CURVE=1 requires ZMQ_CLIENT_SECRET_KEY or ZMQ_SERVER_KEY")
+        mpk = ZmqCurve.market_server_public()
+        mpk === nothing && error("ZMQ_CURVE=1 requires ZMQ_MARKET_SERVER_PUBLIC_KEY for market SUB")
+        ZmqCurve.apply_curve_client!(sub, mpk, sec)
+        println("[brain] CURVE client on SUB (market feed)")
     end
     ZMQ.subscribe(sub, "")
     ZMQ.connect(sub, IPC_ENDPOINT)
     println("[brain] ZMQ SUB connected to $IPC_ENDPOINT")
 
-    # PUB socket: send readout signals back to Rust
+    # PUB socket: send readout signals back to Rust (CURVE server)
     pub = ZMQ.Socket(ctx, ZMQ.PUB)
-    if ZMQ_CURVE_ENABLED
-        isempty(CLIENT_PUBLIC_KEY) && error("ZMQ_CURVE=1 requires ZMQ_CLIENT_KEY (server public key)")
-        isempty(SERVER_SECRET_KEY) && error("ZMQ_CURVE=1 requires ZMQ_SERVER_KEY")
-        ZMQ.set_curve_server(pub, false)
-        ZMQ.set_curve_serverkey(pub, CLIENT_PUBLIC_KEY)
-        ZMQ.set_curve_secretkey(pub, SERVER_SECRET_KEY)
-        println("[brain] CURVE enabled on PUB")
+    if ZmqCurve.curve_enabled()
+        sec = ZmqCurve.readout_server_secret()
+        sec === nothing && error("ZMQ_CURVE=1 requires ZMQ_READOUT_SERVER_SECRET or ZMQ_SERVER_KEY for PUB")
+        ZmqCurve.apply_curve_server!(pub, sec; zap=allowlist !== nothing)
+        println("[brain] CURVE server on PUB (readout)")
     end
     ZMQ.bind(pub, IPC_PUB_ENDPOINT)
     println("[brain] ZMQ PUB bound to $IPC_PUB_ENDPOINT")
 
-    return ctx, sub, pub
+    return ctx, sub, pub, zap_state
 end
 
 # ─── Readout Publishing ──────────────────────────────────────────────────────
@@ -186,7 +191,7 @@ function main()
     nero = NeroOrchestrator()
 
     # ── ZMQ connections ──────────────────────────────────────────────────────
-    ctx, sub, pub = setup_zmq()
+    ctx, sub, pub, zap_state = setup_zmq()
 
     # ── Initialize Market Encoder & Vault Recorder (Augmentation) ────────────
     println("[brain] Activating Neuromorphic Augmentation...")
@@ -330,6 +335,9 @@ function main()
         # Cleanup
         if @isdefined vault
             close_vault!(vault)
+        end
+        if @isdefined(zap_state) && zap_state !== nothing
+            ZmqCurve.stop_zap!(zap_state)
         end
         ZMQ.close(sub)
         ZMQ.close(pub)

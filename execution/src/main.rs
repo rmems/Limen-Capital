@@ -23,7 +23,7 @@ use spikenaut_execution_engine::wire::{
     readout_to_trade_signal, resolve_fill_price, MarketPulse, MARKET_PULSE_BYTES,
     READOUT_PACKET_BYTES,
 };
-use spikenaut_execution_engine::{ExecutionEngine, TradeSignal};
+use spikenaut_execution_engine::{zmq_curve, ExecutionEngine, TradeSignal};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -97,6 +97,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn process_binary_frame(
+    bytes: &[u8],
+    eng: &Arc<tokio::sync::Mutex<ExecutionEngine>>,
+    pulse: &Arc<tokio::sync::Mutex<Option<MarketPulse>>>,
+    unpriced: &Arc<AtomicU64>,
+    max_age_ns: u64,
+) {
+    if bytes.len() == READOUT_PACKET_BYTES {
+        let packet = match decode_readout(bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                error!("Readout decode failed: {e}");
+                return;
+            }
+        };
+        let mut sig = readout_to_trade_signal(&packet, 0.0, 1.0, None);
+        let engine_clone = eng.clone();
+        let pulse_clone = pulse.clone();
+        let unpriced = unpriced.clone();
+        tokio::spawn(async move {
+            let mut e = engine_clone.lock().await;
+            let priced = {
+                let p = pulse_clone.lock().await;
+                resolve_fill_price(p.as_ref(), &sig.ticker, now_ns(), max_age_ns)
+            };
+            match priced {
+                Ok(px) => sig.price = px,
+                Err(err) => {
+                    let n = unpriced.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n == 1 || n.is_multiple_of(100) {
+                        warn!(
+                            "[{}] readout refused ({err}); {n} unpriced so far",
+                            sig.ticker
+                        );
+                    }
+                    return;
+                }
+            }
+            let decision = e.process_signal(sig);
+            tracing::debug!("Decision: {:?}", decision);
+        });
+    } else if bytes.len() == MARKET_PULSE_BYTES {
+        match spikenaut_execution_engine::wire::decode_market_pulse(bytes) {
+            Ok(mp) => {
+                *pulse.blocking_lock() = Some(mp);
+            }
+            Err(e) => warn!("MarketPulse decode failed: {e}"),
+        }
+    } else {
+        warn!("Unexpected binary frame {} bytes", bytes.len());
+    }
+}
+
 async fn start_binary_listener(
     engine: Arc<tokio::sync::Mutex<ExecutionEngine>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -112,80 +165,93 @@ async fn start_binary_listener(
     let unpriced = Arc::new(AtomicU64::new(0));
 
     let context = zmq::Context::new();
-    let subscriber = context.socket(zmq::SUB)?;
-    // Brain PUB binds :5556 and the feed PUB binds :5555; the muscle CONNECTS
-    // one SUB to both. Frames are told apart by length (88 B vs 120 B).
-    subscriber.connect(&readout_ep)?;
-    subscriber.connect(&market_ep)?;
-    subscriber.set_subscribe(b"")?;
-    subscriber.set_rcvtimeo(RECV_TIMEOUT.as_millis() as i32)?;
-    info!(
-        "Binary SUB connected to readout {readout_ep} and market {market_ep} (pulse max age {} ms)",
-        max_age_ns / 1_000_000
-    );
+    let _zap = zmq_curve::maybe_start_zap(&context).map_err(|e| format!("ZAP setup: {e}"))?;
+
+    let timeout_ms = RECV_TIMEOUT.as_millis() as i32;
+    let curve_on = zmq_curve::curve_enabled();
 
     let eng = engine.clone();
     let pulse = last_pulse.clone();
     let stop_flag = stop.clone();
-    let listener = tokio::task::spawn_blocking(move || {
-        while !stop_flag.load(Ordering::Relaxed) {
-            let bytes = match subscriber.recv_bytes(0) {
-                Ok(b) => b,
-                Err(zmq::Error::EAGAIN) => continue,
-                Err(e) => {
-                    error!("ZMQ error: {e}");
-                    return;
+    let unpriced_c = unpriced.clone();
+    let max_age = max_age_ns;
+
+    let listener = if curve_on {
+        let client_sec = zmq_curve::client_secret_key_z85()?;
+        let sub_readout = context.socket(zmq::SUB)?;
+        zmq_curve::apply_curve_client(
+            &sub_readout,
+            &zmq_curve::readout_server_public_z85()?,
+            &client_sec,
+            None,
+        )?;
+        sub_readout.connect(&readout_ep)?;
+        sub_readout.set_subscribe(b"")?;
+        sub_readout.set_rcvtimeo(timeout_ms)?;
+
+        let sub_market = context.socket(zmq::SUB)?;
+        zmq_curve::apply_curve_client(
+            &sub_market,
+            &zmq_curve::market_server_public_z85()?,
+            &client_sec,
+            None,
+        )?;
+        sub_market.connect(&market_ep)?;
+        sub_market.set_subscribe(b"")?;
+        sub_market.set_rcvtimeo(timeout_ms)?;
+
+        info!(
+            "Binary CURVE SUBs: readout {readout_ep}, market {market_ep} (ZAP allowlist active: {})",
+            _zap.is_some()
+        );
+
+        tokio::task::spawn_blocking(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                let mut items = [
+                    sub_readout.as_poll_item(zmq::POLLIN),
+                    sub_market.as_poll_item(zmq::POLLIN),
+                ];
+                if zmq::poll(&mut items, i64::from(timeout_ms)).unwrap_or(0) == 0 {
+                    continue;
                 }
-            };
-            if bytes.len() == READOUT_PACKET_BYTES {
-                let packet = match decode_readout(&bytes) {
-                    Ok(p) => p,
+                let sock = if items[0].is_readable() {
+                    &sub_readout
+                } else if items[1].is_readable() {
+                    &sub_market
+                } else {
+                    continue;
+                };
+                let Ok(bytes) = sock.recv_bytes(0) else {
+                    continue;
+                };
+                process_binary_frame(&bytes, &eng, &pulse, &unpriced_c, max_age);
+            }
+        })
+    } else {
+        let subscriber = context.socket(zmq::SUB)?;
+        subscriber.connect(&readout_ep)?;
+        subscriber.connect(&market_ep)?;
+        subscriber.set_subscribe(b"")?;
+        subscriber.set_rcvtimeo(timeout_ms)?;
+        info!(
+            "Binary SUB connected to readout {readout_ep} and market {market_ep} (pulse max age {} ms)",
+            max_age_ns / 1_000_000
+        );
+
+        tokio::task::spawn_blocking(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                let bytes = match subscriber.recv_bytes(0) {
+                    Ok(b) => b,
+                    Err(zmq::Error::EAGAIN) => continue,
                     Err(e) => {
-                        error!("Readout decode failed: {e}");
-                        continue;
+                        error!("ZMQ error: {e}");
+                        return;
                     }
                 };
-                let mut sig = readout_to_trade_signal(&packet, 0.0, 1.0, None);
-                let engine_clone = eng.clone();
-                let pulse_clone = pulse.clone();
-                let unpriced = unpriced.clone();
-                tokio::spawn(async move {
-                    // Price under the engine lock, right before execution, so a
-                    // readout that queued behind other signals is checked against
-                    // the pulse that is current when it actually fills.
-                    let mut e = engine_clone.lock().await;
-                    let priced = {
-                        let p = pulse_clone.lock().await;
-                        resolve_fill_price(p.as_ref(), &sig.ticker, now_ns(), max_age_ns)
-                    };
-                    match priced {
-                        Ok(px) => sig.price = px,
-                        Err(err) => {
-                            let n = unpriced.fetch_add(1, Ordering::Relaxed) + 1;
-                            if n == 1 || n.is_multiple_of(100) {
-                                warn!(
-                                    "[{}] readout refused ({err}); {n} unpriced so far",
-                                    sig.ticker
-                                );
-                            }
-                            return;
-                        }
-                    }
-                    let decision = e.process_signal(sig);
-                    tracing::debug!("Decision: {:?}", decision);
-                });
-            } else if bytes.len() == MARKET_PULSE_BYTES {
-                match spikenaut_execution_engine::wire::decode_market_pulse(&bytes) {
-                    Ok(mp) => {
-                        *pulse.blocking_lock() = Some(mp);
-                    }
-                    Err(e) => warn!("MarketPulse decode failed: {e}"),
-                }
-            } else {
-                warn!("Unexpected binary frame {} bytes", bytes.len());
+                process_binary_frame(&bytes, &eng, &pulse, &unpriced_c, max_age);
             }
-        }
-    });
+        })
+    };
 
     supervise("binary", stop, listener).await
 }

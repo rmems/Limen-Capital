@@ -216,6 +216,26 @@ end
     @test isfile(joinpath(tmp, "test-run", "metrics.json"))
 end
 
+@testset "ZmqCurve allowlist config (no keys in tree)" begin
+    include(joinpath(BRAIN, "zmq_curve.jl"))
+    import .ZmqCurve
+    old = copy(ENV)
+    try
+        ENV["ZMQ_CURVE_ALLOWLIST"] = " KeyA , KeyB ; KeyA "
+        keys = ZmqCurve.load_curve_allowlist()
+        @test keys == ["KeyA", "KeyB"]
+        for k in ("ZMQ_CURVE_ALLOWLIST", "ZMQ_CURVE")
+            haskey(ENV, k) && delete!(ENV, k)
+        end
+        @test ZmqCurve.load_curve_allowlist() === nothing
+        @test ZmqCurve.curve_enabled() == false
+    finally
+        for k in keys(ENV)
+            haskey(old, k) ? (ENV[k] = old[k]) : delete!(ENV, k)
+        end
+    end
+end
+
 @testset "ReadoutPacket wire" begin
     tick = Int64(42)
     output = zeros(Float32, 16)

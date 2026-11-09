@@ -15,6 +15,7 @@ pub mod binary_wire;
 pub mod dydx;
 pub mod kelly;
 pub mod wire;
+pub mod zmq_curve;
 
 pub use metabolic_ledger::{execute_buy, execute_sell, GhostWallet, MarketPrices};
 

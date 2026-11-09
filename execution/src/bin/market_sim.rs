@@ -5,6 +5,7 @@
 //!   LIMEN_SIM_HZ=10 cargo run --bin market_sim
 
 use spikenaut_execution_engine::wire::MarketPulse;
+use spikenaut_execution_engine::zmq_curve;
 use std::f32::consts::PI;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,7 +25,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let period = Duration::from_secs_f64(1.0 / hz.max(0.1));
 
     let ctx = zmq::Context::new();
+    let _zap = zmq_curve::maybe_start_zap(&ctx).map_err(|e| format!("ZAP setup: {e}"))?;
     let publisher = ctx.socket(zmq::PUB)?;
+    if zmq_curve::curve_enabled() {
+        let use_zap = _zap.is_some();
+        let secret = zmq_curve::market_server_secret_z85()?;
+        zmq_curve::apply_curve_server(&publisher, &secret, use_zap)?;
+        info!("market_sim CURVE enabled (ZAP allowlist={use_zap})");
+    }
     // Brain SUB connects; feed PUB binds
     publisher.bind(&endpoint)?;
     info!("market_sim PUB bound to {endpoint} @ {hz} Hz");

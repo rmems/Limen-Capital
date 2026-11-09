@@ -17,20 +17,40 @@ exchange gateway. Default configuration assumes a **single-user, loopback-trust*
 - Live capital / mainnet order routing
 - Exchange API key management
 - Multi-tenant host hardening beyond user-scoped IPC defaults
-- ZAP / client public-key allowlisting for CURVE (see open issue on optional ZAP)
+- ZAP allowlist is optional when `ZMQ_CURVE=1` (see below); default stack does not use CURVE
 
 ## Enabling ZMQ CURVE (optional)
 
 Research default is **plain ZMQ** on loopback.
 
-**Not end-to-end yet:** only the Julia brain path currently has CURVE hooks. The bundled Rust publisher/subscriber peers still use plain ZMQ. Setting `ZMQ_CURVE=1` on the brain alone will break MarketPulse / ReadoutPacket links until both sides use compatible CURVE roles and keys. Treat this as a future dual-side upgrade (tracked with optional ZAP allowlisting).
+When `ZMQ_CURVE=1`, brain (`spike_helm.jl`), muscle (`execution`), and `market_sim` configure CURVE on the binary wire. The default without `ZMQ_CURVE=1` is unchanged plain TCP loopback.
 
-When both ends support CURVE:
+**CURVE roles (fixes one-sided mis-bindings — see issue #24):**
 
-1. Set `ZMQ_CURVE=1` on **every** peer (brain and muscle).
-2. Provide real CURVE material via env only (never commit keys):
-   - `ZMQ_SERVER_KEY` / `ZMQ_CLIENT_KEY` (and any peer public keys your build expects).
-3. Do **not** treat CURVE alone as multi-user authentication until an allowlist (ZAP) lands.
+| Peer | Socket | Role |
+|------|--------|------|
+| `market_sim` | PUB `:5555` | CURVE **server** |
+| brain | SUB → `:5555` | CURVE **client** (to market) |
+| brain | PUB `:5556` | CURVE **server** |
+| muscle | SUB ×2 | CURVE **client** (separate sockets per remote server public key) |
+
+Keys via env only (never commit):
+
+- Server bind secrets: `ZMQ_MARKET_SERVER_SECRET` / `ZMQ_READOUT_SERVER_SECRET` (or legacy `ZMQ_SERVER_KEY` per role)
+- Client identity: `ZMQ_CLIENT_SECRET_KEY` + `ZMQ_CLIENT_PUBLIC_KEY` (or legacy `ZMQ_SERVER_KEY` for single-key research setups on brain)
+- Remote server public keys: `ZMQ_MARKET_SERVER_PUBLIC_KEY`, `ZMQ_READOUT_SERVER_PUBLIC_KEY` (legacy muscle alias: `ZMQ_CLIENT_KEY` for readout)
+
+### Optional ZAP client allowlist
+
+When `ZMQ_CURVE=1` **and** an allowlist is configured, CURVE **servers** start an in-process ZAP handler and reject handshakes from CURVE clients whose **public key (Z85)** is not listed. Without an allowlist, CURVE still encrypts but accepts any client that completes a valid handshake (same as before).
+
+| Variable | Meaning |
+|----------|---------|
+| `ZMQ_CURVE_ALLOWLIST` | Comma/whitespace-separated client **public** keys (Z85) |
+| `ZMQ_CURVE_ALLOWLIST_FILE` | Path to one public key per line (`#` comments allowed) |
+| `ZMQ_ZAP_DOMAIN` | ZAP domain on server sockets (default `limen-capital`) |
+
+Generate keypairs at runtime (example): `cargo run -p spikenaut-execution-engine --example version` is not a keygen — use `zmq_curve_keypair` from libzmq tooling or the unit tests’ `CurveKeyPair::new()` pattern in CI-only fixtures.
 
 ## Safer JSON IPC
 
@@ -63,7 +83,7 @@ If other users can run processes on the same machine:
 
 ## Residual risks (known)
 
-1. **No ZAP allowlist** — CURVE encrypts but does not yet restrict which client keys are accepted.
+1. **ZAP is opt-in** — without `ZMQ_CURVE_ALLOWLIST*` set, CURVE does not restrict client keys.
 2. **Loopback is not multi-tenant security** — co-located attackers with the same privileges can still talk to local sockets.
 3. **Ghost ledger only** — accidental wiring to a live broker is operator error; this repo does not ship exchange keys.
 

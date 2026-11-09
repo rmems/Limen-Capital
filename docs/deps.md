@@ -66,7 +66,11 @@ Fallback: `LIMEN_RESERVOIR=naut_core` uses in-tree `brain/naut_core.jl` without 
 | `LIMEN_WIRE` | `binary` / `json` on muscle | `binary` |
 | `LIMEN_CONFIDENCE_THRESHOLD` | Execution gate | `0.15` (research default) |
 | `ZMQ_CURVE` | Enable CURVE (`1`) | `0` |
-| `ZMQ_SERVER_KEY` / `ZMQ_CLIENT_KEY` | CURVE material | empty (required if CURVE on) |
+| `ZMQ_*_SERVER_SECRET` / `ZMQ_SERVER_KEY` | CURVE server bind secrets | empty (required on server sockets if CURVE on) |
+| `ZMQ_CLIENT_SECRET_KEY` / `ZMQ_CLIENT_PUBLIC_KEY` | CURVE client identity | empty (required on client sockets if CURVE on) |
+| `ZMQ_MARKET_SERVER_PUBLIC_KEY` / `ZMQ_READOUT_SERVER_PUBLIC_KEY` | Remote server public (Z85) | empty |
+| `ZMQ_CURVE_ALLOWLIST` / `ZMQ_CURVE_ALLOWLIST_FILE` | Optional ZAP client public-key allowlist | unset |
+| `ZMQ_ZAP_DOMAIN` | ZAP domain for server sockets | `limen-capital` |
 
 See also **[docs/SECURITY.md](SECURITY.md)**.
 

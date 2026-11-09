@@ -9,7 +9,9 @@ Single canonical path for experimental SNN-HFT between Julia brain and Rust musc
 | Rust → Julia | `tcp://127.0.0.1:5555` (`LIMEN_IPC_SUB`) | PUB/SUB | **MarketPulse** 120 bytes |
 | Julia → Rust | `tcp://127.0.0.1:5556` (`LIMEN_IPC_PUB`) | PUB/SUB | **ReadoutPacket** 88 bytes |
 
-Override via env. Research default is **plain ZMQ** (no CURVE). Set `ZMQ_CURVE=1` and supply real keys only when needed.
+Override via env. Research default is **plain ZMQ** (no CURVE). Set `ZMQ_CURVE=1` and supply real keys via env only (`docs/SECURITY.md`).
+
+With `ZMQ_CURVE=1`, both link directions use CURVE: market feed PUB (`market_sim` / `:5555`) and readout PUB (brain / `:5556`) act as CURVE servers; brain SUB and muscle SUB act as clients. Optionally restrict which client public keys may connect to a server by setting `ZMQ_CURVE_ALLOWLIST` or `ZMQ_CURVE_ALLOWLIST_FILE` (ZAP). Plain loopback without `ZMQ_CURVE=1` is unchanged.
 
 ## MarketPulse — 120 bytes (little-endian)
 
