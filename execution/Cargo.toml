@@ -69,5 +69,11 @@ path = "src/bin/train_ghost.rs"
 name = "market_sim"
 path = "src/bin/market_sim.rs"
 
+# RM-2436 live micro-capital experiment (feature-gated)
+[[bin]]
+name = "limen-live"
+path = "src/bin/limen_live.rs"
+required-features = ["live-robinhood"]
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
