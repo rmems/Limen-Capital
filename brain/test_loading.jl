@@ -76,7 +76,7 @@ function run_loading_validation()
     end
 
     # Optional packages (vault recorder deps)
-    optional_packages = [:Polars, :DuckDB, :DataFrames]
+    optional_packages = [:DuckDB, :DataFrames]
     for pkg in optional_packages
         try
             @eval using $pkg

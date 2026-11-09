@@ -83,6 +83,16 @@ jobs:
       - name: Cache Julia artifacts
         uses: julia-actions/cache@a45e8fa8be21c18a06b7177052533149e61e9b38 # v3.1.0
 
+      # Resolve-only gate: proves brain/Project.toml is installable (UUIDs,
+      # registry membership, compat, git [sources]) without downloading CUDA
+      # artifacts or precompiling. Writes a throwaway Manifest.
+      - name: Resolve brain Project.toml
+        run: |
+          julia --color=yes --project=. -e 'using Pkg; Pkg.resolve()'
+        working-directory: brain
+        env:
+          JULIA_PKG_PRECOMPILE_AUTO: "0"
+
       # Unit tests only need Test + Random + local includes.
       # Skip full Project.toml instantiate (CUDA / DuckDB / LiquidCortex are heavy
       # and optional for the CPU wire/encoder suite).

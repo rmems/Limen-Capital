@@ -1,8 +1,7 @@
-# vault_recorder.jl — DuckDB + Polars market/spike storage
+# vault_recorder.jl — DuckDB + DataFrames market/spike storage
 #
 # High-speed local gather for research ticks. Not live capital vaulting.
 
-using Polars
 using DuckDB
 using DataFrames
 using Dates
@@ -29,7 +28,7 @@ end
 
 """
     VaultRecorder(batch_size=100)
-Initialize the DuckDB storage and Polars buffers.
+Initialize the DuckDB storage and row buffers.
 """
 function VaultRecorder(batch_size::Int=100)
     # Ensure directory exists
@@ -68,7 +67,7 @@ end
 
 """
     record_tick!(vault, pulse::MarketPulse, ensemble::EnsembleBrain)
-Accumulates a single tick's market and spike data into Polars buffers.
+Accumulates a single tick's market and spike data into row buffers.
 """
 function record_tick!(vr::VaultRecorder, pulse::MarketPulse, ensemble::EnsembleBrain)
     vr.tick_count += 1
@@ -110,7 +109,7 @@ end
 
 """
     flush_vault!(vault)
-Converts buffers to Polars DataFrames and appends to DuckDB.
+Converts buffers to DataFrames and appends to DuckDB.
 """
 function flush_vault!(vr::VaultRecorder)
     if isempty(vr.market_buffer)
@@ -121,7 +120,6 @@ function flush_vault!(vr::VaultRecorder)
     
     # ── Market Data ────────────────────────────────────────────────────────
     df_market = DataFrame(vr.market_buffer)
-    # Convert to Polars for extra speed if needed, but DuckDB.register works with DataFrames
     DuckDB.register_data_frame(vr.con, df_market, "temp_market")
     DuckDB.execute(vr.con, "INSERT INTO market_events SELECT * FROM temp_market")
     DuckDB.unregister_data_frame(vr.con, "temp_market")
