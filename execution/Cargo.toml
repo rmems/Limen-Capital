@@ -40,12 +40,26 @@ chrono = "0.4"
 # Market feed connectivity
 bytes = "1.5"
 
+# --- live-robinhood (feature-gated; off by default; RM-2436) ---
+# Ed25519 request signing for the Robinhood Crypto Trading API
+ed25519-dalek = { version = "2.1", optional = true }
+base64 = { version = "0.22", optional = true }
+# client_order_id idempotency keys
+uuid = { version = "1", features = ["v4", "serde"], optional = true }
+# Backoff jitter + synthetic paper quotes
+rand = { version = "0.8", optional = true }
+# LiveConfig TOML
+toml = { version = "0.8", optional = true }
+
 [features]
 default = []
 # Streaming Hawkes / surprise features from kinetic-signals
 kinetic = ["dep:kinetic-signals"]
 # Reference LIF primitives (research helpers)
 snn = ["dep:neuromod"]
+# Live micro-capital experiment: Robinhood Crypto adapter + decision loop (RM-2436).
+# Off by default so `cargo build` compiles no new dependencies.
+live-robinhood = ["dep:ed25519-dalek", "dep:base64", "dep:uuid", "dep:rand", "dep:toml"]
 
 [[bin]]
 name = "train_ghost"
@@ -55,6 +69,13 @@ path = "src/bin/train_ghost.rs"
 name = "market_sim"
 path = "src/bin/market_sim.rs"
 
+# RM-2436 live micro-capital experiment (feature-gated)
+[[bin]]
+name = "limen-live"
+path = "src/bin/limen_live.rs"
+required-features = ["live-robinhood"]
+
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 serial_test = "3"

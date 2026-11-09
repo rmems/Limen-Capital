@@ -14,6 +14,10 @@
 pub mod binary_wire;
 pub mod dydx;
 pub mod kelly;
+/// Live micro-capital experiment (RM-2436): Robinhood Crypto adapter + decision loop.
+/// Feature-gated; **not** part of the research path and not a research result.
+#[cfg(feature = "live-robinhood")]
+pub mod live;
 pub mod wire;
 pub mod zmq_curve;
 
