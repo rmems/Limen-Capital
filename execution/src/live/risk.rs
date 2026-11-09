@@ -127,6 +127,11 @@ pub struct RiskInputs {
     /// Realized PnL for the current UTC day (negative = loss).
     pub daily_pnl_usd: f64,
     pub llm_cost_today_usd: f64,
+    /// Notional of resting (unfilled) orders. Resting buys will add exposure
+    /// when they fill; resting sells mean the position they reserve is still
+    /// held (and `MarketState::position_qty` excludes reserved units), so both
+    /// count towards the position cap.
+    pub resting_notional_usd: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -428,9 +433,10 @@ pub fn check(
 
     match side {
         OrderSide::Buy => {
-            if state.position_usd + size > limits.max_position_usd + 1e-9 {
+            let committed = state.position_usd + inputs.resting_notional_usd.max(0.0);
+            if committed + size > limits.max_position_usd + 1e-9 {
                 return Rejected(R::PositionCapExceeded {
-                    position_usd: state.position_usd,
+                    position_usd: committed,
                     size_usd: size,
                     cap_usd: limits.max_position_usd,
                 });
@@ -516,6 +522,7 @@ mod tests {
             open_orders: 0,
             daily_pnl_usd: 0.0,
             llm_cost_today_usd: 0.0,
+            resting_notional_usd: 0.0,
         }
     }
 
@@ -771,6 +778,27 @@ mod tests {
             &limits(),
             &inputs(),
         ));
+    }
+
+    #[test]
+    fn position_cap_counts_resting_order_notional() {
+        // Flat book with $5.50 of buys already resting and max_open_orders
+        // raised: another $5 buy would commit $10.50 > $10.
+        let s = state(100_000.0, 100_010.0, 0.0, 10.0);
+        let mut i = inputs();
+        i.resting_notional_usd = 5.5;
+        let l = RiskLimits {
+            max_open_orders: 3,
+            ..Default::default()
+        };
+        let r = reject(check(&Decision::buy(5.0, ""), &s, &pair(), &l, &i));
+        assert!(
+            matches!(r, RiskReject::PositionCapExceeded { position_usd, .. } if (position_usd - 5.5).abs() < 1e-9),
+            "{r:?}"
+        );
+        // Exactly at the cap with the resting order counted is still fine.
+        i.resting_notional_usd = 5.0;
+        approved(check(&Decision::buy(5.0, ""), &s, &pair(), &l, &i));
     }
 
     #[test]

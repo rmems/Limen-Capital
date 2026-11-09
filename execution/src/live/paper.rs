@@ -81,6 +81,14 @@ impl PaperBook {
         (self.cash_usd - reserved).max(0.0)
     }
 
+    /// Notional (price × qty) of every resting order, both sides.
+    pub fn resting_notional_usd(&self) -> f64 {
+        self.open_orders
+            .iter()
+            .map(|o| o.limit_price * o.asset_qty)
+            .sum()
+    }
+
     /// Position not reserved by resting sell orders.
     pub fn free_position_qty(&self) -> f64 {
         let reserved: f64 = self
@@ -206,6 +214,7 @@ mod tests {
         assert_eq!(o.id, "paper-1");
         assert_eq!(b.open_orders.len(), 1);
         assert!((b.free_cash_usd() - (10.0 - 5.05)).abs() < 1e-9);
+        assert!((b.resting_notional_usd() - 5.0).abs() < 1e-9);
         // Ask above limit: no fill, not stale yet.
         assert!(b.on_tick(99.0, 100.5, 2, 2).is_empty());
         // Ask at limit: fills at limit.

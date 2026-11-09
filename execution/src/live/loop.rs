@@ -209,7 +209,7 @@ pub async fn run_with_parts(
         pair,
         mut decider,
         mut book,
-        journal,
+        mut journal,
         account_line,
         day_start_realized,
     } = parts;
@@ -282,6 +282,44 @@ pub async fn run_with_parts(
             }
         };
 
+        // 0. A crossed / non-positive / non-finite quote touches nothing: no
+        //    paper fills, no decision, and it is kept out of the mids window.
+        if !quote.is_sane() {
+            warn!(
+                "bad quote bid={} ask={}: skipping tick {tick}",
+                quote.bid, quote.ask
+            );
+            let row = JournalRow {
+                ts_utc: iso(now),
+                tick,
+                symbol: cfg.symbol.clone(),
+                bid: quote.bid,
+                ask: quote.ask,
+                mid: quote.mid(),
+                spread_bps: quote.spread_bps(),
+                position_qty: book.position_qty,
+                position_usd: 0.0,
+                cash_usd: book.cash_usd,
+                realized_pnl_usd: book.realized_pnl_usd,
+                decider: decider.name().to_string(),
+                action: "none".into(),
+                reason: "bad_quote".into(),
+                risk: "rejected:bad_quote".into(),
+                ..Default::default()
+            };
+            journal.append(&row)?;
+            summary.ticks = tick;
+            if max_ticks != 0 && tick >= max_ticks {
+                break;
+            }
+            if !sleep_or_ctrl_c(cfg.tick_interval_secs).await {
+                info!("ctrl-c: stopping");
+                summary.halted_reason = Some("ctrl_c".into());
+                break;
+            }
+            continue;
+        }
+
         // 1. Resting paper orders react to the new quote first.
         let events = book.on_tick(quote.bid, quote.ask, tick, limits.stale_order_ticks);
         let mut order_col = String::new();
@@ -320,7 +358,10 @@ pub async fn run_with_parts(
             }
         }
 
-        // 2. Build the state the decider and risk see.
+        // 2. Build the state the decider and risk see. Cash is what can be
+        //    spent on notional *after* the fill fee, so a max-size buy can
+        //    never drive the book negative.
+        let spendable_cash = book.free_cash_usd() / (1.0 + book.fee_ratio);
         let state = MarketState::new(
             now,
             tick,
@@ -329,7 +370,7 @@ pub async fn run_with_parts(
             quote.ask,
             book.free_position_qty(),
             book.avg_cost_usd,
-            book.free_cash_usd(),
+            spendable_cash,
             book.realized_pnl_usd,
             recent_mids.clone(),
         );
@@ -341,6 +382,7 @@ pub async fn run_with_parts(
             open_orders: book.open_orders.len(),
             daily_pnl_usd: book.realized_pnl_usd - day_start_realized,
             llm_cost_today_usd: decider.llm_cost_today_usd(),
+            resting_notional_usd: book.resting_notional_usd(),
         };
 
         let mut row = JournalRow {
@@ -537,6 +579,100 @@ mod tests {
         assert_eq!(short_id("c8f53536-d7b4-44fd-8076-cac31e8f3880"), "c8f53536");
         assert_eq!(short_id("abc"), "abc");
         assert_eq!(short_id(""), "");
+    }
+
+    /// Scripted quotes for deterministic loop tests.
+    struct ScriptedMarket(std::collections::VecDeque<(f64, f64)>);
+
+    impl MarketSource for ScriptedMarket {
+        fn label(&self) -> String {
+            "scripted".into()
+        }
+        fn quote<'a>(&'a mut self, symbol: &'a str) -> crate::live::market::QuoteFuture<'a> {
+            let (bid, ask) = self.0.pop_front().unwrap_or((100.0, 100.1));
+            let q = crate::live::robinhood::types::BestBidAsk {
+                symbol: symbol.to_string(),
+                bid,
+                ask,
+            };
+            Box::pin(async move { Ok(q) })
+        }
+    }
+
+    async fn scripted_parts(c: &LiveConfig, quotes: &[(f64, f64)], cash: f64) -> LoopParts {
+        let mut parts = build_parts(c, &Secrets::default()).await.unwrap();
+        parts.market = Box::new(ScriptedMarket(quotes.iter().copied().collect()));
+        parts.book = PaperBook::new(cash, c.paper_fee_ratio);
+        parts
+    }
+
+    #[tokio::test]
+    async fn bad_quote_touches_nothing_and_stays_out_of_the_window() {
+        let p = tmp("badquote");
+        let mut c = cfg(&p, 1);
+        c.risk.min_tick_interval_secs = 1;
+        c.rules.entry_bps = 1.0;
+        // tick 1 sane, tick 2 crossed, tick 3 sane: tick 3 must say warming_up 2/3.
+        let parts =
+            scripted_parts(&c, &[(100.0, 100.1), (100.2, 100.0), (100.0, 100.1)], 10.0).await;
+        let s = run_with_parts(
+            &c,
+            &RunOptions {
+                once: false,
+                max_ticks: 3,
+            },
+            parts,
+        )
+        .await
+        .unwrap();
+        assert_eq!(s.ticks, 3);
+        assert_eq!(s.orders_placed, 0);
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("rejected:bad_quote"), "{text}");
+        assert!(text.contains("warming_up 2/3"), "{text}");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[tokio::test]
+    async fn max_size_buy_never_drives_paper_cash_negative() {
+        let p = tmp("fee");
+        let mut c = cfg(&p, 1);
+        c.risk.min_tick_interval_secs = 1;
+        c.rules.entry_bps = 1.0;
+        c.rules.order_usd = 50.0; // decider wants more than the $5 cap; cash is the binding limit
+        c.risk.max_order_usd = 10.0;
+        // Three flat quotes to warm up, a dip to trigger the buy, then a lower ask to fill it.
+        let parts = scripted_parts(
+            &c,
+            &[
+                (100.0, 100.1),
+                (100.0, 100.1),
+                (100.0, 100.1),
+                (99.0, 99.1),
+                (98.0, 98.1),
+            ],
+            5.0,
+        )
+        .await;
+        let s = run_with_parts(
+            &c,
+            &RunOptions {
+                once: false,
+                max_ticks: 5,
+            },
+            parts,
+        )
+        .await
+        .unwrap();
+        assert_eq!(s.orders_placed, 1, "{s:?}");
+        assert_eq!(s.fills, 1, "{s:?}");
+        let text = std::fs::read_to_string(&p).unwrap();
+        // Cash column of the last row is non-negative and the fee was charged.
+        let last = text.lines().last().unwrap();
+        let cash: f64 = last.split(" | ").nth(9).unwrap().parse().unwrap();
+        assert!(cash >= 0.0, "cash went negative: {last}");
+        assert!(s.fees_paid_usd > 0.0);
+        let _ = std::fs::remove_file(&p);
     }
 
     #[tokio::test]

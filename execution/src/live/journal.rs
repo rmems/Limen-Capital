@@ -6,9 +6,13 @@
 //! `tail(n)` returns the last `n` rows for the decider prompt.
 
 use crate::live::risk::RiskLimits;
+use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+/// How many recent rows are kept in memory for `tail`.
+pub const RECENT_ROWS: usize = 32;
 
 pub const COLUMNS: &[&str] = &[
     "ts (UTC)",
@@ -119,11 +123,49 @@ impl JournalRow {
 #[derive(Debug, Clone)]
 pub struct Journal {
     path: PathBuf,
+    /// Last [`RECENT_ROWS`] rows, oldest first. Seeded from the file by
+    /// `ensure_header`, then maintained by `append`, so a tick never re-reads
+    /// the whole (growing) file.
+    recent: VecDeque<String>,
+    loaded: bool,
 }
 
 impl Journal {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            recent: VecDeque::with_capacity(RECENT_ROWS),
+            loaded: false,
+        }
+    }
+
+    fn is_data_row(line: &str) -> bool {
+        line.starts_with("| ") && !line.starts_with("| ts (UTC)")
+    }
+
+    fn remember(&mut self, row: String) {
+        if self.recent.len() == RECENT_ROWS {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(row);
+    }
+
+    /// Read the existing file once and keep its last rows in memory.
+    fn load_recent(&mut self) -> io::Result<()> {
+        if self.loaded {
+            return Ok(());
+        }
+        match fs::read_to_string(&self.path) {
+            Ok(text) => {
+                for line in text.lines().filter(|l| Self::is_data_row(l)) {
+                    self.remember(line.to_string());
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        self.loaded = true;
+        Ok(())
     }
 
     pub fn path(&self) -> &Path {
@@ -170,7 +212,8 @@ impl Journal {
     }
 
     /// Create the file with its header if it does not exist or is empty.
-    pub fn ensure_header(&self, header: &JournalHeader) -> io::Result<()> {
+    pub fn ensure_header(&mut self, header: &JournalHeader) -> io::Result<()> {
+        self.load_recent()?;
         if let Some(parent) = self.path.parent() {
             if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent)?;
@@ -185,47 +228,47 @@ impl Journal {
             f.flush()?;
         } else {
             // Appending to an existing journal: mark the new run.
-            let mut f = OpenOptions::new().append(true).open(&self.path)?;
-            writeln!(
-                f,
+            let marker = format!(
                 "| {} | 0 | {} | 0.00 | 0.00 | 0.00 | 0.00 | 0.00000000 | 0.0000 | 0.0000 | 0.0000 | - | run_start | 0.0000 | mode={} market={} decider={} | - | - | - | +0.0000 | 0.0000 |",
                 cell(&header.started_utc),
                 cell(&header.symbol),
                 cell(&header.mode),
                 cell(&header.market_source),
                 cell(&header.decider)
-            )?;
+            );
+            let mut f = OpenOptions::new().append(true).open(&self.path)?;
+            writeln!(f, "{marker}")?;
+            self.remember(marker);
         }
         Ok(())
     }
 
-    pub fn append(&self, row: &JournalRow) -> io::Result<()> {
+    pub fn append(&mut self, row: &JournalRow) -> io::Result<()> {
+        let line = row.to_markdown();
         let mut f = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)?;
-        writeln!(f, "{}", row.to_markdown())?;
-        f.flush()
+        writeln!(f, "{line}")?;
+        f.flush()?;
+        self.remember(line);
+        Ok(())
     }
 
-    /// Last `n` data rows (markdown lines), oldest first.
-    pub fn tail(&self, n: usize) -> io::Result<Vec<String>> {
-        let text = match fs::read_to_string(&self.path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
-            Err(e) => return Err(e),
-        };
-        let rows: Vec<&str> = text
-            .lines()
-            .filter(|l| l.starts_with("| ") && !l.starts_with("| ts (UTC)"))
-            .collect();
-        let start = rows.len().saturating_sub(n);
-        Ok(rows[start..].iter().map(|s| s.to_string()).collect())
+    /// Last `n` (≤ [`RECENT_ROWS`]) data rows, oldest first, from memory.
+    pub fn tail(&mut self, n: usize) -> io::Result<Vec<String>> {
+        self.load_recent()?;
+        let start = self.recent.len().saturating_sub(n);
+        Ok(self.recent.iter().skip(start).cloned().collect())
     }
 
-    /// Total data rows (for tests / summaries).
+    /// Total data rows on disk (scans the file; for tests / summaries only).
     pub fn row_count(&self) -> io::Result<usize> {
-        Ok(self.tail(usize::MAX)?.len())
+        match fs::read_to_string(&self.path) {
+            Ok(text) => Ok(text.lines().filter(|l| Self::is_data_row(l)).count()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -283,7 +326,7 @@ mod tests {
     #[test]
     fn header_then_rows_then_tail() {
         let p = tmp("basic");
-        let j = Journal::new(&p);
+        let mut j = Journal::new(&p);
         j.ensure_header(&header()).unwrap();
         j.append(&row(1, "a")).unwrap();
         j.append(&row(2, "b")).unwrap();
@@ -322,5 +365,26 @@ mod tests {
     fn tail_on_missing_file_is_empty() {
         let p = tmp("missing");
         assert!(Journal::new(&p).tail(5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn tail_is_served_from_memory_and_reloads_existing_file() {
+        let p = tmp("memory");
+        let mut j = Journal::new(&p);
+        j.ensure_header(&header()).unwrap();
+        for i in 1..=(RECENT_ROWS as u64 + 5) {
+            j.append(&row(i, "r")).unwrap();
+        }
+        let t = j.tail(3).unwrap();
+        assert!(t[2].contains(&format!("| {} |", RECENT_ROWS + 5)));
+        assert_eq!(j.tail(usize::MAX).unwrap().len(), RECENT_ROWS);
+        assert_eq!(j.row_count().unwrap(), RECENT_ROWS + 5);
+        // A fresh handle on the same file sees the last rows without a header rewrite.
+        let mut j2 = Journal::new(&p);
+        j2.ensure_header(&header()).unwrap();
+        let t2 = j2.tail(2).unwrap();
+        assert!(t2[0].contains(&format!("| {} |", RECENT_ROWS + 5)));
+        assert!(t2[1].contains("run_start"));
+        let _ = fs::remove_file(&p);
     }
 }
