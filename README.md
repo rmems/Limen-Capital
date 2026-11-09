@@ -102,10 +102,20 @@ MC fan-out stays **off** in research mode (`LIMEN_MC_PATHS` only for live helm).
 
 ```bash
 cd execution/
+# Terminal A: MarketPulse feed on :5555 (the only in-tree publisher; the helm
+# blocks until it sees a pulse, and the muscle refuses to fill without one)
+cargo run --release --bin market_sim
+
+# Terminal B: muscle — SUBs to readouts on :5556 and pulses on :5555
 cargo run --release
-# Binary ReadoutPacket on :5556 by default; LIMEN_WIRE=json for legacy IPC
+# LIMEN_WIRE=json for legacy IPC
 # LIMEN_CONFIDENCE_THRESHOLD=0.15  (research default in main)
+# LIMEN_PULSE_MAX_AGE_MS=2000      (readouts are refused when the last pulse is older)
 ```
+
+Fills are priced from the last `MarketPulse`. A readout that arrives before the
+first pulse, after the pulse goes stale, or whose primary pair is RESIDUAL is
+refused and logged — never filled at a placeholder price.
 
 `ExecutionEngine::process_signal`: confidence gate → Neutral → **0.25× Kelly size**
 (from ATP bankroll, b=0.05) → max-qty gate → ghost fill. Zero Kelly → `RejectedNoEdge`.

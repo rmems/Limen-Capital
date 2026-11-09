@@ -1,8 +1,13 @@
 //! Limen-Capital Execution Engine — binary NervousWire listener (v1).
 //!
 //! Subscribes to Julia brain **ReadoutPacket** (88 B) on `LIMEN_IPC_PUB`
-//! (default `tcp://127.0.0.1:5556`), maps to `TradeSignal`, runs confidence
-//! gates, and executes ghost trades via metabolic-ledger.
+//! (default `tcp://127.0.0.1:5556`) and to the **MarketPulse** feed (120 B) on
+//! `LIMEN_IPC_SUB` (default `tcp://127.0.0.1:5555`, e.g. `market_sim`). Each
+//! readout is priced from the last pulse, mapped to `TradeSignal`, run through
+//! the confidence gates, and ghost-traded via metabolic-ledger. Readouts are
+//! refused (not filled at a placeholder price) until a pulse has arrived, when
+//! the pulse is older than `LIMEN_PULSE_MAX_AGE_MS` (default 2000), or when the
+//! primary pair is RESIDUAL.
 //!
 //! Optional: set `LIMEN_WIRE=json` to use legacy JSON IPC.
 //! Endpoint: `LIMEN_JSON_IPC` (must be `ipc://` + absolute path), else
@@ -14,12 +19,21 @@
 //!   LIMEN_WIRE=json cargo run --release
 
 use spikenaut_execution_engine::wire::{
-    decode_readout, json_ipc_endpoint, price_for_ticker, readout_endpoint, readout_to_trade_signal,
-    MarketPulse,
+    decode_readout, json_ipc_endpoint, market_endpoint, pulse_max_age_ns, readout_endpoint,
+    readout_to_trade_signal, resolve_fill_price, MarketPulse, MARKET_PULSE_BYTES,
+    READOUT_PACKET_BYTES,
 };
 use spikenaut_execution_engine::{ExecutionEngine, TradeSignal};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
+
+fn now_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -54,55 +68,84 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn start_binary_listener(
     engine: Arc<tokio::sync::Mutex<ExecutionEngine>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let endpoint = readout_endpoint();
-    // Last market prices for sizing (updated if publisher also sends pulses on same process later)
-    let last_pulse = Arc::new(tokio::sync::Mutex::new(MarketPulse::default()));
+    let readout_ep = readout_endpoint();
+    let market_ep = market_endpoint();
+    let max_age_ns = pulse_max_age_ns();
+    // Last MarketPulse; `None` until the feed delivers one. Fills are refused
+    // without a fresh pulse rather than priced at a placeholder.
+    let last_pulse: Arc<tokio::sync::Mutex<Option<MarketPulse>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
 
     let context = zmq::Context::new();
     let subscriber = context.socket(zmq::SUB)?;
-    // Brain PUB binds :5556; muscle CONNECTS
-    subscriber.connect(&endpoint)?;
+    // Brain PUB binds :5556 and the feed PUB binds :5555; the muscle CONNECTS
+    // one SUB to both. Frames are told apart by length (88 B vs 120 B).
+    subscriber.connect(&readout_ep)?;
+    subscriber.connect(&market_ep)?;
     subscriber.set_subscribe(b"")?;
-    info!("Binary SUB connected to {endpoint}");
+    info!(
+        "Binary SUB connected to readout {readout_ep} and market {market_ep} (pulse max age {} ms)",
+        max_age_ns / 1_000_000
+    );
 
     let eng = engine.clone();
     let pulse = last_pulse.clone();
-    tokio::task::spawn_blocking(move || loop {
-        match subscriber.recv_bytes(0) {
-            Ok(bytes) => {
-                if bytes.len() == 88 {
-                    match decode_readout(&bytes) {
-                        Ok(packet) => {
-                            let p = pulse.blocking_lock().clone();
-                            // provisional price from pulse; quantity placeholder
-                            let mut sig = readout_to_trade_signal(&packet, 1.0, 1.0, None);
-                            sig.price = price_for_ticker(&p, &sig.ticker);
-                            if sig.price <= 0.0 {
-                                sig.price = 1.0;
+    tokio::task::spawn_blocking(move || {
+        let mut unpriced: u64 = 0;
+        loop {
+            match subscriber.recv_bytes(0) {
+                Ok(bytes) => {
+                    if bytes.len() == READOUT_PACKET_BYTES {
+                        match decode_readout(&bytes) {
+                            Ok(packet) => {
+                                let mut sig = readout_to_trade_signal(&packet, 0.0, 1.0, None);
+                                let priced = {
+                                    let p = pulse.blocking_lock();
+                                    resolve_fill_price(
+                                        p.as_ref(),
+                                        &sig.ticker,
+                                        now_ns(),
+                                        max_age_ns,
+                                    )
+                                };
+                                match priced {
+                                    Ok(px) => sig.price = px,
+                                    Err(e) => {
+                                        unpriced += 1;
+                                        // Pre-pulse readouts arrive at tick rate: log the first, then every 100th.
+                                        if unpriced == 1 || unpriced.is_multiple_of(100) {
+                                            warn!(
+                                                "[{}] readout refused ({e}); {unpriced} unpriced so far",
+                                                sig.ticker
+                                            );
+                                        }
+                                        continue;
+                                    }
+                                }
+                                let engine_clone = eng.clone();
+                                tokio::spawn(async move {
+                                    let mut e = engine_clone.lock().await;
+                                    let decision = e.process_signal(sig);
+                                    tracing::debug!("Decision: {:?}", decision);
+                                });
                             }
-                            let engine_clone = eng.clone();
-                            tokio::spawn(async move {
-                                let mut e = engine_clone.lock().await;
-                                let decision = e.process_signal(sig);
-                                tracing::debug!("Decision: {:?}", decision);
-                            });
+                            Err(e) => error!("Readout decode failed: {e}"),
                         }
-                        Err(e) => error!("Readout decode failed: {e}"),
-                    }
-                } else if bytes.len() == 120 {
-                    match spikenaut_execution_engine::wire::decode_market_pulse(&bytes) {
-                        Ok(mp) => {
-                            *pulse.blocking_lock() = mp;
+                    } else if bytes.len() == MARKET_PULSE_BYTES {
+                        match spikenaut_execution_engine::wire::decode_market_pulse(&bytes) {
+                            Ok(mp) => {
+                                *pulse.blocking_lock() = Some(mp);
+                            }
+                            Err(e) => warn!("MarketPulse decode failed: {e}"),
                         }
-                        Err(e) => warn!("MarketPulse decode failed: {e}"),
+                    } else {
+                        warn!("Unexpected binary frame {} bytes", bytes.len());
                     }
-                } else {
-                    warn!("Unexpected binary frame {} bytes", bytes.len());
                 }
-            }
-            Err(e) => {
-                error!("ZMQ error: {e}");
-                break;
+                Err(e) => {
+                    error!("ZMQ error: {e}");
+                    break;
+                }
             }
         }
     });

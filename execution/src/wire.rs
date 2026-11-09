@@ -24,6 +24,18 @@ pub fn readout_endpoint() -> String {
     std::env::var("LIMEN_IPC_PUB").unwrap_or_else(|_| IPC_READOUT_DEFAULT.to_string())
 }
 
+/// Default maximum age of the last MarketPulse before fills are refused (2 s).
+pub const PULSE_MAX_AGE_MS_DEFAULT: u64 = 2_000;
+
+/// `LIMEN_PULSE_MAX_AGE_MS` as nanoseconds (default [`PULSE_MAX_AGE_MS_DEFAULT`]).
+pub fn pulse_max_age_ns() -> u64 {
+    std::env::var("LIMEN_PULSE_MAX_AGE_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(PULSE_MAX_AGE_MS_DEFAULT)
+        .saturating_mul(1_000_000)
+}
+
 /// Decode MarketPulse with validation (finite fields, prices > 0, vol clamp).
 /// Validation lives in [`MarketPulse::decode`] (defense-in-depth).
 pub fn decode_market_pulse(buf: &[u8]) -> Result<MarketPulse, String> {
@@ -206,13 +218,61 @@ pub fn readout_to_trade_signal(
     }
 }
 
-/// Price for primary asset from last MarketPulse (fallback 1.0).
-pub fn price_for_ticker(pulse: &MarketPulse, ticker: &str) -> f64 {
-    if let Some(i) = ASSET_TICKERS.iter().position(|t| *t == ticker) {
-        pulse.prices[i] as f64
-    } else {
-        1.0
+/// Price for `ticker` from a MarketPulse. `None` when the ticker is not one of
+/// [`ASSET_TICKERS`] (e.g. the RESIDUAL pair, which is not tradeable).
+pub fn price_for_ticker(pulse: &MarketPulse, ticker: &str) -> Option<f64> {
+    ASSET_TICKERS
+        .iter()
+        .position(|t| *t == ticker)
+        .map(|i| pulse.prices[i] as f64)
+}
+
+/// Why a readout could not be priced for execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriceError {
+    /// No MarketPulse has been received yet.
+    NoPulse,
+    /// The last MarketPulse is older than the configured maximum age.
+    Stale { age_ns: u64, max_age_ns: u64 },
+    /// The primary pair is not a tradeable asset (RESIDUAL).
+    UnknownTicker,
+}
+
+impl std::fmt::Display for PriceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PriceError::NoPulse => write!(f, "no MarketPulse received yet"),
+            PriceError::Stale { age_ns, max_age_ns } => write!(
+                f,
+                "last MarketPulse is {:.1} ms old (max {:.1} ms)",
+                *age_ns as f64 / 1e6,
+                *max_age_ns as f64 / 1e6
+            ),
+            PriceError::UnknownTicker => write!(f, "pair is not a tradeable asset"),
+        }
     }
+}
+
+/// Resolve the fill price for a readout from the last MarketPulse.
+///
+/// Refuses (instead of falling back to a placeholder price) when no pulse has
+/// arrived, when the pulse is older than `max_age_ns` relative to `now_ns`, or
+/// when `ticker` is not a tradeable asset. A pulse with `timestamp_ns == 0`
+/// is treated as never received.
+pub fn resolve_fill_price(
+    last_pulse: Option<&MarketPulse>,
+    ticker: &str,
+    now_ns: u64,
+    max_age_ns: u64,
+) -> Result<f64, PriceError> {
+    let pulse = last_pulse
+        .filter(|p| p.timestamp_ns != 0)
+        .ok_or(PriceError::NoPulse)?;
+    let age_ns = now_ns.saturating_sub(pulse.timestamp_ns);
+    if age_ns > max_age_ns {
+        return Err(PriceError::Stale { age_ns, max_age_ns });
+    }
+    price_for_ticker(pulse, ticker).ok_or(PriceError::UnknownTicker)
 }
 
 #[cfg(test)]
@@ -243,6 +303,82 @@ mod tests {
         let p = decode_market_pulse(&bytes).unwrap();
         assert_eq!(p.timestamp_ns, 1_700_000_000_000_000_001);
         assert!((p.prices[0] - 1.0).abs() < 1e-5);
+    }
+
+    fn pulse_at(ts: u64) -> MarketPulse {
+        let mut p = MarketPulse {
+            timestamp_ns: ts,
+            ..MarketPulse::default()
+        };
+        for (i, px) in p.prices.iter_mut().enumerate() {
+            *px = 10.0 + i as f32;
+        }
+        p
+    }
+
+    #[test]
+    fn price_for_ticker_maps_assets_and_rejects_residual() {
+        let p = pulse_at(1);
+        assert_eq!(price_for_ticker(&p, "DNX"), Some(10.0));
+        assert_eq!(price_for_ticker(&p, "Verus"), Some(16.0));
+        assert_eq!(price_for_ticker(&p, "RESIDUAL"), None);
+        assert_eq!(price_for_ticker(&p, "nope"), None);
+    }
+
+    #[test]
+    fn resolve_fill_price_refuses_without_pulse() {
+        assert_eq!(
+            resolve_fill_price(None, "DNX", 1_000, 1_000),
+            Err(PriceError::NoPulse)
+        );
+        // A default pulse (timestamp 0) is "never received", not a $1.00 market.
+        let never = MarketPulse::default();
+        assert_eq!(
+            resolve_fill_price(Some(&never), "DNX", 1_000, 1_000),
+            Err(PriceError::NoPulse)
+        );
+    }
+
+    #[test]
+    fn resolve_fill_price_uses_pulse_price_when_fresh() {
+        let p = pulse_at(5_000);
+        assert_eq!(resolve_fill_price(Some(&p), "Quai", 5_500, 1_000), Ok(11.0));
+        // Exactly at the limit is still fresh.
+        assert_eq!(resolve_fill_price(Some(&p), "Quai", 6_000, 1_000), Ok(11.0));
+        // Clock skew (pulse from the future) is not stale.
+        assert_eq!(resolve_fill_price(Some(&p), "Quai", 4_000, 1_000), Ok(11.0));
+    }
+
+    #[test]
+    fn resolve_fill_price_refuses_stale_pulse() {
+        let p = pulse_at(5_000);
+        assert_eq!(
+            resolve_fill_price(Some(&p), "Quai", 6_001, 1_000),
+            Err(PriceError::Stale {
+                age_ns: 1_001,
+                max_age_ns: 1_000
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_fill_price_refuses_residual() {
+        let p = pulse_at(5_000);
+        assert_eq!(
+            resolve_fill_price(Some(&p), "RESIDUAL", 5_000, 1_000),
+            Err(PriceError::UnknownTicker)
+        );
+    }
+
+    #[test]
+    fn golden_readout_prices_from_golden_pulse() {
+        let r = std::fs::read(fixture("readout.bin")).expect("fixture");
+        let m = std::fs::read(fixture("marketpulse.bin")).expect("fixture");
+        let packet = decode_readout(&r).unwrap();
+        let pulse = decode_market_pulse(&m).unwrap();
+        let sig = readout_to_trade_signal(&packet, 0.0, 1.0, None);
+        let px = resolve_fill_price(Some(&pulse), &sig.ticker, pulse.timestamp_ns, 1).unwrap();
+        assert!((px - pulse.prices[0] as f64).abs() < 1e-6);
     }
 
     #[test]
