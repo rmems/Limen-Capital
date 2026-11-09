@@ -3,6 +3,7 @@
 //! Caps and venue settings are **configuration**, never constants in the
 //! decider, and the decider never sees them. Secrets never live in TOML.
 
+use crate::live::risk::RiskLimits;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::Path;
@@ -112,6 +113,8 @@ pub struct LiveConfig {
     pub paper_starting_cash_usd: f64,
     /// Quote source.
     pub market: MarketSourceConfig,
+    /// Hard caps enforced by `risk::check`.
+    pub risk: RiskLimits,
 }
 
 impl Default for LiveConfig {
@@ -125,6 +128,7 @@ impl Default for LiveConfig {
             journal_path: "journal.md".to_string(),
             paper_starting_cash_usd: 10.0,
             market: MarketSourceConfig::Robinhood,
+            risk: RiskLimits::default(),
         }
     }
 }
@@ -182,6 +186,7 @@ impl LiveConfig {
         if self.model.trim().is_empty() {
             return Err(ConfigError::Invalid("model must not be empty".into()));
         }
+        self.risk.validate().map_err(ConfigError::Invalid)?;
         Ok(())
     }
 }
@@ -290,6 +295,22 @@ start_price = 3000.0
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn risk_section_parses_and_validates() {
+        let c = LiveConfig::from_toml_str(
+            r#"
+[risk]
+max_order_usd = 1.0
+max_daily_loss_usd = 2.0
+"#,
+        )
+        .unwrap();
+        assert_eq!(c.risk.max_order_usd, 1.0);
+        assert_eq!(c.risk.max_daily_loss_usd, 2.0);
+        assert_eq!(c.risk.max_position_usd, 10.0);
+        assert!(LiveConfig::from_toml_str("[risk]\nmax_order_usd = 50.0").is_err());
     }
 
     #[test]
