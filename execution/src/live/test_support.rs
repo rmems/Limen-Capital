@@ -109,100 +109,8 @@ impl MockServer {
         let req_c = requests.clone();
         let routes_c = routes.clone();
         let accept_loop = tokio::spawn(async move {
-            loop {
-                let Ok((mut sock, _)) = listener.accept().await else {
-                    break;
-                };
-                let req_c = req_c.clone();
-                let routes_c = routes_c.clone();
-                tokio::spawn(async move {
-                    // Read headers.
-                    let mut buf = Vec::new();
-                    let mut tmp = [0u8; 4096];
-                    let header_end;
-                    loop {
-                        let n = match sock.read(&mut tmp).await {
-                            Ok(0) | Err(_) => return,
-                            Ok(n) => n,
-                        };
-                        buf.extend_from_slice(&tmp[..n]);
-                        if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
-                            header_end = pos + 4;
-                            break;
-                        }
-                    }
-                    let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
-                    let mut lines = head.split("\r\n");
-                    let request_line = lines.next().unwrap_or("");
-                    let mut parts = request_line.split_whitespace();
-                    let method = parts.next().unwrap_or("").to_string();
-                    let path = parts.next().unwrap_or("").to_string();
-                    let mut headers = Vec::new();
-                    let mut content_length = 0usize;
-                    for l in lines {
-                        if let Some((k, v)) = l.split_once(':') {
-                            let (k, v) = (k.trim().to_string(), v.trim().to_string());
-                            if k.eq_ignore_ascii_case("content-length") {
-                                content_length = v.parse().unwrap_or(0);
-                            }
-                            headers.push((k, v));
-                        }
-                    }
-                    let mut body = buf[header_end..].to_vec();
-                    while body.len() < content_length {
-                        let n = match sock.read(&mut tmp).await {
-                            Ok(0) | Err(_) => break,
-                            Ok(n) => n,
-                        };
-                        body.extend_from_slice(&tmp[..n]);
-                    }
-                    let body = String::from_utf8_lossy(&body).to_string();
-
-                    let (status, resp_body) = {
-                        let mut routes = routes_c.lock().await;
-                        match routes
-                            .iter_mut()
-                            .find(|r| r.method == method && r.path == path)
-                        {
-                            Some(r) => {
-                                if r.responses.len() > 1 {
-                                    r.responses.pop_front().unwrap()
-                                } else {
-                                    r.responses.front().cloned().unwrap_or((500, String::new()))
-                                }
-                            }
-                            None => (
-                                404,
-                                format!(
-                                    r#"{{"type":"client_error","errors":[{{"attr":null,"detail":"no mock route for {method} {path}"}}]}}"#
-                                ),
-                            ),
-                        }
-                    };
-                    req_c.lock().await.push(RecordedRequest {
-                        method,
-                        path,
-                        headers,
-                        body,
-                    });
-                    let reason = match status {
-                        200 => "OK",
-                        201 => "Created",
-                        400 => "Bad Request",
-                        401 => "Unauthorized",
-                        404 => "Not Found",
-                        429 => "Too Many Requests",
-                        500 => "Internal Server Error",
-                        _ => "Status",
-                    };
-                    let resp = format!(
-                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        resp_body.len(),
-                        resp_body
-                    );
-                    let _ = sock.write_all(resp.as_bytes()).await;
-                    let _ = sock.shutdown().await;
-                });
+            while let Ok((sock, _)) = listener.accept().await {
+                tokio::spawn(serve_connection(sock, req_c.clone(), routes_c.clone()));
             }
         });
         Self {
@@ -212,7 +120,6 @@ impl MockServer {
             accept_loop,
         }
     }
-
     pub fn base_url(&self) -> String {
         format!("http://{}", self.addr)
     }
@@ -222,6 +129,105 @@ impl MockServer {
     }
 }
 
+async fn serve_connection(
+    mut sock: tokio::net::TcpStream,
+    requests: Arc<Mutex<Vec<RecordedRequest>>>,
+    routes: Arc<Mutex<Vec<Route>>>,
+) {
+    let Ok(request) = read_request(&mut sock).await else {
+        return;
+    };
+    let (status, body) = route_response(&mut routes.lock().await, &request);
+    requests.lock().await.push(request);
+    let response = format!(
+        "HTTP/1.1 {status} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        reason_phrase(status),
+        body.len()
+    );
+    let _ = sock.write_all(response.as_bytes()).await;
+    let _ = sock.shutdown().await;
+}
+
+async fn read_request(sock: &mut tokio::net::TcpStream) -> std::io::Result<RecordedRequest> {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 4096];
+    let header_end = loop {
+        let n = sock.read(&mut tmp).await?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+            break pos + 4;
+        }
+    };
+    let mut request = parse_headers(&String::from_utf8_lossy(&buf[..header_end]));
+    let content_length = request
+        .header("content-length")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut body = buf[header_end..].to_vec();
+    while body.len() < content_length {
+        let n = sock.read(&mut tmp).await?;
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&tmp[..n]);
+    }
+    request.body = String::from_utf8_lossy(&body).to_string();
+    Ok(request)
+}
+
+fn parse_headers(head: &str) -> RecordedRequest {
+    let mut lines = head.split("\r\n");
+    let mut parts = lines.next().unwrap_or("").split_whitespace();
+    let method = parts.next().unwrap_or("").to_string();
+    let path = parts.next().unwrap_or("").to_string();
+    let headers = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .collect();
+    RecordedRequest {
+        method,
+        path,
+        headers,
+        body: String::new(),
+    }
+}
+
+fn route_response(routes: &mut [Route], request: &RecordedRequest) -> (u16, String) {
+    match routes
+        .iter_mut()
+        .find(|r| r.method == request.method && r.path == request.path)
+    {
+        Some(route) if route.responses.len() > 1 => route.responses.pop_front().unwrap(),
+        Some(route) => route
+            .responses
+            .front()
+            .cloned()
+            .unwrap_or((500, String::new())),
+        None => (
+            404,
+            format!(
+                r#"{{"type":"client_error","errors":[{{"attr":null,"detail":"no mock route for {} {}"}}]}}"#,
+                request.method, request.path
+            ),
+        ),
+    }
+}
+
+fn reason_phrase(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        201 => "Created",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        _ => "Status",
+    }
+}
 fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }

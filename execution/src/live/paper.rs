@@ -127,46 +127,7 @@ impl PaperBook {
                 OrderSide::Sell => bid >= o.limit_price,
             };
             if crossable {
-                let price = o.limit_price;
-                let qty = o.asset_qty;
-                let notional = price * qty;
-                let fee = notional * self.fee_ratio;
-                self.fees_paid_usd += fee;
-                let realized = match o.side {
-                    OrderSide::Buy => {
-                        let prev_qty = self.position_qty;
-                        debug_assert!(
-                            prev_qty == 0.0 || self.avg_cost_usd.is_some(),
-                            "avg_cost_usd is None but position_qty={prev_qty} > 0"
-                        );
-                        let prev_cost = self.avg_cost_usd.unwrap_or(0.0) * prev_qty;
-                        self.cash_usd -= notional + fee;
-                        self.position_qty += qty;
-                        self.avg_cost_usd = Some((prev_cost + notional + fee) / self.position_qty);
-                        0.0
-                    }
-                    OrderSide::Sell => {
-                        let cost = self.avg_cost_usd.unwrap_or(price);
-                        let realized = (price - cost) * qty - fee;
-                        self.cash_usd += notional - fee;
-                        self.position_qty -= qty;
-                        if self.position_qty <= 1e-12 {
-                            self.position_qty = 0.0;
-                            self.avg_cost_usd = None;
-                        }
-                        self.realized_pnl_usd += realized;
-                        realized
-                    }
-                };
-                self.fills += 1;
-                o.state = OrderState::Filled;
-                events.push(PaperEvent::Filled {
-                    order: o,
-                    price,
-                    qty,
-                    fee_usd: fee,
-                    realized_usd: realized,
-                });
+                events.push(self.fill(o));
                 continue;
             }
             let age = tick.saturating_sub(o.placed_tick);
@@ -183,6 +144,55 @@ impl PaperBook {
         }
         self.open_orders = remaining;
         events
+    }
+
+    fn fill(&mut self, mut order: PaperOrder) -> PaperEvent {
+        let price = order.limit_price;
+        let qty = order.asset_qty;
+        let notional = price * qty;
+        let fee = notional * self.fee_ratio;
+        self.fees_paid_usd += fee;
+        let realized = match order.side {
+            OrderSide::Buy => {
+                self.fill_buy(qty, notional, fee);
+                0.0
+            }
+            OrderSide::Sell => self.fill_sell(price, qty, fee),
+        };
+        self.fills += 1;
+        order.state = OrderState::Filled;
+        PaperEvent::Filled {
+            order,
+            price,
+            qty,
+            fee_usd: fee,
+            realized_usd: realized,
+        }
+    }
+
+    fn fill_buy(&mut self, qty: f64, notional: f64, fee: f64) {
+        let prev_qty = self.position_qty;
+        debug_assert!(
+            prev_qty == 0.0 || self.avg_cost_usd.is_some(),
+            "avg_cost_usd is None but position_qty={prev_qty} > 0"
+        );
+        let prev_cost = self.avg_cost_usd.unwrap_or(0.0) * prev_qty;
+        self.cash_usd -= notional + fee;
+        self.position_qty += qty;
+        self.avg_cost_usd = Some((prev_cost + notional + fee) / self.position_qty);
+    }
+
+    fn fill_sell(&mut self, price: f64, qty: f64, fee: f64) -> f64 {
+        let cost = self.avg_cost_usd.unwrap_or(price);
+        let realized = (price - cost) * qty - fee;
+        self.cash_usd += price * qty - fee;
+        self.position_qty -= qty;
+        if self.position_qty <= 1e-12 {
+            self.position_qty = 0.0;
+            self.avg_cost_usd = None;
+        }
+        self.realized_pnl_usd += realized;
+        realized
     }
 
     pub fn equity_usd(&self, mid: f64) -> f64 {

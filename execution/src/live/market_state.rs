@@ -6,6 +6,15 @@ use serde::{Deserialize, Serialize};
 /// How many recent mids are kept for the decider.
 pub const RECENT_MIDS_LEN: usize = 12;
 
+/// Available account balances, excluding assets reserved by resting orders.
+#[derive(Debug, Clone, Copy)]
+pub struct AccountState {
+    pub position_qty: f64,
+    pub avg_cost_usd: Option<f64>,
+    pub cash_usd: f64,
+    pub realized_pnl_usd: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MarketState {
     /// Unix seconds of the quote.
@@ -34,19 +43,21 @@ pub struct MarketState {
 impl MarketState {
     /// Build from a quote and the book. `recent_mids` should already include
     /// prior mids; the current mid is appended and the window trimmed.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         ts: i64,
         tick: u64,
         symbol: &str,
         bid: f64,
         ask: f64,
-        position_qty: f64,
-        avg_cost_usd: Option<f64>,
-        cash_usd: f64,
-        realized_pnl_usd: f64,
+        account: AccountState,
         mut recent_mids: Vec<f64>,
     ) -> Self {
+        let AccountState {
+            position_qty,
+            avg_cost_usd,
+            cash_usd,
+            realized_pnl_usd,
+        } = account;
         let mid = (bid + ask) / 2.0;
         let spread_bps = if mid > 0.0 {
             (ask - bid) / mid * 10_000.0
@@ -145,10 +156,12 @@ mod tests {
             "BTC-USD",
             99_990.0,
             100_010.0,
-            0.00005,
-            Some(90_000.0),
-            5.0,
-            0.1,
+            AccountState {
+                position_qty: 0.00005,
+                avg_cost_usd: Some(90_000.0),
+                cash_usd: 5.0,
+                realized_pnl_usd: 0.1,
+            },
             vec![99_000.0, 99_500.0],
         );
         assert_eq!(s.mid, 100_000.0);
@@ -164,7 +177,13 @@ mod tests {
     #[test]
     fn window_is_trimmed_to_recent_len() {
         let prior: Vec<f64> = (0..20).map(|i| 100.0 + i as f64).collect();
-        let s = MarketState::new(0, 1, "BTC-USD", 120.0, 120.0, 0.0, None, 10.0, 0.0, prior);
+        let account = AccountState {
+            position_qty: 0.0,
+            avg_cost_usd: None,
+            cash_usd: 10.0,
+            realized_pnl_usd: 0.0,
+        };
+        let s = MarketState::new(0, 1, "BTC-USD", 120.0, 120.0, account, prior);
         assert_eq!(s.recent_mids.len(), RECENT_MIDS_LEN);
         assert_eq!(*s.recent_mids.last().unwrap(), 120.0);
         assert_eq!(s.unrealized_pnl_usd, 0.0);
@@ -172,7 +191,13 @@ mod tests {
 
     #[test]
     fn compact_json_is_valid_and_small() {
-        let s = MarketState::new(1, 1, "BTC-USD", 1.0, 1.1, 0.0, None, 10.0, 0.0, vec![]);
+        let account = AccountState {
+            position_qty: 0.0,
+            avg_cost_usd: None,
+            cash_usd: 10.0,
+            realized_pnl_usd: 0.0,
+        };
+        let s = MarketState::new(1, 1, "BTC-USD", 1.0, 1.1, account, vec![]);
         let j = s.to_compact_json();
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         assert_eq!(v["symbol"], "BTC-USD");

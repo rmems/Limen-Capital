@@ -183,6 +183,17 @@ impl LiveConfig {
                 "tick_interval_secs must be > 0".into(),
             ));
         }
+        self.validate_base_url()?;
+        self.validate_market()?;
+        self.validate_paper_book()?;
+        self.validate_rules()?;
+        if self.model.trim().is_empty() {
+            return Err(ConfigError::Invalid("model must not be empty".into()));
+        }
+        self.risk.validate().map_err(ConfigError::Invalid)
+    }
+
+    fn validate_base_url(&self) -> Result<(), ConfigError> {
         if !(self.base_url.starts_with("https://") || self.base_url.starts_with("http://")) {
             return Err(ConfigError::Invalid(format!(
                 "base_url must start with http(s)://, got {:?}",
@@ -204,6 +215,10 @@ impl LiveConfig {
                 )));
             }
         }
+        Ok(())
+    }
+
+    fn validate_market(&self) -> Result<(), ConfigError> {
         if let MarketSourceConfig::Synthetic {
             start_price,
             vol,
@@ -211,25 +226,26 @@ impl LiveConfig {
             ..
         } = &self.market
         {
-            if !(start_price.is_finite() && *start_price > 0.0) {
-                return Err(ConfigError::Invalid(
-                    "market.start_price must be positive".into(),
-                ));
-            }
-            if !(vol.is_finite() && *vol >= 0.0) {
-                return Err(ConfigError::Invalid("market.vol must be >= 0".into()));
-            }
-            if !(half_spread_bps.is_finite() && *half_spread_bps >= 0.0) {
-                return Err(ConfigError::Invalid(
-                    "market.half_spread_bps must be >= 0".into(),
-                ));
-            }
+            validate_synthetic(*start_price, *vol, *half_spread_bps)?;
         }
         if !self.paper && matches!(self.market, MarketSourceConfig::Synthetic { .. }) {
             return Err(ConfigError::Invalid(
                 "synthetic market source is only allowed in paper mode".into(),
             ));
         }
+        Ok(())
+    }
+
+    fn validate_rules(&self) -> Result<(), ConfigError> {
+        if !(self.rules.order_usd.is_finite() && self.rules.order_usd > 0.0) {
+            return Err(ConfigError::Invalid(
+                "rules.order_usd must be positive".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_paper_book(&self) -> Result<(), ConfigError> {
         if !(self.paper_starting_cash_usd.is_finite() && self.paper_starting_cash_usd > 0.0) {
             return Err(ConfigError::Invalid(
                 "paper_starting_cash_usd must be positive".into(),
@@ -240,17 +256,25 @@ impl LiveConfig {
                 "paper_fee_ratio must be in [0, 0.1)".into(),
             ));
         }
-        if !(self.rules.order_usd.is_finite() && self.rules.order_usd > 0.0) {
-            return Err(ConfigError::Invalid(
-                "rules.order_usd must be positive".into(),
-            ));
-        }
-        if self.model.trim().is_empty() {
-            return Err(ConfigError::Invalid("model must not be empty".into()));
-        }
-        self.risk.validate().map_err(ConfigError::Invalid)?;
         Ok(())
     }
+}
+
+fn validate_synthetic(start_price: f64, vol: f64, half_spread_bps: f64) -> Result<(), ConfigError> {
+    if !(start_price.is_finite() && start_price > 0.0) {
+        return Err(ConfigError::Invalid(
+            "market.start_price must be positive".into(),
+        ));
+    }
+    if !(vol.is_finite() && vol >= 0.0) {
+        return Err(ConfigError::Invalid("market.vol must be >= 0".into()));
+    }
+    if !(half_spread_bps.is_finite() && half_spread_bps >= 0.0) {
+        return Err(ConfigError::Invalid(
+            "market.half_spread_bps must be >= 0".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// `http://` host is a loopback address (`127.x.x.x`, `localhost`, `[::1]`).

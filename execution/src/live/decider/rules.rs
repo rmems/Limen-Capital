@@ -114,7 +114,13 @@ mod tests {
 
     fn st(mids: &[f64], bid: f64, ask: f64, qty: f64, cost: Option<f64>, cash: f64) -> MarketState {
         let prior = mids[..mids.len() - 1].to_vec();
-        let s = MarketState::new(0, 1, "BTC-USD", bid, ask, qty, cost, cash, 0.0, prior);
+        let account = crate::live::market_state::AccountState {
+            position_qty: qty,
+            avg_cost_usd: cost,
+            cash_usd: cash,
+            realized_pnl_usd: 0.0,
+        };
+        let s = MarketState::new(0, 1, "BTC-USD", bid, ask, account, prior);
         assert_eq!(*s.recent_mids.last().unwrap(), (bid + ask) / 2.0);
         s
     }

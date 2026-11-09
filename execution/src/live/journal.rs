@@ -214,21 +214,36 @@ impl Journal {
     /// Create the file with its header if it does not exist or is empty.
     pub fn ensure_header(&mut self, header: &JournalHeader) -> io::Result<()> {
         self.load_recent()?;
+        self.ensure_parent()?;
+        if self.is_fresh() {
+            self.write_header(header)
+        } else {
+            self.write_run_marker(header)
+        }
+    }
+
+    fn ensure_parent(&self) -> io::Result<()> {
         if let Some(parent) = self.path.parent() {
             if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent)?;
             }
         }
-        if self.is_fresh() {
-            let mut f = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)?;
-            f.write_all(Self::header_markdown(header).as_bytes())?;
-            f.flush()?;
-        } else {
-            // Appending to an existing journal: mark the new run.
-            let marker = format!(
+        Ok(())
+    }
+
+    fn write_header(&self, header: &JournalHeader) -> io::Result<()> {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        f.write_all(Self::header_markdown(header).as_bytes())?;
+        f.flush()?;
+        Ok(())
+    }
+
+    fn write_run_marker(&mut self, header: &JournalHeader) -> io::Result<()> {
+        // Appending to an existing journal: mark the new run.
+        let marker = format!(
                 "| {} | 0 | {} | 0.00 | 0.00 | 0.00 | 0.00 | 0.00000000 | 0.0000 | 0.0000 | 0.0000 | - | run_start | 0.0000 | mode={} market={} decider={} | - | - | - | +0.0000 | 0.0000 |",
                 cell(&header.started_utc),
                 cell(&header.symbol),
@@ -236,10 +251,9 @@ impl Journal {
                 cell(&header.market_source),
                 cell(&header.decider)
             );
-            let mut f = OpenOptions::new().append(true).open(&self.path)?;
-            writeln!(f, "{marker}")?;
-            self.remember(marker);
-        }
+        let mut f = OpenOptions::new().append(true).open(&self.path)?;
+        writeln!(f, "{marker}")?;
+        self.remember(marker);
         Ok(())
     }
 
@@ -275,16 +289,6 @@ impl Journal {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn tmp(name: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!(
-            "limen_live_journal_{}_{}.md",
-            name,
-            std::process::id()
-        ));
-        let _ = fs::remove_file(&p);
-        p
-    }
 
     fn header() -> JournalHeader {
         JournalHeader {
@@ -325,7 +329,8 @@ mod tests {
 
     #[test]
     fn header_then_rows_then_tail() {
-        let p = tmp("basic");
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("basic.md");
         let mut j = Journal::new(&p);
         j.ensure_header(&header()).unwrap();
         j.append(&row(1, "a")).unwrap();
@@ -363,13 +368,15 @@ mod tests {
 
     #[test]
     fn tail_on_missing_file_is_empty() {
-        let p = tmp("missing");
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("missing.md");
         assert!(Journal::new(&p).tail(5).unwrap().is_empty());
     }
 
     #[test]
     fn tail_is_served_from_memory_and_reloads_existing_file() {
-        let p = tmp("memory");
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("memory.md");
         let mut j = Journal::new(&p);
         j.ensure_header(&header()).unwrap();
         for i in 1..=(RECENT_ROWS as u64 + 5) {
