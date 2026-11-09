@@ -189,10 +189,41 @@ impl LiveConfig {
                 self.base_url
             )));
         }
-        if !self.paper && self.base_url.starts_with("http://") {
-            return Err(ConfigError::Invalid(
-                "live mode requires an https:// base_url".into(),
-            ));
+        // Signed headers carry the API key, so plain HTTP is only ever allowed
+        // towards a loopback mock (tests / offline demos), never in live mode.
+        if self.base_url.starts_with("http://") {
+            if !self.paper {
+                return Err(ConfigError::Invalid(
+                    "live mode requires an https:// base_url".into(),
+                ));
+            }
+            if !is_loopback_url(&self.base_url) {
+                return Err(ConfigError::Invalid(format!(
+                    "plain http:// base_url is only allowed for loopback mocks, got {:?}",
+                    self.base_url
+                )));
+            }
+        }
+        if let MarketSourceConfig::Synthetic {
+            start_price,
+            vol,
+            half_spread_bps,
+            ..
+        } = &self.market
+        {
+            if !(start_price.is_finite() && *start_price > 0.0) {
+                return Err(ConfigError::Invalid(
+                    "market.start_price must be positive".into(),
+                ));
+            }
+            if !(vol.is_finite() && *vol >= 0.0) {
+                return Err(ConfigError::Invalid("market.vol must be >= 0".into()));
+            }
+            if !(half_spread_bps.is_finite() && *half_spread_bps >= 0.0) {
+                return Err(ConfigError::Invalid(
+                    "market.half_spread_bps must be >= 0".into(),
+                ));
+            }
         }
         if !self.paper && matches!(self.market, MarketSourceConfig::Synthetic { .. }) {
             return Err(ConfigError::Invalid(
@@ -220,6 +251,26 @@ impl LiveConfig {
         self.risk.validate().map_err(ConfigError::Invalid)?;
         Ok(())
     }
+}
+
+/// `http://` host is a loopback address (`127.x.x.x`, `localhost`, `[::1]`).
+fn is_loopback_url(url: &str) -> bool {
+    let rest = url.trim_start_matches("http://");
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = if let Some(stripped) = authority.strip_prefix('[') {
+        stripped.split(']').next().unwrap_or("")
+    } else {
+        authority
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(authority)
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
 }
 
 /// Secrets, read from the environment only.
@@ -377,6 +428,41 @@ base_url = "http://localhost:9"
         )
         .unwrap_err();
         assert!(err.to_string().contains("https"));
+    }
+
+    #[test]
+    fn plain_http_only_for_loopback_mocks() {
+        for ok in [
+            "http://127.0.0.1:18765",
+            "http://localhost:9/",
+            "http://[::1]:8080",
+            "http://127.5.6.7",
+        ] {
+            assert!(is_loopback_url(ok), "{ok}");
+            LiveConfig::from_toml_str(&format!("base_url = {ok:?}")).unwrap();
+        }
+        for bad in [
+            "http://trading.robinhood.com",
+            "http://127.0.0.1.evil.example",
+            "http://10.0.0.5",
+        ] {
+            assert!(!is_loopback_url(bad), "{bad}");
+            let err = LiveConfig::from_toml_str(&format!("base_url = {bad:?}")).unwrap_err();
+            assert!(err.to_string().contains("loopback"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn synthetic_params_are_validated() {
+        let err = LiveConfig::from_toml_str("[market]\nsource = \"synthetic\"\nstart_price = 0.0")
+            .unwrap_err();
+        assert!(err.to_string().contains("start_price"));
+        assert!(LiveConfig::from_toml_str("[market]\nsource = \"synthetic\"\nvol = -0.1").is_err());
+        assert!(LiveConfig::from_toml_str(
+            "[market]\nsource = \"synthetic\"\nhalf_spread_bps = -1.0"
+        )
+        .is_err());
+        LiveConfig::from_toml_str("[market]\nsource = \"synthetic\"\nvol = 0.0").unwrap();
     }
 
     #[test]
