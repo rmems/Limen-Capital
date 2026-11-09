@@ -1,4 +1,6 @@
-# Wire protocol v1 (research)
+# Wire protocol v1 (legacy)
+
+> Superseded by [wire-protocol-v2.md](wire-protocol-v2.md) for market-neutral universes. v1 remains for 7-asset golden fixtures only.
 
 Single canonical path for experimental SNN-HFT between Julia brain and Rust muscle.
 
@@ -18,7 +20,7 @@ With `ZMQ_CURVE=1`, both link directions use CURVE: market feed PUB (`market_sim
 | Offset | Type | Field |
 |--------|------|-------|
 | 0–7 | `u64` | `timestamp_ns` |
-| 8–63 | 7 × (`f32` price, `f32` vol) | DNX, Quai, Qubic, Kaspa, Monero, Ocean, Verus |
+| 8–63 | 7 × (`f32` price, `f32` vol) | assets 0..6 per runtime universe file |
 | 64–67 | `f32` | `confidence_signal` |
 | 68–71 | `f32` | `funding_rate` |
 | 72–75 | `f32` | `liquidation_vol` |
