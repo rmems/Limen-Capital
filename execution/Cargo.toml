@@ -1,5 +1,5 @@
 [package]
-name = "spikenaut-execution-engine"
+name = "limen-execution"
 version = "0.1.0"
 edition = "2021"
 # CI pins Rust 1.99.0 to verify the declared MSRV.

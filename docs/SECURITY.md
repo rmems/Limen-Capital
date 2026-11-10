@@ -50,7 +50,7 @@ When `ZMQ_CURVE=1` **and** an allowlist is configured, CURVE **servers** start a
 | `ZMQ_CURVE_ALLOWLIST_FILE` | Path to one public key per line (`#` comments allowed) |
 | `ZMQ_ZAP_DOMAIN` | ZAP domain on server sockets (default `limen-capital`) |
 
-Generate keypairs at runtime (example): `cargo run -p spikenaut-execution-engine --example version` is not a keygen — use `zmq_curve_keypair` from libzmq tooling or the unit tests’ `CurveKeyPair::new()` pattern in CI-only fixtures.
+Generate keypairs at runtime (example): `cargo run -p limen-execution --example version` is not a keygen — use `zmq_curve_keypair` from libzmq tooling or the unit tests’ `CurveKeyPair::new()` pattern in CI-only fixtures.
 
 ## Safer JSON IPC
 
