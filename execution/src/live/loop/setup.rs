@@ -32,6 +32,7 @@ pub async fn build_parts(cfg: &LiveConfig, secrets: &Secrets) -> Result<LoopPart
         decider,
         book: PaperBook::new(cfg.paper_starting_cash_usd, cfg.paper_fee_ratio),
         journal: Journal::new(&cfg.journal_path),
+        notifier: Box::new(crate::live::notify::DesktopNotifier),
         account_line: source.account_line,
         day_start_realized: None,
     })
