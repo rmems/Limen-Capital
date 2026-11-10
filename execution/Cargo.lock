@@ -1391,7 +1391,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "spikenaut-execution-engine"
+name = "limen-execution"
 version = "0.1.0"
 dependencies = [
  "axon-encoder",

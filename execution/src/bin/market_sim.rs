@@ -4,9 +4,9 @@
 //!   cargo run --bin market_sim
 //!   LIMEN_SIM_HZ=10 cargo run --bin market_sim
 
-use spikenaut_execution_engine::universe::TradeUniverse;
-use spikenaut_execution_engine::wire::MarketPulse;
-use spikenaut_execution_engine::zmq_curve;
+use limen_execution::universe::TradeUniverse;
+use limen_execution::wire::MarketPulse;
+use limen_execution::zmq_curve;
 use std::f32::consts::PI;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
