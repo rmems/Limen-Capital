@@ -116,8 +116,8 @@ This ADR fixes the ownership contract before any dependency integration.
 - No recreation of landed replay/features; codec replacement only on a
   demonstrated contract gap.
 - Related, not duplicated: Limen-Capital #7 owns the
-  `spikenaut-execution-engine` crate rename; Linear RM-1865 owns
-  confidence-default documentation.
+  `spikenaut-execution-engine` crate rename; GitHub #5 / RM-1865 owns
+  [confidence-default documentation](../confidence-defaults.md).
 - Deferred to later issues: DendriteTrader dependency integration, short
   support in `metabolic-ledger`, repository migration/archive, corpus-ipc
   wire schema adoption.

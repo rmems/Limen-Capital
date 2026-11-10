@@ -138,9 +138,9 @@ market-regime coverage. No calibrated sizing mapping is validated. Real historic
 replay, a completed LIM-1035 dataset, and optional GPU qualification remain follow-up
 experiments, not implicit claims of this run.
 
-Calibration findings are recorded in the accompanying result report and linked to
-[Capital #5](https://github.com/rmems/Limen-Capital/issues/5), which owns
-confidence-default documentation. They do not prescribe a magic production gate.
+Calibration findings are recorded in the accompanying result report and in
+[confidence-defaults.md](confidence-defaults.md) ([Capital #5](https://github.com/rmems/Limen-Capital/issues/5)).
+They do not prescribe a magic production gate.
 
 Recorded outcomes, all seed results and compact machine-readable evidence:
 [results/rm-1865](results/rm-1865/README.md).
