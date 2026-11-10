@@ -47,11 +47,15 @@ async fn places_exact_limit_json_with_environment_pair_headers() {
     let requests = server.requests().await;
     assert_eq!(requests.len(), 1);
     let r = &requests[0];
-    assert_eq!(r.method, "POST");
-    assert_eq!(r.path, "/v2/orders");
-    assert_eq!(r.header("APCA-API-KEY-ID"), Some("mock-key"));
-    assert_eq!(r.header("APCA-API-SECRET-KEY"), Some("mock-secret"));
-    assert_eq!(r.header("x-signature"), None);
+    assert_eq!((r.method.as_str(), r.path.as_str()), ("POST", "/v2/orders"));
+    assert_eq!(
+        (
+            r.header("APCA-API-KEY-ID"),
+            r.header("APCA-API-SECRET-KEY"),
+            r.header("x-signature")
+        ),
+        (Some("mock-key"), Some("mock-secret"), None)
+    );
     assert_eq!(
         serde_json::from_str::<Value>(&r.body).unwrap(),
         json!({
