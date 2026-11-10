@@ -14,12 +14,14 @@
 //! `ROBINHOOD_API_KEY`, `ROBINHOOD_PRIVATE_KEY`, `ANTHROPIC_API_KEY`.
 
 pub mod config;
+pub mod cost;
 pub mod decider;
 pub mod journal;
 pub mod r#loop;
 pub mod market;
 pub mod market_state;
 pub mod paper;
+pub mod postmortem;
 pub mod risk;
 pub mod robinhood;
 #[cfg(test)]

@@ -190,6 +190,37 @@ dV = ((V_rest - V) / τ_m + W_rec·S + W_in·u) dt + σ·dW
 
 Optional Limen-Neural dependencies are typically MIT/Apache-2.0 as well.
 
+## Offline live-journal post-mortem
+
+```bash
+cd execution
+ANTHROPIC_API_KEY=... cargo run --locked --features live-robinhood --bin limen-live -- \
+  --postmortem --journal /path/to/journal.md --config /path/to/original-run.toml
+```
+
+This is a separate pass, never part of the 900-second tick loop. It uses only
+`claude-sonnet-5-5`, ignores the trading config's model, rejects `--model`,
+`--once` and `--max-ticks`, and needs no Robinhood credentials. It reads the
+existing journal and writes a new sibling `*.postmortem-<id>.md` note covering
+fills, recorded fees, rejects, parse errors and a rules paper replay on the same
+rounded quotes. No orders can be sent. The journal is not modified.
+
+Use the original run config for rules, fees and risk caps. Replay uses synthetic
+pair increments/minimums because the journal lacks venue pair metadata. Missing
+initial state, malformed numeric ticks, or multiple runs make the comparison
+inconclusive. Marked equity is not a claim about real venue execution.
+
+Post-mortem costs persist beside the journal in `*.llm-cost.json`, shared with
+the tick loop's `max_llm_cost_usd_per_day` check. Keep the same journal and ledger
+across restarts. UTC-day reservations include existing journal LLM costs,
+counted prompt tokens plus headroom, and up to 1024 output tokens ($2/$10 per
+million input/output tokens). Successful usage settles the reservation; unknown
+usage, failed requests and crashes retain it conservatively. No automatic
+retries. Concurrent post-mortems serialize ledger updates with a file lock.
+Do not delete the ledger to reset spend. This is a per-journal cap, not an
+account-wide cap across different journals. Journals over 512 KB are rejected
+rather than silently truncated. Notes and journals must not enter training data.
+
 ## Repo hygiene
 
 - Do not commit `execution/target/`, `runs/`, `data/`, `.env`, `.mimocode/`, or `security-scans/`.
