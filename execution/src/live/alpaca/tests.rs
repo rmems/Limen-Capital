@@ -11,7 +11,18 @@ fn order(status: &str, filled: &str) -> String {
     .to_string()
 }
 fn request() -> PlaceLimitOrderRequest {
-    PlaceLimitOrderRequest::new(CLIENT_ID, OrderSide::Buy, "AAPL", "0.025", "200.00")
+    PlaceLimitOrderRequest {
+        client_order_id: CLIENT_ID.into(),
+        symbol: "AAPL".into(),
+        side: OrderSide::Buy,
+        order_type: LimitOnly::Limit,
+        size: LimitSize::Qty {
+            qty: "0.025".into(),
+        },
+        limit_price: "200.00".into(),
+        time_in_force: TimeInForce::Day,
+        extended_hours: false,
+    }
 }
 fn client(server: &MockServer) -> AlpacaClient {
     AlpacaClient::new("mock-key", "mock-secret")
@@ -245,22 +256,25 @@ fn fixed_live_endpoint_and_debug_never_expose_keys() {
 
 #[tokio::test]
 async fn invalid_requests_never_reach_the_venue() {
+    async fn expect_rejected(c: &AlpacaClient, r: &PlaceLimitOrderRequest) {
+        assert!(c.place_limit_order(r).await.is_err(), "{r:?}");
+    }
     let server = MockServer::start(vec![]).await;
     let c = client(&server);
     for bad in ["0", "-1", "NaN", "inf", "invalid"] {
         let mut r = request();
         r.limit_price = bad.into();
-        assert!(c.place_limit_order(&r).await.is_err());
+        expect_rejected(&c, &r).await;
         let mut r = request();
         r.size = LimitSize::Qty { qty: bad.into() };
-        assert!(c.place_limit_order(&r).await.is_err());
+        expect_rejected(&c, &r).await;
     }
     let mut r = request();
     r.client_order_id = "not-a-uuid".into();
-    assert!(c.place_limit_order(&r).await.is_err());
+    expect_rejected(&c, &r).await;
     let mut r = request();
     r.extended_hours = true;
-    assert!(c.place_limit_order(&r).await.is_err());
+    expect_rejected(&c, &r).await;
     assert!(server.requests().await.is_empty());
 }
 

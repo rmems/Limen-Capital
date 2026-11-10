@@ -145,35 +145,20 @@ pub struct PlaceLimitOrderRequest {
     pub time_in_force: TimeInForce,
     pub extended_hours: bool,
 }
-impl PlaceLimitOrderRequest {
-    pub fn new(
-        client_order_id: impl Into<String>,
-        side: OrderSide,
-        symbol: impl Into<String>,
-        qty: impl Into<String>,
-        limit_price: impl Into<String>,
-    ) -> Self {
+impl From<&crate::live::risk::ApprovedOrder> for PlaceLimitOrderRequest {
+    fn from(o: &crate::live::risk::ApprovedOrder) -> Self {
         Self {
-            client_order_id: client_order_id.into(),
-            symbol: symbol.into(),
-            side,
+            client_order_id: o.client_order_id.clone(),
+            symbol: o.symbol.clone(),
+            side: o.side,
             order_type: LimitOnly::Limit,
-            size: LimitSize::Qty { qty: qty.into() },
-            limit_price: limit_price.into(),
+            size: LimitSize::Qty {
+                qty: o.asset_qty_str.clone(),
+            },
+            limit_price: o.limit_price_str.clone(),
             time_in_force: TimeInForce::Day,
             extended_hours: false,
         }
-    }
-}
-impl From<&crate::live::risk::ApprovedOrder> for PlaceLimitOrderRequest {
-    fn from(o: &crate::live::risk::ApprovedOrder) -> Self {
-        Self::new(
-            &o.client_order_id,
-            o.side,
-            &o.symbol,
-            &o.asset_qty_str,
-            &o.limit_price_str,
-        )
     }
 }
 
