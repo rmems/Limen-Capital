@@ -1,0 +1,29 @@
+# BLOCKED DRAFT for RM-2464, not a runnable Alpaca configuration.
+# See docs/live-runbook.md before provisioning any real credential.
+# Current main rejects SPY, refuses paper=false, and has no Alpaca source.
+# Do not "fix" this by using --paper, BTC-USD, or the legacy Robinhood adapter.
+# Reconcile this file with #40–#43 when the submitting binary lands, including
+# venue/data source, durable state/lock/halt paths, spread/stop/max-hold settings,
+# and experiment-wide LLM budget, pricing and expiry. Do not guess those keys.
+#
+# No paper phase or shadow soak. The first supervised live session is the soak.
+paper = false
+symbol = "SPY" # Candidate only; operator must choose/validate the first instrument.
+tick_interval_secs = 900
+journal_path = "runs/live-soak/journal.md"
+decider = "claude"
+# Planned allowlist: decision role only; no arbitrary model ids.
+model = "claude-sonnet-5-5"
+# Optional non-trading helper role: claude-haiku-5-5 (off until configured in #40).
+# Neither role is implemented/enforced on current main.
+
+[risk]
+max_position_usd = 10.0
+max_order_usd = 1.0 # Preferred first session; never above $5, including sells.
+max_daily_loss_usd = 4.0
+max_llm_cost_usd_per_day = 1.0 # Also set an independent provider workspace limit.
+min_tick_interval_secs = 900
+max_open_orders = 1
+stale_order_ticks = 2
+
+# No secrets in TOML. Empty environment slots live in .env.example.

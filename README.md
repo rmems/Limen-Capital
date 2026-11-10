@@ -1,7 +1,23 @@
 # Limen-Capital — Experimental SNN-HFT (Julia Brain + Rust Muscle)
 
 Hybrid research stack: **Julia neuromorphic strategy** + **Rust deterministic execution**.
-Built for experimental spiking / liquid-state market research — **not live capital**.
+The Julia/wire/ghost-ledger path is for experimental spiking / liquid-state
+market research, **not live capital**. The separate, feature-gated `limen-live`
+experiment targets real-money micro-capital on **Alpaca (US stocks and ETFs)**.
+It is not a production trading system.
+
+**Live launch is blocked on this revision:** `limen-live` still has the legacy
+Robinhood adapter and refuses `paper = false`; the Claude decider is not wired.
+Do not provision real keys or treat the draft example as runnable.
+See the [live runbook and release gates](docs/live-runbook.md) and
+[security model](docs/SECURITY.md). There is no paper phase or shadow soak:
+once the release gates are met, the first supervised real-money session is the
+soak, at micro caps ($10 position / at most $5 order / $4 daily loss, preferably
+$1 orders). CI/branch/secret protection [#26](https://github.com/rmems/Limen-Capital/issues/26)
+is a release blocker.
+
+A `limen-live` journal is an operational audit, **not a research result**.
+The journal and LLM output never enter a training set or research metrics.
 
 This repo is a **standalone application** (your personal/org remote). It is **not**
 published under the Limen-Neural GitHub organization. It *depends on* validated
