@@ -57,10 +57,7 @@ function VaultRecorder(batch_size::Int=100)
 end
 
 function _add_column_if_missing(con, table, col, typ)
-    try
-        DuckDB.execute(con, "ALTER TABLE $(table) ADD COLUMN $(col) $(typ)")
-    catch
-    end
+    DuckDB.execute(con, "ALTER TABLE $(table) ADD COLUMN IF NOT EXISTS $(col) $(typ)")
 end
 
 function _resume_tick(con)

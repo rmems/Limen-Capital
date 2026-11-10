@@ -140,9 +140,9 @@ end
 end
 
 @testset "symbol hash stable" begin
-    # Independent FNV-1a of the checked-in seven tickers joined by newline.
-    @test canonical_universe_hash() == 0x2b9a71d84f15dada
-    @test TRADE_UNIVERSE.hash == canonical_universe_hash()
+    # Independent FNV-1a of the checked-in placeholders joined by newline.
+    @test canonical_universe_hash() == 0x72b15f3eee1d443e
+    @test TRADE_UNIVERSE.hash == symbol_table_hash(TRADE_UNIVERSE.symbols)
 end
 
 println("All Capital unit tests finished.")

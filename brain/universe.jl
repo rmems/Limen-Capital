@@ -74,8 +74,10 @@ function load_trade_universe()
     return _parse_universe_toml(text)
 end
 
-"""Checked-in `config/universe.toml`, ignoring `LIMEN_UNIVERSE`."""
-function canonical_universe_hash()
+"""Checked-in `config/universe.toml`, ignoring `LIMEN_UNIVERSE`. Parsed once."""
+const CANONICAL_V1_HASH = let
     path = abspath(joinpath(@__DIR__, "..", "config", "universe.toml"))
-    return _parse_universe_toml(read(path, String)).hash
+    _parse_universe_toml(read(path, String)).hash
 end
+
+canonical_universe_hash() = CANONICAL_V1_HASH

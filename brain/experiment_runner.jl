@@ -143,6 +143,8 @@ function run_experiment(cfg::ExperimentConfig)
         end
     end
 
+    cfg.n_in = N_IN
+    cfg.n_out = N_OUT
     summary = finalize_metrics(metrics, cfg)
     extra = Dict{String,Any}(
         "backend_resolved" => string(reservoir_status(res).backend),
