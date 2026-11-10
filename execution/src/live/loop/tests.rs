@@ -314,19 +314,18 @@ async fn claude_decisions_are_risk_gated_and_journaled_with_usage_and_cost() {
         &[(100.0, 100.1), (100.0, 100.1), (100.0, 100.1)],
     )
     .await;
-    let s = run_with_parts(
-        &c,
-        &RunOptions {
-            once: false,
-            max_ticks: 3,
-        },
-        parts,
-    )
-    .await
-    .unwrap();
+    let opts = RunOptions {
+        once: false,
+        max_ticks: 3,
+    };
+    let s = run_with_parts(&c, &opts, parts).await.unwrap();
     assert_eq!(s.ticks, 3);
     assert_eq!(s.orders_placed, 1, "{s:?}");
-    let text = std::fs::read_to_string(&c.journal_path).unwrap();
+    assert_claude_journal(&std::fs::read_to_string(&c.journal_path).unwrap());
+}
+
+fn assert_claude_journal(text: &str) {
+    use crate::live::test_support::claude::TEST_KEY;
     assert!(
         text.contains("decision_model=claude-sonnet-5-5 helper_model=off"),
         "{text}"
@@ -352,41 +351,42 @@ async fn claude_decisions_are_risk_gated_and_journaled_with_usage_and_cost() {
     assert!(!text.contains("PRIVATE-THOUGHT") && !text.contains(TEST_KEY));
 }
 
-#[tokio::test]
-async fn expired_llm_budget_leaves_protective_handling_working() {
-    use crate::live::risk::ApprovedOrder;
+/// A resting buy far below the market: it must go stale and be cancelled.
+fn resting_buy() -> crate::live::risk::ApprovedOrder {
     use crate::live::robinhood::types::OrderSide;
+    crate::live::risk::ApprovedOrder {
+        client_order_id: "c8f53536-d7b4-44fd-8076-cac31e8f3880".into(),
+        symbol: "BTC-USD".into(),
+        side: OrderSide::Buy,
+        limit_price: 50.0,
+        asset_qty: 0.02,
+        notional_usd: 1.0,
+        limit_price_str: "50.00".into(),
+        asset_qty_str: "0.02".into(),
+    }
+}
+
+fn expired_clock() -> crate::live::test_support::claude::TestClock {
+    crate::live::test_support::claude::TestClock::at(
+        chrono::Utc.with_ymd_and_hms(2026, 11, 14, 0, 0, 0).unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn stale_orders_cancel_even_after_credit_expiry() {
     use crate::live::test_support::claude::*;
     use crate::live::test_support::MockServer;
     let server = MockServer::start(vec![]).await;
     let dir = tempfile::tempdir().unwrap();
     let c = claude_cfg(&server.base_url(), dir.path());
-    let clock = TestClock::at(chrono::Utc.with_ymd_and_hms(2026, 11, 14, 0, 0, 0).unwrap());
+    let clock = expired_clock();
     let mut parts = claude_parts(&c, &clock, &[(100.0, 100.1); 4]).await;
-    // A resting buy far below the market: it must go stale and be cancelled.
-    parts.book.place(
-        &ApprovedOrder {
-            client_order_id: "c8f53536-d7b4-44fd-8076-cac31e8f3880".into(),
-            symbol: "BTC-USD".into(),
-            side: OrderSide::Buy,
-            limit_price: 50.0,
-            asset_qty: 0.02,
-            notional_usd: 1.0,
-            limit_price_str: "50.00".into(),
-            asset_qty_str: "0.02".into(),
-        },
-        0,
-    );
-    let s = run_with_parts(
-        &c,
-        &RunOptions {
-            once: false,
-            max_ticks: 4,
-        },
-        parts,
-    )
-    .await
-    .unwrap();
+    parts.book.place(&resting_buy(), 0);
+    let opts = RunOptions {
+        once: false,
+        max_ticks: 4,
+    };
+    let s = run_with_parts(&c, &opts, parts).await.unwrap();
     assert!(s.cancels >= 1, "{s:?}");
     assert!(
         server.requests().await.is_empty(),
@@ -394,23 +394,24 @@ async fn expired_llm_budget_leaves_protective_handling_working() {
     );
     let text = std::fs::read_to_string(&c.journal_path).unwrap();
     assert!(text.contains("no new paid calls"), "{text}");
+}
 
-    // The daily-loss halt also fires regardless of the LLM state.
+#[tokio::test]
+async fn daily_loss_halt_works_after_credit_expiry() {
+    use crate::live::test_support::claude::*;
+    use crate::live::test_support::MockServer;
+    let server = MockServer::start(vec![]).await;
     let dir = tempfile::tempdir().unwrap();
     let c = claude_cfg(&server.base_url(), dir.path());
+    let clock = expired_clock();
     let mut parts = claude_parts(&c, &clock, &[(100.0, 100.1)]).await;
     parts.book.realized_pnl_usd = -5.0;
     parts.day_start_realized = Some(0.0);
-    let s = run_with_parts(
-        &c,
-        &RunOptions {
-            once: false,
-            max_ticks: 3,
-        },
-        parts,
-    )
-    .await
-    .unwrap();
+    let opts = RunOptions {
+        once: false,
+        max_ticks: 3,
+    };
+    let s = run_with_parts(&c, &opts, parts).await.unwrap();
     assert_eq!(s.halted_reason.as_deref(), Some("daily_loss_breached"));
 }
 #[tokio::test]

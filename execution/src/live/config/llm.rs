@@ -229,32 +229,54 @@ impl LlmConfig {
         helper_model: Option<&str>,
         per_day_usd: f64,
     ) -> Result<(), ConfigError> {
+        self.validate_roles(model, helper_model, per_day_usd)?;
         self.validate_endpoint()?;
+        self.credit_expiry_utc()?;
+        self.validate_bounds()?;
+        if self.ledger_path.trim().is_empty() {
+            return Err(invalid("llm.ledger_path must not be empty"));
+        }
+        Ok(())
+    }
+
+    /// Model prices, the cumulative cap, its pacing sub-cap, and the helper's
+    /// carved-out shares.
+    fn validate_roles(
+        &self,
+        model: &str,
+        helper_model: Option<&str>,
+        per_day_usd: f64,
+    ) -> Result<(), ConfigError> {
         let total = self.budget_total_usd()?;
         if per_day_usd >= total {
             return Err(invalid(format!(
                 "risk.max_llm_cost_usd_per_day ({per_day_usd}) is a pacing sub-cap and must be smaller than llm.max_llm_cost_usd_total ({total})"
             )));
         }
-        self.credit_expiry_utc()?;
-        self.validate_bounds()?;
         self.price(model)?;
-        if let Some(helper) = helper_model {
-            self.price(helper)?;
-            let (h_total, h_day) = self.helper_caps()?;
-            if h_total >= total {
-                return Err(invalid(
-                    "llm.helper_max_cost_usd_total must be smaller than llm.max_llm_cost_usd_total",
-                ));
-            }
-            if h_day >= per_day_usd {
-                return Err(invalid(
-                    "llm.helper_max_cost_usd_per_day must be smaller than risk.max_llm_cost_usd_per_day",
-                ));
-            }
+        match helper_model {
+            Some(helper) => self.validate_helper_share(helper, total, per_day_usd),
+            None => Ok(()),
         }
-        if self.ledger_path.trim().is_empty() {
-            return Err(invalid("llm.ledger_path must not be empty"));
+    }
+
+    fn validate_helper_share(
+        &self,
+        helper: &str,
+        total: f64,
+        per_day_usd: f64,
+    ) -> Result<(), ConfigError> {
+        self.price(helper)?;
+        let (h_total, h_day) = self.helper_caps()?;
+        if h_total >= total {
+            return Err(invalid(
+                "llm.helper_max_cost_usd_total must be smaller than llm.max_llm_cost_usd_total",
+            ));
+        }
+        if h_day >= per_day_usd {
+            return Err(invalid(
+                "llm.helper_max_cost_usd_per_day must be smaller than risk.max_llm_cost_usd_per_day",
+            ));
         }
         Ok(())
     }
@@ -273,41 +295,53 @@ impl LlmConfig {
     }
 
     fn validate_bounds(&self) -> Result<(), ConfigError> {
-        if !(1..=MAX_PROMPT_TOKENS).contains(&self.max_input_tokens) {
-            return Err(invalid(format!(
-                "llm.max_input_tokens must be in 1..={MAX_PROMPT_TOKENS}"
-            )));
-        }
-        for (name, v) in [
+        // (name, value, min, max) for every numeric per-call bound.
+        let bounds: [(&str, u64, u64, u64); 7] = [
+            (
+                "llm.max_input_tokens",
+                self.max_input_tokens,
+                1,
+                MAX_PROMPT_TOKENS,
+            ),
             (
                 "llm.decider_max_output_tokens",
-                self.decider_max_output_tokens,
+                u64::from(self.decider_max_output_tokens),
+                1,
+                u64::from(MAX_OUTPUT_TOKENS),
             ),
             (
                 "llm.helper_max_output_tokens",
-                self.helper_max_output_tokens,
+                u64::from(self.helper_max_output_tokens),
+                1,
+                u64::from(MAX_OUTPUT_TOKENS),
             ),
-        ] {
-            if !(1..=MAX_OUTPUT_TOKENS).contains(&v) {
-                return Err(invalid(format!(
-                    "{name} must be in 1..={MAX_OUTPUT_TOKENS}"
-                )));
+            (
+                "llm.request_timeout_secs",
+                self.request_timeout_secs,
+                1,
+                600,
+            ),
+            (
+                "llm.decision_deadline_secs",
+                self.decision_deadline_secs,
+                1,
+                3_600,
+            ),
+            (
+                "llm.max_response_bytes",
+                self.max_response_bytes as u64,
+                1_024,
+                8 * 1024 * 1024,
+            ),
+            ("llm.retry_backoff_ms", self.retry_backoff_ms, 0, 30_000),
+        ];
+        for (name, value, lo, hi) in bounds {
+            if !(lo..=hi).contains(&value) {
+                return Err(invalid(format!("{name} must be in {lo}..={hi}")));
             }
-        }
-        if !(1..=600).contains(&self.request_timeout_secs) {
-            return Err(invalid("llm.request_timeout_secs must be in 1..=600"));
-        }
-        if !(1..=3_600).contains(&self.decision_deadline_secs) {
-            return Err(invalid("llm.decision_deadline_secs must be in 1..=3600"));
-        }
-        if !(1_024..=8 * 1024 * 1024).contains(&self.max_response_bytes) {
-            return Err(invalid("llm.max_response_bytes must be in 1 KiB..=8 MiB"));
         }
         if self.max_retries > 3 {
             return Err(invalid("llm.max_retries must be <= 3"));
-        }
-        if self.retry_backoff_ms > 30_000 {
-            return Err(invalid("llm.retry_backoff_ms must be <= 30000"));
         }
         Ok(())
     }

@@ -124,10 +124,17 @@ impl DeciderError {
             DeciderError::Stale { .. } => "stale",
             DeciderError::MissingUsage(_) => "missing_usage",
             DeciderError::Pricing(_) => "missing_pricing",
+            _ => self.tail_kind(),
+        }
+    }
+
+    fn tail_kind(&self) -> &'static str {
+        match self {
             DeciderError::PromptTooLarge { .. } => "prompt_too_large",
             DeciderError::Budget(BudgetError::Expired { .. }) => "expired",
             DeciderError::Budget(_) => "budget",
             DeciderError::Other(_) => "other",
+            _ => unreachable!("kind() handled the other variants"),
         }
     }
 }
@@ -141,12 +148,21 @@ impl fmt::Display for DeciderError {
             DeciderError::Stale { detail } => write!(f, "decision stale: {detail}"),
             DeciderError::MissingUsage(m) => write!(f, "missing usage: {m}"),
             DeciderError::Pricing(m) => write!(f, "missing pricing: {m}"),
+            _ => self.fmt_tail(f),
+        }
+    }
+}
+
+impl DeciderError {
+    fn fmt_tail(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
             DeciderError::PromptTooLarge {
                 estimated_tokens,
                 limit,
             } => write!(f, "prompt ~{estimated_tokens} tokens > limit {limit}"),
             DeciderError::Budget(e) => write!(f, "llm budget: {e}"),
             DeciderError::Other(e) => write!(f, "decider: {e}"),
+            _ => unreachable!("fmt() handled the other variants"),
         }
     }
 }

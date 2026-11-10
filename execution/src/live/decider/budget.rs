@@ -20,10 +20,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::io;
 use std::sync::{Arc, Mutex, MutexGuard};
+
+mod store;
+#[cfg(test)]
+pub(crate) use store::sibling;
+pub use store::FileStore;
 
 pub const LEDGER_VERSION: u32 = 1;
 const EPS: f64 = 1e-12;
@@ -279,90 +282,6 @@ pub trait BudgetStore: Send {
     fn save(&mut self, state: &LedgerState) -> io::Result<()>;
 }
 
-/// JSON file, replaced atomically (write temp, fsync, rename, fsync dir) and
-/// guarded by an OS lock so two processes cannot meter the same budget.
-pub struct FileStore {
-    path: PathBuf,
-    _lock: File,
-}
-
-impl fmt::Debug for FileStore {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FileStore")
-            .field("path", &self.path)
-            .finish()
-    }
-}
-
-fn sibling(path: &Path, suffix: &str) -> PathBuf {
-    let mut s = path.as_os_str().to_owned();
-    s.push(suffix);
-    PathBuf::from(s)
-}
-
-impl FileStore {
-    pub fn open(path: impl Into<PathBuf>) -> io::Result<Self> {
-        let path = path.into();
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
-        }
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(sibling(&path, ".lock"))?;
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(fs::TryLockError::WouldBlock) => {
-                return Err(io::Error::other(format!(
-                    "{} is in use by another process",
-                    path.display()
-                )))
-            }
-            Err(fs::TryLockError::Error(e)) => return Err(e),
-        }
-        Ok(Self { path, _lock: lock })
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl BudgetStore for FileStore {
-    fn load(&mut self) -> io::Result<Option<LedgerState>> {
-        match fs::read_to_string(&self.path) {
-            Ok(text) => serde_json::from_str(&text)
-                .map(Some)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    fn save(&mut self, state: &LedgerState) -> io::Result<()> {
-        let tmp = sibling(&self.path, ".tmp");
-        let bytes = serde_json::to_vec_pretty(state).map_err(io::Error::other)?;
-        {
-            let mut f = File::create(&tmp)?;
-            f.write_all(&bytes)?;
-            f.sync_all()?;
-        }
-        fs::rename(&tmp, &self.path)?;
-        if let Some(parent) = self.path.parent() {
-            let dir = if parent.as_os_str().is_empty() {
-                Path::new(".")
-            } else {
-                parent
-            };
-            File::open(dir)?.sync_all()?;
-        }
-        Ok(())
-    }
-}
-
 struct Inner {
     state: LedgerState,
     policy: BudgetPolicy,
@@ -441,6 +360,20 @@ impl fmt::Debug for BudgetLedger {
     }
 }
 
+/// A config may only tighten the stored cap and expiry; reservations left
+/// pending by a crash stay counted as ambiguous until reconciled.
+fn reconcile(mut s: LedgerState, policy: &BudgetPolicy) -> LedgerState {
+    s.cap_total_usd = s.cap_total_usd.min(policy.cap_total_usd);
+    s.expiry_unix = s.expiry_unix.min(policy.expiry.timestamp());
+    for r in &mut s.reservations {
+        if r.state == ReservationState::Pending {
+            r.state = ReservationState::Ambiguous;
+            r.note.get_or_insert_with(|| "unsettled at restart".into());
+        }
+    }
+    s
+}
+
 fn iso(unix: i64) -> String {
     DateTime::<Utc>::from_timestamp(unix, 0)
         .map(|d| d.to_rfc3339())
@@ -454,27 +387,9 @@ impl BudgetLedger {
         policy: BudgetPolicy,
         mut store: Box<dyn BudgetStore>,
     ) -> Result<Self, BudgetError> {
-        let loaded = store.load().map_err(|e| match e.kind() {
-            io::ErrorKind::InvalidData => BudgetError::Corrupt(e.to_string()),
-            _ => BudgetError::Persistence(format!("load: {e}")),
-        })?;
-        let mut state = match loaded {
-            None => LedgerState::fresh(&policy),
-            Some(s) => {
-                Self::check_stored(&s, &policy)?;
-                s
-            }
-        };
-        state.cap_total_usd = state.cap_total_usd.min(policy.cap_total_usd);
-        state.expiry_unix = state.expiry_unix.min(policy.expiry.timestamp());
-        for r in &mut state.reservations {
-            if r.state == ReservationState::Pending {
-                r.state = ReservationState::Ambiguous;
-                r.note.get_or_insert_with(|| "unsettled at restart".into());
-            }
-        }
+        let state = Self::load_state(&mut *store, &policy)?;
         let mut inner = Inner {
-            state,
+            state: reconcile(state, &policy),
             policy,
             store,
         };
@@ -482,6 +397,24 @@ impl BudgetLedger {
         Ok(Self {
             inner: Mutex::new(inner),
         })
+    }
+
+    /// Read the stored state or start fresh; a corrupt ledger is never a reset.
+    fn load_state(
+        store: &mut dyn BudgetStore,
+        policy: &BudgetPolicy,
+    ) -> Result<LedgerState, BudgetError> {
+        let loaded = store.load().map_err(|e| match e.kind() {
+            io::ErrorKind::InvalidData => BudgetError::Corrupt(e.to_string()),
+            _ => BudgetError::Persistence(format!("load: {e}")),
+        })?;
+        match loaded {
+            None => Ok(LedgerState::fresh(policy)),
+            Some(s) => {
+                Self::check_stored(&s, policy)?;
+                Ok(s)
+            }
+        }
     }
 
     fn check_stored(s: &LedgerState, policy: &BudgetPolicy) -> Result<(), BudgetError> {

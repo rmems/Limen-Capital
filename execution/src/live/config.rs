@@ -189,6 +189,24 @@ impl LiveConfig {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_symbol_and_cadence()?;
+        self.validate_base_url()?;
+        self.validate_market()?;
+        self.validate_paper_book()?;
+        self.validate_rules()?;
+        self.validate_models()?;
+        self.risk.validate().map_err(ConfigError::Invalid)?;
+        self.validate_decider_kind()
+    }
+
+    fn validate_decider_kind(&self) -> Result<(), ConfigError> {
+        if self.decider == DeciderKind::Claude {
+            self.validate_llm()?;
+        }
+        Ok(())
+    }
+
+    fn validate_symbol_and_cadence(&self) -> Result<(), ConfigError> {
         if !ALLOWED_SYMBOLS.contains(&self.symbol.as_str()) {
             return Err(ConfigError::Invalid(format!(
                 "symbol {:?} not allowed; one of {:?}",
@@ -199,15 +217,6 @@ impl LiveConfig {
             return Err(ConfigError::Invalid(
                 "tick_interval_secs must be > 0".into(),
             ));
-        }
-        self.validate_base_url()?;
-        self.validate_market()?;
-        self.validate_paper_book()?;
-        self.validate_rules()?;
-        self.validate_models()?;
-        self.risk.validate().map_err(ConfigError::Invalid)?;
-        if self.decider == DeciderKind::Claude {
-            self.validate_llm()?;
         }
         Ok(())
     }

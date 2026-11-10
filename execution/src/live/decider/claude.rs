@@ -74,6 +74,32 @@ fn parse_err(raw: &Value, detail: impl Into<String>) -> DeciderError {
 /// Exactly one `submit_decision` tool call, schema-checked. Text and thinking
 /// blocks are ignored and never returned.
 pub fn parse_decision(v: &Value) -> Result<Decision, DeciderError> {
+    let input = single_tool_input(v)?;
+    let d: DecisionInput = serde_json::from_value(input.clone())
+        .map_err(|e| parse_err(&input, format!("schema: {e}")))?;
+    if !(d.size_usd.is_finite() && d.size_usd >= 0.0) {
+        return Err(parse_err(
+            &input,
+            format!(
+                "size_usd {} is not a finite non-negative number",
+                d.size_usd
+            ),
+        ));
+    }
+    Ok(into_decision(d))
+}
+
+fn into_decision(d: DecisionInput) -> Decision {
+    let reason = sanitize_text(&d.reason, MAX_REASON_CHARS);
+    match d.action {
+        Action::Hold => Decision::hold(reason),
+        Action::Buy => Decision::buy(d.size_usd, reason),
+        Action::Sell => Decision::sell(d.size_usd, reason),
+    }
+}
+
+/// The single `submit_decision` tool input, or why the response shape is wrong.
+fn single_tool_input(v: &Value) -> Result<Value, DeciderError> {
     let Some(content) = v.get("content").and_then(Value::as_array) else {
         return Err(parse_err(&Value::Null, "response has no content array"));
     };
@@ -90,31 +116,19 @@ pub fn parse_decision(v: &Value) -> Result<Decision, DeciderError> {
             ),
         ));
     }
-    let input = calls[0].get("input").cloned().unwrap_or(Value::Null);
-    let name = calls[0].get("name").and_then(Value::as_str).unwrap_or("");
+    check_tool_call(v, calls[0])
+}
+
+fn check_tool_call(v: &Value, call: &Value) -> Result<Value, DeciderError> {
+    let input = call.get("input").cloned().unwrap_or(Value::Null);
+    let name = call.get("name").and_then(Value::as_str).unwrap_or("");
     if name != DECISION_TOOL {
         return Err(parse_err(&input, format!("unexpected tool {name:?}")));
     }
     if v.get("stop_reason").and_then(Value::as_str) == Some("max_tokens") {
         return Err(parse_err(&input, "response truncated at max_tokens"));
     }
-    let d: DecisionInput = serde_json::from_value(input.clone())
-        .map_err(|e| parse_err(&input, format!("schema: {e}")))?;
-    if !(d.size_usd.is_finite() && d.size_usd >= 0.0) {
-        return Err(parse_err(
-            &input,
-            format!(
-                "size_usd {} is not a finite non-negative number",
-                d.size_usd
-            ),
-        ));
-    }
-    let reason = sanitize_text(&d.reason, MAX_REASON_CHARS);
-    Ok(match d.action {
-        Action::Hold => Decision::hold(reason),
-        Action::Buy => Decision::buy(d.size_usd, reason),
-        Action::Sell => Decision::sell(d.size_usd, reason),
-    })
+    Ok(input)
 }
 
 /// Drop the final journal cell (the LLM call audit, which may hold helper
