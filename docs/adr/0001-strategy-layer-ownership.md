@@ -115,8 +115,8 @@ This ADR fixes the ownership contract before any dependency integration.
   Limen-Capital consumption is an additive git+rev `[sources]` pin.
 - No recreation of landed replay/features; codec replacement only on a
   demonstrated contract gap.
-- Related, not duplicated: Limen-Capital #7 owns the
-  `spikenaut-execution-engine` crate rename; GitHub #5 / RM-1865 owns
+- Related, not duplicated: Limen-Capital #7 owned the
+  `spikenaut-execution-engine` crate rename (now `limen-execution`); GitHub #5 / RM-1865 owns
   [confidence-default documentation](../confidence-defaults.md).
 - Deferred to later issues: DendriteTrader dependency integration, short
   support in `metabolic-ledger`, repository migration/archive, corpus-ipc

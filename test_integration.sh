@@ -271,7 +271,7 @@ if [ "$TESTS_FAILED" -eq 0 ]; then
     echo -e "${GREEN}✓ Structure checks passed${NC}"
     echo ""
     echo "Next steps:"
-    echo "  1. cargo test -p spikenaut-execution-engine  (cd execution)"
+    echo "  1. cargo test -p limen-execution  (cd execution)"
     echo "  2. julia --project=brain test/runtests.jl"
     echo "  3. research: julia --project=brain research_helm.jl"
     exit 0

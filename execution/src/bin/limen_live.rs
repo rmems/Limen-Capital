@@ -11,7 +11,7 @@
 //! `--once --paper` runs a single read-only tick: account, pair rules,
 //! holdings, bid/ask, decision and risk verdict, with no order submission.
 
-use spikenaut_execution_engine::live::{self, LiveConfig, RunOptions, Secrets};
+use limen_execution::live::{self, LiveConfig, RunOptions, Secrets};
 use std::process::ExitCode;
 
 #[derive(Default)]

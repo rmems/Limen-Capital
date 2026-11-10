@@ -1,7 +1,7 @@
 //! Exercise the shipped binary, using hand-built NervousWire v2 bytes and private IPC.
 #![cfg(unix)]
 
-use spikenaut_execution_engine::universe::TradeUniverse;
+use limen_execution::universe::TradeUniverse;
 use std::fs;
 use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
@@ -67,7 +67,7 @@ fn real_listener_rejects_replay_stale_restart_and_bad_headers_then_stops_on_sigi
     publisher.bind(&ep).unwrap();
     let log = tmp.path().join("listener.log");
     let mut child = ChildGuard(
-        Command::new(env!("CARGO_BIN_EXE_spikenaut-execution-engine"))
+        Command::new(env!("CARGO_BIN_EXE_limen-execution"))
             .current_dir(tmp.path())
             .env("LIMEN_IPC_SUB", &ep)
             .env("LIMEN_IPC_PUB", &ep)
@@ -142,7 +142,7 @@ fn real_listener_rejects_replay_stale_restart_and_bad_headers_then_stops_on_sigi
 
 #[test]
 fn real_binary_refuses_remote_endpoint_without_opt_in() {
-    let output = Command::new(env!("CARGO_BIN_EXE_spikenaut-execution-engine"))
+    let output = Command::new(env!("CARGO_BIN_EXE_limen-execution"))
         .env("LIMEN_WIRE", "binary")
         .env("LIMEN_IPC_PUB", "tcp://192.0.2.1:5556")
         .env_remove("LIMEN_ALLOW_REMOTE_WIRE")

@@ -36,7 +36,7 @@ removes or gates them.
 - **M-3**: Julia `Manifest.toml` files are not committed; `[sources]`/`Cargo`
   git+rev pins in `docs/deps.md` are the pins of record.
 - **M-4**: `spikenaut-execution-engine` crate name predates the rebrand —
-  tracked by Limen-Capital #7, not this issue.
+  resolved: the crate is now `limen-execution` (Limen-Capital #7).
 - **M-5**: MarketPulse mixes market features and hardware telemetry
   (`gpu_temp_c`/`gpu_power_w`/`gpu_util_pct`/`basys_buffer_load`, bytes
   84–99); telemetry must not feed market features in research runs
