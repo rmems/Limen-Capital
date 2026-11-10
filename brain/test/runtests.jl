@@ -68,41 +68,48 @@ end
 end
 
 @testset "causal NERO aggregation (CPU)" begin
-    function _weighted_readout(lobe_outputs, relevance)
-        n = length(lobe_outputs)
-        dim = length(lobe_outputs[1])
-        s = max(sum(Float32(r) for r in relevance), 1.0f-6)
-        out = zeros(Float32, dim)
-        for i in 1:n
-            w = Float32(relevance[i]) / s
-            for j in 1:dim
-                out[j] += w * Float32(lobe_outputs[i][j])
-            end
-        end
-        return out
-    end
     outs = [
         Float32[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         Float32[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         Float32[0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         Float32[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     ]
-    y = _weighted_readout(outs, Float32[1, 0, 0, 0])
-    @test y[1] ≈ 1.0f0
+    # The same CUDA-free implementation is included by synapse_conductor.jl.
+    include(joinpath(BRAIN, "nero_core.jl"))
+    y = weighted_readout(outs, Float32[1, 0, 0, 0])
+    @test y == outs[1]
+    @test weighted_readout(outs, Float32[4, 3, 2, 1]) ≈
+          vcat(Float32[0.4, 0.3, 0.2, 0.1], zeros(Float32, 12))
+    @test weighted_readout(outs, zeros(Float32, 4)) == zeros(Float32, 16)
+    @test_throws ErrorException weighted_readout(outs, Float32[1])
+    @test_throws ErrorException weighted_readout(Vector{Float32}[], Float32[])
 end
 
 @testset "FeatureStream Hawkes (CPU)" begin
     include(joinpath(BRAIN, "feature_stream.jl"))
     fs = FeatureStream(; window=50, threshold=0.001, base_delta=0.001f0, use_reflex=false)
-    p = 1.0
-    for t in 1:40
-        p *= (t % 2 == 0 ? 1.01 : 0.99)
-        update_features!(fs, p, Float64(t))
-    end
-    @test fs.last.encoder_delta > 0
+    @test fs.last.hawkes_λ == 0.01
+    @test hawkes_intensity(Float64[1, 3, 5], 5.0, HawkesParams()) ≈
+          0.01 + 0.5 * exp(-0.4) + 0.5 * exp(-0.2)
+    @test update_features!(fs, 1.0, 1.0).hawkes_λ ≈ 0.51
+    snap = update_features!(fs, 1.01, 2.0)
+    @test snap.hawkes_λ ≈ 0.01 + 0.5 * exp(-0.1) + 0.5
+    @test snap.hawkes_norm == 8.0f0
+    @test snap.encoder_delta == 0.000125f0
+    @test snap.reflex_signal == 2.0f0
+    # No event at t=3: only the two prior events decay.
+    @test update_features!(fs, 1.01, 3.0).hawkes_λ ≈
+          0.01 + 0.5 * exp(-0.2) + 0.5 * exp(-0.1)
+    # Also exercise gain without saturation, using a nonzero baseline.
+    calm = FeatureStream(; params=HawkesParams(baseline_μ=0.5, excitation_α=0.2))
+    gain = update_features!(calm, 1.0, 1.0)
+    @test gain.hawkes_λ ≈ 0.7
+    @test gain.hawkes_norm ≈ 1.4f0
+    @test gain.encoder_delta ≈ 0.001f0 / 1.4f0
+    @test gain.reflex_signal ≈ 0.4f0
     enc = MarketEncoder(N_ASSETS; delta=0.001f0)
-    apply_encoder_gain!(enc, fs.last)
-    @test enc.delta_threshold == fs.last.encoder_delta
+    apply_encoder_gain!(enc, gain)
+    @test enc.delta_threshold == gain.encoder_delta
 end
 
 @testset "experiment metrics (CPU)" begin
@@ -132,7 +139,7 @@ end
     @test o2[1] ≈ 0.8f0
 
     fixture = joinpath(BRAIN, "..", "wire", "fixtures", "readout.bin")
-    if N_ASSETS == 7 && isfile(fixture)
+    if N_ASSETS == 7
         gt, go, gr = decode_readout(collect(read(fixture)))
         @test gt == 42
         @test go[1] ≈ 0.8f0
@@ -146,5 +153,6 @@ end
 end
 
 include(joinpath(@__DIR__, "wire_hardening.jl"))
+include(joinpath(@__DIR__, "wire_fixtures.jl"))
 
 println("All Capital unit tests finished.")

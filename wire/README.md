@@ -6,6 +6,48 @@ Binary layouts for experimental SNN-HFT between Julia brain and Rust muscle. Sym
 **Rust types:** `execution/src/binary_wire/`, `execution/src/universe.rs`  
 **Fixtures:** `fixtures/universe_3.toml`, `fixtures/universe_12.toml`; v1 golden `marketpulse.bin` / `readout.bin` for 7-symbol regression
 
+## Executable contract checks
+
+Run from the repository root:
+
+```bash
+python3 wire/generate_fixtures.py          # check independent Python struct oracle
+python3 wire/generate_fixtures.py --write  # deliberately regenerate committed bytes
+julia --project=brain brain/test/runtests.jl
+cargo test --manifest-path execution/Cargo.toml --locked --test wire_fixtures
+bash scripts/test_julia_rust_wire.sh
+```
+
+Both languages compare their production v2 writers byte-for-byte with
+`marketpulse_v2.bin` and `readout_v2.bin`, and assert every decoded field.
+Legacy v1 writers (where available) and all v1 decoded fields are also pinned.
+Expected values are literal inputs, not derived by decoding and re-encoding.
+Missing or changed fixtures fail the tests. The generator uses explicit
+little-endian `struct` layouts, independently of either implementation.
+
+The required **Julia → Rust wire decisions** CI job invokes the Julia packers
+in a fresh process, then Rust decodes those files, maps signals, resolves prices,
+and calls `ExecutionEngine::default()` (confidence 0.15, max quantity 10).
+It checks Buy/Sell policy quantities, actual wallet deltas and JSONL records,
+plus confidence/no-edge rejections without wallet or log changes. This test is
+explicitly ignored in standalone `cargo test`, which needs no Julia; the runner
+selects it with `--ignored` and fails if the generated files are absent.
+All trade logs and transient wire files live in auto-cleaned temporary directories.
+
+### Execution limitations made visible
+
+The historical golden readout has confidence about 0.244. It passes the default
+confidence gate but has **no Kelly edge** with payoff ratio 0.05. The default
+decision is therefore `RejectedNoEdge`, not an execution. Executable tests pin
+this decision rather than relaxing production thresholds to get a fill.
+
+Policy quantity is still advisory to `metabolic-ledger`: a new wallet buys
+using 8% of ATP and sells 8% of held units, with 0.1% friction, independently
+of the policy quantity returned by `process_signal`. Tests explicitly pin both
+numbers (for example, at price 10 and confidence 0.98, policy quantity is about
+7.25 while the actual buy fill is 3.996). Fixing that sizing contract is separate
+from these test improvements.
+
 ## Endpoints
 
 | Direction | Env | Default |
