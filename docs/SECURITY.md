@@ -95,6 +95,41 @@ If other users can run processes on the same machine:
 2. **Loopback is not multi-tenant security** — co-located attackers with the same privileges can still talk to local sockets.
 3. **Ghost ledger only** — accidental wiring to a live broker is operator error; this repo does not ship exchange keys.
 
+## CI and repository controls
+
+CI runs Rust, Julia CPU, integration, and Gitleaks checks on pull requests and
+pushes to `main`. Gitleaks scans commit changes across files, including secrets
+introduced and removed within a PR. It uses the upstream default rules, not a
+single retired CURVE-key match. Comments and artifact uploads are disabled; the
+job has read-only permissions. Scanning cannot prove that arbitrary key material
+is absent. Keep CURVE secrets in environment variables even if a scanner passes.
+
+For a local history scan, install Gitleaks **8.30.1**, then run from the repo root:
+
+```bash
+gitleaks git --redact --log-opts="--all"
+```
+
+`execution/rust-toolchain.toml` pins Rust **1.99.0**, matching both CI toolchain
+steps. Update all three together when changing the compiler.
+
+The desired `main` ruleset is checked in at `.github/main-ruleset.json`. A file
+alone does **not** activate GitHub protection. A repository administrator must
+apply it after the four job names above are available on the PR:
+
+```bash
+gh api --method POST repos/rmems/Limen-Capital/rulesets \
+  --input .github/main-ruleset.json
+gh api repos/rmems/Limen-Capital/rulesets
+```
+
+If a ruleset with that name already exists, update its ID with `--method PUT`
+and `/rulesets/ID` instead of creating a duplicate. Verify the active ruleset
+requires a PR and all four checks, with no bypass actors. The configuration also
+blocks branch deletion and force pushes and requires an up-to-date PR branch.
+Activation requires repository administration permissions; read/push access
+alone is insufficient.
+
 ## Reporting
 
 Private vulnerability reports: use GitHub Security Advisories for this repository —
