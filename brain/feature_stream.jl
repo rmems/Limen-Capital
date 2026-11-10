@@ -100,7 +100,7 @@ function update_features!(
 
     feats = nothing
     if fs.use_reflex && fs.reflex !== nothing && spikes_cpu !== nothing
-        if length(spikes_cpu) >= 4 && length(spikes_cpu) % 4 == 0
+        if length(spikes_cpu) == 28
             feats = step_cpu(fs.reflex, Vector{Float32}(spikes_cpu))
         end
     end

@@ -95,11 +95,15 @@ pub fn price_for_ticker(
     universe: &TradeUniverse,
     ticker: &str,
 ) -> Option<f64> {
+    if pulse.symbol_table_hash != universe.hash {
+        return None;
+    }
     universe
         .symbols
         .iter()
         .position(|t| t == ticker)
-        .map(|i| pulse.prices[i] as f64)
+        .and_then(|i| pulse.prices.get(i).copied())
+        .map(f64::from)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,7 +276,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn universe_7() -> TradeUniverse {
-        TradeUniverse::load_default().expect("default universe")
+        TradeUniverse::load(&TradeUniverse::default_config_path()).expect("default universe")
     }
 
     fn fixture(name: &str) -> PathBuf {

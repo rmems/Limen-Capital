@@ -26,7 +26,8 @@ end
 function encode!(enc::MarketEncoder, pulse::MarketPulse)
     current = copy(pulse.prices)
     vols = copy(pulse.vols)
-    length(current) == enc.n_assets || error("encoder/universe size mismatch")
+    length(current) == enc.n_assets && length(vols) == enc.n_assets ||
+        error("encoder/universe size mismatch")
 
     if all(enc.prev_prices .== 0.0f0)
         enc.prev_prices .= current

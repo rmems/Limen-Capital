@@ -29,6 +29,7 @@ impl ReadoutPacket {
             return Err("readout length must be even (bull/bear pairs)".into());
         }
         let n_pairs = self.n_pairs();
+        require_count(n_pairs, 257, "n_pairs")?;
         let mut buf = vec![0u8; self.frame_len_v2()];
         let mut c = Cursor::new(&mut buf[..]);
         write_readout_prefix(&mut c, self, n_pairs)?;
@@ -162,10 +163,15 @@ fn require_readout_universe(
 }
 
 fn require_v1_pairs(expected: Option<&TradeUniverse>) -> Result<(), String> {
-    if let Some(u) = expected {
-        if u.n_pairs() != 8 {
-            return Err("v1 ReadoutPacket requires an 8-pair universe".into());
-        }
+    let Some(u) = expected else {
+        return Ok(());
+    };
+    if u.n_pairs() != 8 {
+        return Err("v1 ReadoutPacket requires an 8-pair universe".into());
+    }
+    let canonical = TradeUniverse::canonical_v1_hash()?;
+    if u.hash != canonical {
+        return Err("v1 frames are only valid for the checked-in default universe".into());
     }
     Ok(())
 }
@@ -237,6 +243,9 @@ fn neutral_trade(
 /// Map readout + NERO relevance → trade side/confidence (universe-wide ranking).
 pub fn readout_to_trade(packet: &ReadoutPacket, universe: &TradeUniverse) -> MappedTrade {
     let scores = pair_scores(packet);
+    if scores.is_empty() {
+        return neutral_trade(universe, packet, universe.n_assets());
+    }
     if let Some(i) = scores.iter().position(|s| !s.is_finite()) {
         return neutral_trade(universe, packet, i);
     }

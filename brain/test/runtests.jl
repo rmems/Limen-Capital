@@ -35,13 +35,15 @@ end
 @testset "MarketPulse validation" begin
     buf = pack_market_pulse(sample_pulse())
     v2 = copy(buf)
-    v2[WIRE_HEADER_BYTES + 12] = 0xff # corrupt first price byte
+    v2[29:32] .= 0x00 # first price word (after header, timestamp, hash, count)
     @test_throws ErrorException decode_market_pulse(v2)
 
     if N_ASSETS == 7
-        v1 = pack_market_pulse_v1(sample_pulse())
-        @test length(v1) == 120
-        @test decode_market_pulse(v1).prices == sample_pulse().prices
+        golden = joinpath(BRAIN, "..", "wire", "fixtures", "marketpulse.bin")
+        raw = collect(read(golden))
+        @test length(raw) == 120
+        decoded = decode_market_pulse(raw)
+        @test decoded.prices[1] ≈ 1.0f0
     end
 end
 
@@ -138,8 +140,9 @@ end
 end
 
 @testset "symbol hash stable" begin
-    h = symbol_table_hash(TRADE_UNIVERSE.symbols)
-    @test h == TRADE_UNIVERSE.hash
+    # Independent FNV-1a of the checked-in seven tickers joined by newline.
+    @test canonical_universe_hash() == 0x2b9a71d84f15dada
+    @test TRADE_UNIVERSE.hash == canonical_universe_hash()
 end
 
 println("All Capital unit tests finished.")

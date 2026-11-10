@@ -86,8 +86,13 @@ function validate_market_pulse(data::Vector{UInt8})
         return false
     end
     
-    # Timestamp is Unix nanoseconds (MarketPulse wire layout)
-    timestamp_ns = reinterpret(UInt64, data[1:8])[1]
+    # v2 timestamp follows the 8-byte header; v1 starts at byte 1.
+    ts_off = kind == :market_v2 ? WIRE_HEADER_BYTES + 1 : 1
+    if length(data) < ts_off + 7
+        @warn "MarketPulse frame too short for timestamp"
+        return false
+    end
+    timestamp_ns = reinterpret(UInt64, data[ts_off:ts_off+7])[1]
     current_ns = time_ns()
     # Allow large skew (sim / research clocks); only flag absurd multi-day deltas
     hour_ns = UInt64(3_600) * UInt64(1_000_000_000)
@@ -244,7 +249,8 @@ function main()
             end
             tick += 1
 
-            snap = update_features!(features, Float64(pulse.prices[1]), Float64(tick))
+            ref_px = sum(Float64, pulse.prices) / max(length(pulse.prices), 1)
+            snap = update_features!(features, ref_px, Float64(tick))
             apply_encoder_gain!(encoder, snap)
             # Inject Hawkes excess into liquidity_delta slot for Scalper flash-learning
             # (MarketPulse is immutable struct — pass via reservoir_step kwargs)

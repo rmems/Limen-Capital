@@ -20,7 +20,7 @@ With `ZMQ_CURVE=1`, both link directions use CURVE: market feed PUB (`market_sim
 | Offset | Type | Field |
 |--------|------|-------|
 | 0–7 | `u64` | `timestamp_ns` |
-| 8–63 | 7 × (`f32` price, `f32` vol) | assets 0..6 per runtime universe file |
+| 8–63 | 7 × (`f32` price, `f32` vol) | fixed legacy 7-asset order (golden fixtures only; runtime universes use v2) |
 | 64–67 | `f32` | `confidence_signal` |
 | 68–71 | `f32` | `funding_rate` |
 | 72–75 | `f32` | `liquidation_vol` |

@@ -58,6 +58,7 @@ impl MarketPulse {
 
     pub fn pack_v2(&self) -> Result<Vec<u8>, String> {
         let n = self.n_assets();
+        require_count(n, 256, "n_assets")?;
         if self.vols.len() != n {
             return Err("MarketPulse prices/vols length mismatch".into());
         }
@@ -70,7 +71,7 @@ impl MarketPulse {
     }
 
     pub fn pack_v1_legacy(&self) -> Result<[u8; MARKET_PULSE_V1_BYTES], String> {
-        if self.n_assets() != 7 {
+        if self.n_assets() != 7 || self.vols.len() != 7 {
             return Err("v1 MarketPulse requires exactly 7 assets".into());
         }
         let mut buf = [0u8; MARKET_PULSE_V1_BYTES];
@@ -185,10 +186,15 @@ fn require_market_universe(
 }
 
 fn require_v1_universe(expected: Option<&TradeUniverse>) -> Result<(), String> {
-    if let Some(u) = expected {
-        if u.n_assets() != 7 {
-            return Err("v1 MarketPulse requires a 7-symbol universe".into());
-        }
+    let Some(u) = expected else {
+        return Ok(());
+    };
+    if u.n_assets() != 7 {
+        return Err("v1 MarketPulse requires a 7-symbol universe".into());
+    }
+    let canonical = TradeUniverse::canonical_v1_hash()?;
+    if u.hash != canonical {
+        return Err("v1 frames are only valid for the checked-in default universe".into());
     }
     Ok(())
 }

@@ -1,5 +1,7 @@
 # universe.jl — runtime tradeable symbol table (must match execution/src/universe.rs)
 
+import TOML
+
 const FNV_OFFSET = UInt64(14695981039346656037)
 const FNV_PRIME = UInt64(1099511628211)
 
@@ -19,8 +21,8 @@ function symbol_table_hash(symbols::AbstractVector{<:AbstractString})
         if i > 1
             h = _fnv_byte(h, UInt8('\n'))
         end
-        for c in sym
-            h = _fnv_byte(h, UInt8(c))
+        for b in codeunits(sym)
+            h = _fnv_byte(h, b)
         end
     end
     return h
@@ -34,19 +36,26 @@ end
 function TradeUniverse(symbols::Vector{String})
     isempty(symbols) && error("universe must contain at least one symbol")
     length(symbols) > 256 && error("universe too large: $(length(symbols)) symbols")
+    length(unique(symbols)) == length(symbols) || error("duplicate symbol in universe")
     TradeUniverse(symbols, symbol_table_hash(symbols))
 end
 
-function _parse_universe_toml(text::AbstractString)
-    m = match(r"symbols\s*=\s*\[(.*?)\]"s, text)
-    m === nothing && error("universe.toml missing `symbols` array")
-    body = strip(m.captures[1])
+function _normalize_symbols(raw)
+    raw isa AbstractVector || error("universe.toml `symbols` must be an array")
     syms = String[]
-    for chunk in eachmatch(r"\"([^\"]+)\""s, body)
-        push!(syms, chunk.captures[1])
+    for entry in raw
+        entry isa AbstractString || error("each symbol must be a string")
+        s = strip(String(entry))
+        isempty(s) && error("empty symbol in universe")
+        push!(syms, s)
     end
-    isempty(syms) && error("no symbols parsed from universe file")
-    return TradeUniverse(syms)
+    return syms
+end
+
+function _parse_universe_toml(text::AbstractString)
+    doc = TOML.parse(text)
+    haskey(doc, "symbols") || error("universe.toml missing `symbols` array")
+    return TradeUniverse(_normalize_symbols(doc["symbols"]))
 end
 
 """
@@ -63,4 +72,10 @@ function load_trade_universe()
     end
     text = read(path, String)
     return _parse_universe_toml(text)
+end
+
+"""Checked-in `config/universe.toml`, ignoring `LIMEN_UNIVERSE`."""
+function canonical_universe_hash()
+    path = abspath(joinpath(@__DIR__, "..", "config", "universe.toml"))
+    return _parse_universe_toml(read(path, String)).hash
 end

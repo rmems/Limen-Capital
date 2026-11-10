@@ -70,6 +70,12 @@ impl TradeUniverse {
                 symbols.len()
             ));
         }
+        let mut seen = std::collections::HashSet::new();
+        for s in &symbols {
+            if !seen.insert(s.clone()) {
+                return Err(format!("duplicate symbol in universe: {s}"));
+            }
+        }
         let hash = symbol_table_hash(&symbols);
         Ok(Self { symbols, hash })
     }
@@ -77,20 +83,37 @@ impl TradeUniverse {
     pub fn load(path: &Path) -> Result<Self, String> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| format!("read universe {}: {e}", path.display()))?;
-        Self::new(parse_symbols(&raw)?)
+        Self::new(parse_symbols(&raw).map_err(|e| format!("{e} ({})", path.display()))?)
     }
 
     pub fn resolve_path() -> Result<PathBuf, String> {
-        if let Ok(p) = std::env::var("LIMEN_UNIVERSE") {
-            let path = PathBuf::from(p.trim());
-            if path.is_absolute() {
-                return Ok(path);
+        if let Ok(raw) = std::env::var("LIMEN_UNIVERSE") {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                let path = PathBuf::from(trimmed);
+                if path.is_absolute() {
+                    return Ok(path);
+                }
+                let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+                return Ok(root.join(path));
             }
-            // Relative to CARGO_MANIFEST_DIR/../ for `execution/` crate layout.
-            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-            return Ok(root.join(path));
         }
-        Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../config/universe.toml"))
+        Ok(Self::default_config_path())
+    }
+
+    pub fn default_config_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../config/universe.toml")
+    }
+
+    /// Hash of the checked-in `config/universe.toml`, independent of `LIMEN_UNIVERSE`.
+    pub fn canonical_v1_hash() -> Result<u64, String> {
+        use std::sync::OnceLock;
+        static CELL: OnceLock<u64> = OnceLock::new();
+        if let Some(h) = CELL.get() {
+            return Ok(*h);
+        }
+        let h = Self::load(&Self::default_config_path())?.hash;
+        Ok(*CELL.get_or_init(|| h))
     }
 
     pub fn load_default() -> Result<Self, String> {

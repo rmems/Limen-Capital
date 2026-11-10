@@ -188,6 +188,8 @@ end
 function decode_market_pulse_v1(buf::Vector{UInt8})
     length(buf) == MARKET_PULSE_V1_BYTES || error("Expected 120 bytes, got $(length(buf))")
     N_ASSETS == 7 || error("v1 decode requires 7-symbol universe")
+    TRADE_UNIVERSE.hash == canonical_universe_hash() ||
+        error("v1 frames are only valid for the checked-in default universe")
     ts = reinterpret(UInt64, view(buf, 1:8))[1]
     words = collect(reinterpret(Float32, view(buf, 9:108)))
     prices = words[1:2:13]
@@ -248,6 +250,8 @@ end
 
 function decode_readout_v2(buf::Vector{UInt8})
     _wire_magic(buf) == WIRE_MAGIC || error("invalid wire magic")
+    buf[5] == WIRE_VERSION_V2 || error("unsupported wire version $(buf[5])")
+    buf[6] == FRAME_READOUT || error("expected Readout frame")
     off = WIRE_HEADER_BYTES + 1
     tick = reinterpret(Int64, view(buf, off:off+7))[1]; off += 8
     hash = reinterpret(UInt64, view(buf, off:off+7))[1]; off += 8
@@ -266,6 +270,8 @@ end
 function decode_readout_v1(buf::Vector{UInt8})
     length(buf) == READOUT_PACKET_V1_BYTES || error("Expected 88 bytes, got $(length(buf))")
     N_PAIRS == 8 || error("v1 readout requires 8-pair universe")
+    TRADE_UNIVERSE.hash == canonical_universe_hash() ||
+        error("v1 frames are only valid for the checked-in default universe")
     tick = reinterpret(Int64, view(buf, 1:8))[1]
     output = collect(reinterpret(Float32, view(buf, 9:72)))
     relevance = collect(reinterpret(Float32, view(buf, 73:88)))
