@@ -17,6 +17,15 @@ pub async fn build_parts(cfg: &LiveConfig, secrets: &Secrets) -> Result<LoopPart
             "live order submission is not implemented yet; run with paper = true / --paper".into(),
         ));
     }
+    let halt = HaltFile::new(cfg.halt_path());
+    if halt.is_set() {
+        return Err(LoopError::Config(format!(
+            "halt file {} is present; remove it to start",
+            halt.path().display()
+        )));
+    }
+    let lock = InstanceLock::acquire(cfg.lock_path())
+        .map_err(|e| LoopError::Config(format!("instance lock: {e}")))?;
     let source = build_market(cfg, secrets).await?;
     let decider: Box<dyn Decider> = match cfg.decider {
         DeciderKind::Rules => Box::new(RulesDecider::new(cfg.rules.clone())),
@@ -34,6 +43,8 @@ pub async fn build_parts(cfg: &LiveConfig, secrets: &Secrets) -> Result<LoopPart
         journal: Journal::new(&cfg.journal_path),
         account_line: source.account_line,
         day_start_realized: None,
+        halt,
+        lock: Some(lock),
     })
 }
 

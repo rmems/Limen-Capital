@@ -2,12 +2,18 @@
 //! → poll fills → journal → sleep.
 //!
 //! Live order submission is **not** wired yet (arrives in a later step behind
-//! `paper = false`); starting with `paper = false` is refused here.
+//! `paper = false`); starting with `paper = false` is refused here. The
+//! durable venue book it will use is [`crate::live::live_book`].
+//!
+//! Stops: Ctrl-C (seen at any point of a tick), the daily-loss halt, the
+//! operator halt file (`<state_dir>/HALT`) and normal exit all cancel
+//! resting orders before the loop returns. One process per `state_dir`.
 
 use crate::live::config::{DeciderKind, LiveConfig, MarketSourceConfig, Secrets};
 use crate::live::decider::rules::RulesDecider;
 use crate::live::decider::Decider;
 use crate::live::journal::{Journal, JournalHeader, JournalRow};
+use crate::live::kill::{HaltFile, InstanceLock, StopSignal};
 use crate::live::market::{MarketSource, RobinhoodMarket, SyntheticMarket};
 use crate::live::market_state::MarketState;
 use crate::live::paper::{PaperBook, PaperEvent};
@@ -76,7 +82,7 @@ fn iso(ts: i64) -> String {
         .unwrap_or_else(|| ts.to_string())
 }
 
-fn utc_day(ts: i64) -> i32 {
+pub(crate) fn utc_day(ts: i64) -> i32 {
     DateTime::<Utc>::from_timestamp(ts, 0)
         .map(|d| d.num_days_from_ce())
         .unwrap_or(0)
@@ -91,9 +97,13 @@ pub struct LoopParts {
     pub journal: Journal,
     pub account_line: Option<String>,
     /// Realized PnL baseline for today's loss counter. `None` = the book's
-    /// realized PnL at start (a restart therefore resets the daily counter;
-    /// persisting it across restarts is follow-up work).
+    /// realized PnL at start. Paper only: a paper restart resets the daily
+    /// counter; live mode persists it in the durable book.
     pub day_start_realized: Option<f64>,
+    /// Operator halt switch, checked before every tick and while sleeping.
+    pub halt: HaltFile,
+    /// Single-instance lock on `state_dir`, held for the whole run.
+    pub lock: Option<InstanceLock>,
 }
 
 impl fmt::Debug for LoopParts {
@@ -106,6 +116,8 @@ impl fmt::Debug for LoopParts {
             .field("journal", &self.journal)
             .field("account_line", &self.account_line)
             .field("day_start_realized", &self.day_start_realized)
+            .field("halt", &self.halt)
+            .field("lock", &self.lock)
             .finish()
     }
 }
@@ -132,7 +144,10 @@ pub async fn run_with_parts(
 ) -> Result<RunSummary, LoopError> {
     let started = Utc::now().timestamp();
     let max_ticks = if opts.once { 1 } else { opts.max_ticks };
+    let stop = StopSignal::new();
+    let watcher = stop.watch_ctrl_c();
     let mut runner = Runner {
+        stop,
         cfg,
         opts,
         day: utc_day(started),
@@ -144,14 +159,12 @@ pub async fn run_with_parts(
         recent_mids: Vec::new(),
         last_order_secs: None,
     };
-    report::start(cfg, &mut runner.parts, started, max_ticks)?;
-    loop {
-        runner.summary.ticks += 1;
-        runner.tick().await?;
-        if runner.finished(max_ticks).await {
-            break;
-        }
-    }
+    let result = runner.run_ticks(started, max_ticks).await;
+    // Every way out (halt, Ctrl-C, max ticks, error) leaves nothing resting.
+    let cancelled = runner.cancel_resting();
+    watcher.abort();
+    result?;
+    cancelled?;
     report::done(&runner.summary);
     Ok(runner.summary)
 }
@@ -166,9 +179,61 @@ struct Runner<'a> {
     last_order_secs: Option<i64>,
     day: i32,
     day_start_realized: f64,
+    stop: StopSignal,
 }
 
 impl Runner<'_> {
+    async fn run_ticks(&mut self, started: i64, max_ticks: u64) -> Result<(), LoopError> {
+        report::start(self.cfg, &mut self.parts, started, max_ticks)?;
+        loop {
+            if let Some(reason) = self.stop_requested() {
+                self.halt(reason);
+                return Ok(());
+            }
+            self.summary.ticks += 1;
+            self.tick().await?;
+            if self.finished(max_ticks).await {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Ctrl-C or the operator halt file.
+    fn stop_requested(&self) -> Option<&'static str> {
+        if self.stop.is_triggered() {
+            Some("ctrl_c")
+        } else if self.parts.halt.is_set() {
+            Some("halt_file")
+        } else {
+            None
+        }
+    }
+
+    fn halt(&mut self, reason: &str) {
+        warn!("stopping: {reason}");
+        self.summary.halted_reason = Some(reason.to_string());
+    }
+
+    /// Cancel every resting order and journal it.
+    fn cancel_resting(&mut self) -> Result<(), LoopError> {
+        let events = self.parts.book.cancel_all(self.summary.ticks);
+        if events.is_empty() {
+            return Ok(());
+        }
+        let reason = self
+            .summary
+            .halted_reason
+            .clone()
+            .unwrap_or_else(|| "exit".into());
+        report::stop_cancels(
+            self.cfg,
+            &mut self.parts,
+            &events,
+            &reason,
+            &mut self.summary,
+        )
+    }
+
     async fn tick(&mut self) -> Result<(), LoopError> {
         let now = Utc::now().timestamp();
         self.reset_day(now);
@@ -343,36 +408,41 @@ impl Runner<'_> {
         if max_ticks != 0 && self.summary.ticks >= max_ticks {
             return true;
         }
-        if !sleep_or_ctrl_c(self.cfg.tick_interval_secs).await {
-            info!("ctrl-c: stopping");
-            self.summary.halted_reason = Some("ctrl_c".into());
+        if let Some(reason) = self.sleep_until_next_tick().await {
+            self.halt(reason);
             return true;
         }
         false
     }
+
+    /// Sleep for the tick interval in short slices so Ctrl-C and the halt
+    /// file act within about a second. Returns the stop reason, if any.
+    async fn sleep_until_next_tick(&self) -> Option<&'static str> {
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(self.cfg.tick_interval_secs);
+        loop {
+            if let Some(reason) = self.stop_requested() {
+                return Some(reason);
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            let slice = (deadline - now).min(HALT_POLL);
+            tokio::select! {
+                _ = tokio::time::sleep(slice) => {}
+                _ = self.stop.wait() => {}
+            }
+        }
+    }
 }
+
+/// How often the halt file is checked while sleeping.
+const HALT_POLL: Duration = Duration::from_secs(1);
+
 /// First 8 characters of an id (or the whole id when shorter); never panics.
 fn short_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
-}
-
-/// Sleep for the tick interval; returns `false` if Ctrl-C arrived.
-///
-/// If the signal handler cannot be installed, fall back to a plain sleep so
-/// the loop keeps its tick spacing instead of spinning against the venue.
-async fn sleep_or_ctrl_c(secs: u64) -> bool {
-    let dur = Duration::from_secs(secs);
-    tokio::select! {
-        _ = tokio::time::sleep(dur) => true,
-        r = tokio::signal::ctrl_c() => match r {
-            Ok(()) => false,
-            Err(e) => {
-                warn!("ctrl-c handler unavailable ({e}); sleeping without it");
-                tokio::time::sleep(dur).await;
-                true
-            }
-        },
-    }
 }
 
 #[cfg(test)]
