@@ -55,6 +55,8 @@ uuid = { version = "1", features = ["v4", "serde"], optional = true }
 rand = { version = "0.8", optional = true }
 [features]
 default = []
+# Shared Alpaca contract-test harness. RM-2460 adds the production adapter.
+live-alpaca = []
 # Streaming Hawkes / surprise features from kinetic-signals
 kinetic = ["dep:kinetic-signals"]
 # Reference LIF primitives (research helpers)
@@ -82,6 +84,7 @@ path = "src/bin/limen_live.rs"
 required-features = ["live-robinhood"]
 
 [dev-dependencies]
+hyper = { version = "0.14", features = ["server", "http1", "tcp"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 serial_test = "3"
