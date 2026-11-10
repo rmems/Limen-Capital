@@ -28,7 +28,19 @@ pub(crate) fn read_header(c: &mut Cursor<&[u8]>) -> Result<u8, String> {
     if rest[0] != WIRE_VERSION_V2 {
         return Err(format!("unsupported wire version {}", rest[0]));
     }
+    require_reserved_zero(&rest[2..])?;
     Ok(rest[1])
+}
+
+pub(crate) fn read_reserved_u16(c: &mut Cursor<&[u8]>) -> Result<(), String> {
+    require_reserved_zero(&read_array::<2>(c)?)
+}
+
+fn require_reserved_zero(bytes: &[u8]) -> Result<(), String> {
+    if bytes.iter().any(|&b| b != 0) {
+        return Err("reserved wire bytes must be zero".into());
+    }
+    Ok(())
 }
 
 pub(crate) fn read_array<const N: usize>(c: &mut Cursor<&[u8]>) -> Result<[u8; N], String> {

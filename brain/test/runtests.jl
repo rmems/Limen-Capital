@@ -145,4 +145,6 @@ end
     @test TRADE_UNIVERSE.hash == symbol_table_hash(TRADE_UNIVERSE.symbols)
 end
 
+include(joinpath(@__DIR__, "wire_hardening.jl"))
+
 println("All Capital unit tests finished.")

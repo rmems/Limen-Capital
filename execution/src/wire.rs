@@ -4,7 +4,6 @@
 
 use crate::universe::TradeUniverse;
 use crate::{TradeSide, TradeSignal};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use crate::binary_wire::{
     classify_wire_frame, readout_to_trade, MappedTrade, MarketPulse, ReadoutPacket, WireSide,
@@ -15,12 +14,82 @@ pub use crate::binary_wire::{
 pub const IPC_MARKET_DEFAULT: &str = "tcp://127.0.0.1:5555";
 pub const IPC_READOUT_DEFAULT: &str = "tcp://127.0.0.1:5556";
 
-pub fn market_endpoint() -> String {
-    std::env::var("LIMEN_IPC_SUB").unwrap_or_else(|_| IPC_MARKET_DEFAULT.to_string())
+/// `LIMEN_IPC_SUB` (or the default), validated by [`validate_binary_endpoint`].
+pub fn market_endpoint() -> Result<String, String> {
+    validate_binary_endpoint(
+        &std::env::var("LIMEN_IPC_SUB").unwrap_or_else(|_| IPC_MARKET_DEFAULT.to_string()),
+        remote_allowed(),
+    )
 }
 
-pub fn readout_endpoint() -> String {
-    std::env::var("LIMEN_IPC_PUB").unwrap_or_else(|_| IPC_READOUT_DEFAULT.to_string())
+/// `LIMEN_IPC_PUB` (or the default), validated by [`validate_binary_endpoint`].
+pub fn readout_endpoint() -> Result<String, String> {
+    validate_binary_endpoint(
+        &std::env::var("LIMEN_IPC_PUB").unwrap_or_else(|_| IPC_READOUT_DEFAULT.to_string()),
+        remote_allowed(),
+    )
+}
+
+fn remote_allowed() -> bool {
+    std::env::var("LIMEN_ALLOW_REMOTE_WIRE").as_deref() == Ok("1")
+}
+
+/// Accept `ipc://` absolute paths and `tcp://` literal loopback addresses.
+///
+/// Hostnames are not resolved: DNS can change between validation and
+/// connect/bind, so `localhost` counts as remote.
+pub fn validate_binary_endpoint(ep: &str, allow_remote: bool) -> Result<String, String> {
+    if ep.starts_with("ipc://") {
+        return validate_json_ipc_endpoint(ep);
+    }
+    let addr = ep
+        .strip_prefix("tcp://")
+        .ok_or("binary endpoint must use tcp:// or ipc://")?;
+    let (host, port) = addr
+        .rsplit_once(':')
+        .ok_or("TCP endpoint requires a port")?;
+    if port.parse::<u16>().ok().filter(|p| *p > 0).is_none() {
+        return Err("TCP endpoint requires a port in 1..65535".into());
+    }
+    if !allow_remote && !is_loopback_literal(host) {
+        return Err("non-loopback wire endpoint requires LIMEN_ALLOW_REMOTE_WIRE=1 (use CURVE on untrusted networks)".into());
+    }
+    Ok(ep.to_string())
+}
+
+/// ZeroMQ needs IPv6 hosts in brackets (`[::1]`); a bare `::1` is refused.
+fn is_loopback_literal(host: &str) -> bool {
+    match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        Some(v6) => v6
+            .parse::<std::net::Ipv6Addr>()
+            .is_ok_and(|ip| ip.is_loopback()),
+        None => host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| ip.is_loopback()),
+    }
+}
+
+/// Per-stream timestamp watermark, seeded at process start so frames from
+/// before a restart are refused.
+#[derive(Debug, Clone, Copy)]
+pub struct TickGuard {
+    last: u64,
+}
+
+impl TickGuard {
+    pub fn new(start_ns: u64) -> Self {
+        Self { last: start_ns }
+    }
+
+    /// Accept only strictly increasing ticks that are neither in the future
+    /// nor older than `max_age_ns`. A refused tick leaves the watermark alone.
+    pub fn accept(&mut self, tick: u64, now_ns: u64, max_age_ns: u64) -> bool {
+        if tick <= self.last || tick > now_ns || now_ns - tick > max_age_ns {
+            return false;
+        }
+        self.last = tick;
+        true
+    }
 }
 
 pub const PULSE_MAX_AGE_MS_DEFAULT: u64 = 2_000;
@@ -61,6 +130,8 @@ pub fn pack_readout(packet: &ReadoutPacket) -> Result<Vec<u8>, String> {
     packet.pack_v2()
 }
 
+/// `timestamp_ns: None` uses `packet.tick`, the source MarketPulse timestamp,
+/// so signal latency includes wire and brain time.
 pub fn readout_to_trade_signal(
     packet: &ReadoutPacket,
     universe: &TradeUniverse,
@@ -74,12 +145,7 @@ pub fn readout_to_trade_signal(
         WireSide::Sell => TradeSide::Sell,
         WireSide::Neutral => TradeSide::Neutral,
     };
-    let ts = timestamp_ns.unwrap_or_else(|| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as i64
-    });
+    let ts = timestamp_ns.unwrap_or(packet.tick);
     TradeSignal {
         ticker: m.ticker,
         side,
@@ -448,6 +514,99 @@ mod tests {
         assert_eq!(m.side, WireSide::Neutral);
         assert_eq!(m.confidence, 0.0);
         assert_eq!(m.pair_index, 0);
+    }
+
+    #[test]
+    fn reserved_header_and_prefix_bytes_must_be_zero() {
+        let u = universe_7();
+        let pulse = pulse_at(1, &u);
+        let good = pack_market_pulse(&pulse).unwrap();
+        assert!(decode_market_pulse(&good, &u).is_ok());
+        // Header bytes 6..8 and the u16 after n_assets (offset 26..28).
+        for offset in [6, 7, 26, 27] {
+            let mut bad = good.clone();
+            bad[offset] = 1;
+            assert!(decode_market_pulse(&bad, &u).is_err(), "market {offset}");
+        }
+        let packet = ReadoutPacket {
+            tick: 1,
+            symbol_table_hash: u.hash,
+            readout: vec![0.0; u.n_out()],
+            relevance: [0.25; 4],
+        };
+        let good = pack_readout(&packet).unwrap();
+        assert!(decode_readout(&good, &u).is_ok());
+        for offset in [6, 7, 26, 27] {
+            let mut bad = good.clone();
+            bad[offset] = 1;
+            assert!(decode_readout(&bad, &u).is_err(), "readout {offset}");
+        }
+    }
+
+    #[test]
+    fn binary_endpoints_are_local_unless_explicitly_allowed() {
+        for ep in [
+            "tcp://127.0.0.1:5555",
+            "tcp://127.42.0.1:5556",
+            "tcp://[::1]:5555",
+            "ipc:///tmp/wire.sock",
+        ] {
+            assert_eq!(validate_binary_endpoint(ep, false).unwrap(), ep);
+        }
+        for ep in [
+            "tcp://0.0.0.0:5555",
+            "tcp://*:5555",
+            "tcp://[::]:5555",
+            "tcp://192.0.2.1:5555",
+            "tcp://localhost:5555",
+            "tcp://example.org:5555",
+            "tcp://::1:5555",
+            "tcp://[127.0.0.1]:5555",
+        ] {
+            assert!(validate_binary_endpoint(ep, false).is_err(), "{ep}");
+            assert_eq!(validate_binary_endpoint(ep, true).unwrap(), ep);
+        }
+        for ep in [
+            "",
+            "udp://127.0.0.1:5555",
+            "ipc://relative",
+            "ipc:///tmp/../wire",
+            "tcp://127.0.0.1:0",
+            "tcp://127.0.0.1:65536",
+            "tcp://127.0.0.1",
+        ] {
+            assert!(validate_binary_endpoint(ep, false).is_err(), "{ep}");
+            assert!(validate_binary_endpoint(ep, true).is_err(), "{ep}");
+        }
+    }
+
+    #[test]
+    fn tick_guard_rejects_replay_staleness_and_future_without_poisoning() {
+        let mut ticks = TickGuard::new(100);
+        for tick in [0, 99, 100, 201] {
+            assert!(!ticks.accept(tick, 200, 50));
+        }
+        assert!(!ticks.accept(149, 200, 50));
+        assert!(ticks.accept(150, 200, 50));
+        assert!(!ticks.accept(150, 200, 50));
+        assert!(ticks.accept(151, 200, 50));
+        assert!(!ticks.accept(150, 200, 50));
+        let mut restarted = TickGuard::new(200);
+        assert!(!restarted.accept(151, 201, 50));
+        assert!(restarted.accept(201, 201, 50));
+    }
+
+    #[test]
+    fn default_signal_timestamp_is_source_tick_not_receipt_time() {
+        let u = universe_7();
+        let packet = ReadoutPacket {
+            tick: 123,
+            symbol_table_hash: u.hash,
+            readout: vec![0.0; u.n_out()],
+            relevance: [0.25; 4],
+        };
+        let sig = readout_to_trade_signal(&packet, &u, 1.0, 1.0, None);
+        assert_eq!(sig.timestamp_ns, 123);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 Binary layouts for experimental SNN-HFT between Julia brain and Rust muscle. Symbol order comes from `config/universe.toml` (override with `LIMEN_UNIVERSE`).
 
 **Docs:** [docs/wire-protocol-v2.md](../docs/wire-protocol-v2.md) (v2), [docs/wire-protocol-v1.md](../docs/wire-protocol-v1.md) (legacy fixed layout)  
-**Rust types:** `execution/src/binary_wire.rs`, `execution/src/universe.rs`  
+**Rust types:** `execution/src/binary_wire/`, `execution/src/universe.rs`  
 **Fixtures:** `fixtures/universe_3.toml`, `fixtures/universe_12.toml`; v1 golden `marketpulse.bin` / `readout.bin` for 7-symbol regression
 
 ## Endpoints
@@ -12,6 +12,11 @@ Binary layouts for experimental SNN-HFT between Julia brain and Rust muscle. Sym
 |-----------|-----|---------|
 | Market → Brain | `LIMEN_IPC_SUB` | `tcp://127.0.0.1:5555` |
 | Brain → Muscle | `LIMEN_IPC_PUB` | `tcp://127.0.0.1:5556` |
+
+Endpoints must be loopback IPs or absolute `ipc://` paths unless
+`LIMEN_ALLOW_REMOTE_WIRE=1`. Readout `tick` carries the source MarketPulse
+timestamp; listeners refuse duplicate, stale, future, and pre-start frames.
+See [docs/wire-protocol-v2.md](../docs/wire-protocol-v2.md#timestamps-replay-and-staleness).
 
 ## v2 frames
 

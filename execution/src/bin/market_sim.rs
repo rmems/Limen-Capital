@@ -5,7 +5,7 @@
 //!   LIMEN_SIM_HZ=10 cargo run --bin market_sim
 
 use limen_execution::universe::TradeUniverse;
-use limen_execution::wire::MarketPulse;
+use limen_execution::wire::{market_endpoint, MarketPulse};
 use limen_execution::zmq_curve;
 use std::f32::consts::PI;
 use std::thread;
@@ -24,8 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         universe.hash
     );
 
-    let endpoint =
-        std::env::var("LIMEN_IPC_SUB").unwrap_or_else(|_| "tcp://127.0.0.1:5555".to_string());
+    let endpoint = market_endpoint()?;
     let hz: f64 = std::env::var("LIMEN_SIM_HZ")
         .ok()
         .and_then(|s| s.parse().ok())

@@ -1,0 +1,116 @@
+@testset "v2 header and prefix reserved bytes" begin
+    pulse = pack_market_pulse(sample_pulse(ts = UInt64(5)))
+    readout = pack_readout(Int64(5), zeros(Float32, N_OUT), fill(0.25f0, 4))
+    @test decode_market_pulse(pulse).timestamp_ns == UInt64(5)
+    @test decode_readout(readout)[1] == 5
+    # 1-based: header reserved bytes 7–8, prefix reserved u16 at 27–28.
+    for offset in (7, 8, 27, 28)
+        bad = copy(pulse); bad[offset] = 0x01
+        @test_throws ErrorException decode_market_pulse(bad)
+        bad = copy(readout); bad[offset] = 0x01
+        @test_throws ErrorException decode_readout(bad)
+    end
+    bad = copy(readout); bad[5] = 0x03
+    @test_throws ErrorException decode_readout(bad)
+    bad = copy(readout); bad[6] = 0x07
+    @test classify_wire_frame(bad) == :unknown
+    @test_throws ErrorException decode_readout(readout[1:end-1])
+end
+
+@testset "Binary endpoint policy" begin
+    for ep in ("tcp://127.0.0.1:5555", "tcp://127.42.0.1:5556", "tcp://[::1]:5555", "ipc:///tmp/wire.sock")
+        @test validate_binary_endpoint(ep; allow_remote=false) == ep
+    end
+    for ep in ("tcp://0.0.0.0:5555", "tcp://*:5555", "tcp://[::]:5555", "tcp://192.0.2.1:5555", "tcp://localhost:5555", "tcp://example.org:5555", "tcp://::1:5555", "tcp://[127.0.0.1]:5555")
+        @test_throws ErrorException validate_binary_endpoint(ep; allow_remote=false)
+        @test validate_binary_endpoint(ep; allow_remote=true) == ep
+    end
+    for ep in ("", "udp://127.0.0.1:5555", "ipc://relative", "ipc:///tmp/../wire", "tcp://127.0.0.1:0", "tcp://127.0.0.1:65536", "tcp://127.0.0.1")
+        @test_throws ErrorException validate_binary_endpoint(ep; allow_remote=false)
+        @test_throws ErrorException validate_binary_endpoint(ep; allow_remote=true)
+    end
+    withenv("LIMEN_ALLOW_REMOTE_WIRE" => nothing) do
+        @test_throws ErrorException validate_binary_endpoint("tcp://192.0.2.1:5555")
+    end
+    withenv("LIMEN_ALLOW_REMOTE_WIRE" => "1") do
+        @test validate_binary_endpoint("tcp://192.0.2.1:5555") == "tcp://192.0.2.1:5555"
+    end
+end
+
+@testset "Source timestamp guard" begin
+    now = wall_clock_ns()
+    @test now > UInt64(1_600_000_000) * UInt64(1_000_000_000)
+    guard = TimestampGuard(UInt64(100), UInt64(50))
+    for ts in (0, 99, 100, 201)
+        @test !accept_timestamp!(guard, UInt64(ts), UInt64(200))
+    end
+    @test !accept_timestamp!(guard, UInt64(149), UInt64(200)) # stale
+    @test accept_timestamp!(guard, UInt64(150), UInt64(200))
+    @test !accept_timestamp!(guard, UInt64(150), UInt64(200))
+    @test accept_timestamp!(guard, UInt64(151), UInt64(200))
+    @test guard.last_ns == UInt64(151)
+    @test pulse_max_age_ns(nothing) == UInt64(2_000_000_000)
+    @test pulse_max_age_ns("250") == UInt64(250_000_000)
+    @test_throws ErrorException pulse_max_age_ns("2s")
+end
+
+@testset "Readout finite guard" begin
+    for bad in (NaN32, Inf32, -Inf32)
+        for index in 1:N_OUT
+            output = zeros(Float32, N_OUT)
+            output[index] = bad
+            @test_throws ErrorException pack_readout(Int64(1), output, fill(0.25f0, 4))
+        end
+        for index in 1:4
+            relevance = fill(0.25f0, 4)
+            relevance[index] = bad
+            @test_throws ErrorException pack_readout(Int64(1), zeros(Float32, N_OUT), relevance)
+        end
+    end
+    @test_throws ErrorException pack_readout(Int64(1), zeros(Float32, N_OUT), ones(Float32, 4))
+    @test_throws ErrorException pack_readout(Int64(1), zeros(Float32, N_OUT), Float32[1.2, -0.2, 0, 0])
+    bad = pack_market_pulse(sample_pulse())
+    bad[end-3:end] .= reinterpret(UInt8, [NaN32])
+    @test_throws ErrorException decode_market_pulse(bad)
+end
+# Load the real NERO implementation without a GPU, not a copy of its equations.
+module NeroRecoveryTests
+using Test, LinearAlgebra, Printf
+const N_LOBES = 4
+const N_OUT = 16
+include(joinpath(@__DIR__, "..", "synapse_conductor.jl"))
+
+function healthy_ensemble()
+    return (lobes=[(output=fill(0.1f0, 16), last_spike_rate=0.1f0) for _ in 1:4],
+            agg_output=zeros(Float32, 16), weights=fill(0.25f0, 4))
+end
+
+@testset "NERO finite recovery" begin
+    withenv("LIMEN_AGG_MODE" => "relevance") do
+        for bad in (NaN32, Inf32, -Inf32, floatmax(Float32))
+            nero = NeroOrchestrator()
+            ensemble = healthy_ensemble()
+            fill!(ensemble.lobes[1].output, bad)
+            @test route_and_aggregate!(nero, ensemble) === nothing
+            @test nero_finite(nero)
+            @test nero.relevance == fill(0.25f0, 4)
+            fill!(ensemble.lobes[1].output, 0.1f0)
+            for _ in 1:3
+                @test all(isfinite, route_and_aggregate!(nero, ensemble))
+                @test sum(nero.relevance) ≈ 1.0f0 atol=1f-5
+            end
+        end
+        for field in (:relevance, :prev_relevance, :readout_ema, :spike_density, :temp_buffer, :surprise)
+            nero = NeroOrchestrator()
+            getfield(nero, field)[1] = NaN32
+            @test all(isfinite, route_and_aggregate!(nero, healthy_ensemble()))
+            @test nero_finite(nero)
+        end
+        nero = NeroOrchestrator()
+        ensemble = healthy_ensemble()
+        ensemble.lobes[1] = (output=zeros(Float32, 16), last_spike_rate=NaN32)
+        @test route_and_aggregate!(nero, ensemble) === nothing
+        @test nero_finite(nero)
+    end
+end
+end

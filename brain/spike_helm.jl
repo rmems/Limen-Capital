@@ -81,19 +81,19 @@ end
 
 function validate_market_pulse(data::Vector{UInt8})
     kind = classify_wire_frame(data)
-    if kind ∉ (:market_v2, :market_v1)
+    # Header-less v1 frames are typed only by length; refuse them on the network.
+    if kind != :market_v2
         @warn "Invalid MarketPulse frame (kind=$kind, len=$(length(data)))"
         return false
     end
-    
-    # v2 timestamp follows the 8-byte header; v1 starts at byte 1.
-    ts_off = kind == :market_v2 ? WIRE_HEADER_BYTES + 1 : 1
+
+    ts_off = WIRE_HEADER_BYTES + 1
     if length(data) < ts_off + 7
         @warn "MarketPulse frame too short for timestamp"
         return false
     end
     timestamp_ns = reinterpret(UInt64, data[ts_off:ts_off+7])[1]
-    current_ns = time_ns()
+    current_ns = wall_clock_ns()
     # Allow large skew (sim / research clocks); only flag absurd multi-day deltas
     hour_ns = UInt64(3_600) * UInt64(1_000_000_000)
     if timestamp_ns > 0 && abs(Int128(current_ns) - Int128(timestamp_ns)) > Int128(24) * Int128(hour_ns)
@@ -106,6 +106,9 @@ end
 # ─── ZMQ Setup ────────────────────────────────────────────────────────────────
 
 function setup_zmq()
+    # Validate before creating sockets so a refused endpoint leaks nothing.
+    market_ep = validate_binary_endpoint(IPC_ENDPOINT)
+    readout_ep = validate_binary_endpoint(IPC_PUB_ENDPOINT)
     ctx = ZMQ.Context()
     zap_state = nothing
 
@@ -126,8 +129,8 @@ function setup_zmq()
         println("[brain] CURVE client on SUB (market feed)")
     end
     ZMQ.subscribe(sub, "")
-    ZMQ.connect(sub, IPC_ENDPOINT)
-    println("[brain] ZMQ SUB connected to $IPC_ENDPOINT")
+    ZMQ.connect(sub, market_ep)
+    println("[brain] ZMQ SUB connected to $market_ep")
 
     # PUB socket: send readout signals back to Rust (CURVE server)
     pub = ZMQ.Socket(ctx, ZMQ.PUB)
@@ -137,8 +140,8 @@ function setup_zmq()
         ZmqCurve.apply_curve_server!(pub, sec; zap=allowlist !== nothing)
         println("[brain] CURVE server on PUB (readout)")
     end
-    ZMQ.bind(pub, IPC_PUB_ENDPOINT)
-    println("[brain] ZMQ PUB bound to $IPC_PUB_ENDPOINT")
+    ZMQ.bind(pub, readout_ep)
+    println("[brain] ZMQ PUB bound to $readout_ep")
 
     return ctx, sub, pub, zap_state
 end
@@ -149,14 +152,14 @@ end
     publish_readout!(buf::Vector{UInt8}, pub::ZMQ.Socket,
                     output::Vector{Float32}, relevance::Vector{Float32}, tick::Int64)
 
-Publish the 16-element readout vector + 4 NERO relevance scores via ZMQ.
+Publish the `N_OUT`-element readout vector + 4 NERO relevance scores as a
+NervousWire v2 Readout frame (`docs/wire-protocol-v2.md`).
 
-Format: 88 bytes (little-endian)
-  [0..8]   tick_count : Int64       — Julia-side tick counter
-  [8..72]  output     : 16 × Float32 — aggregated lobe readout
-  [72..88] relevance  : 4 × Float32  — NERO scores [Scalper, Day, Swing, Macro]
+`tick` is the source MarketPulse `timestamp_ns`, so the muscle can measure
+end-to-end latency and refuse duplicate, stale, or pre-restart readouts.
+`pack_readout` throws on non-finite values instead of publishing them.
 
-The buffer is pre-allocated in main() and reused every tick (zero allocation).
+The buffer is pre-allocated in main() and reused every tick.
 """
 function publish_readout!(buf::Vector{UInt8}, pub::ZMQ.Socket,
                           output::Vector{Float32}, relevance::Vector{Float32},
@@ -205,7 +208,7 @@ function main()
     println("[brain] FeatureStream: Hawkes self-excitation → encoder δ + Scalper reflex")
     vault = VaultRecorder(100) # Commit to DuckDB every 100 ticks
 
-    # ── Pre-allocate 88-byte readout buffer (zero allocation in hot loop) ────
+    # ── Pre-allocate the v2 readout buffer ───────────────────────────────────
     readout_buf = Vector{UInt8}(undef, readout_frame_v2_len(N_PAIRS))
 
     # ── Volatility estimates for Monte Carlo (initialized to default) ────────
@@ -228,6 +231,8 @@ function main()
 
     tick = 0
     mc_tick = 0
+    # Seeded at startup so pulses replayed from before a restart are refused.
+    pulse_clock = TimestampGuard(wall_clock_ns(), pulse_max_age_ns())
 
     try
         while true
@@ -245,6 +250,10 @@ function main()
                 decode_market_pulse(raw)
             catch e
                 @warn "Rejecting invalid MarketPulse frame" exception = e
+                continue
+            end
+            if !accept_timestamp!(pulse_clock, pulse.timestamp_ns, wall_clock_ns())
+                @warn "Rejecting duplicate, out-of-order, stale, future, or pre-start MarketPulse" timestamp_ns = pulse.timestamp_ns
                 continue
             end
             tick += 1
@@ -306,8 +315,18 @@ function main()
 
             # ── 7–8. NERO relevance (causal) → re-aggregate → publish ────────
             # route_and_aggregate!: relevance weights replace static LOBE_WEIGHTS
+            # `nothing` means NERO saw non-finite state and reset; skip this tick.
             output = route_and_aggregate!(nero, ensemble)
-            publish_readout!(readout_buf, pub, output, nero.relevance, reservoir_lobes(res)[1].tick_count)
+            if output === nothing
+                @warn "Skipping readout: non-finite NERO state was reset" tick
+            else
+                try
+                    publish_readout!(readout_buf, pub, output, nero.relevance, Int64(pulse.timestamp_ns))
+                catch e
+                    e isa ErrorException || rethrow()
+                    @warn "Skipping readout that fails wire validation" exception = e
+                end
+            end
 
             # ── 9. Diagnostics ───────────────────────────────────────────────
             if tick % 20 == 0

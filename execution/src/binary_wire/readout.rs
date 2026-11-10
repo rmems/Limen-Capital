@@ -1,6 +1,6 @@
 use super::cursor_io::{
-    read_f32s, read_header, read_i64, read_u16, read_u64, require_count, require_len, write_bytes,
-    write_f32s, write_header,
+    read_f32s, read_header, read_i64, read_reserved_u16, read_u16, read_u64, require_count,
+    require_len, write_bytes, write_f32s, write_header,
 };
 use super::{FRAME_READOUT, N_RELEVANCE, READOUT_PACKET_V1_BYTES, SIDE_EPS, WIRE_HEADER_BYTES};
 use crate::universe::TradeUniverse;
@@ -134,7 +134,7 @@ fn read_readout_prefix(c: &mut Cursor<&[u8]>) -> Result<(i64, u64, usize), Strin
     let tick = read_i64(c)?;
     let symbol_table_hash = read_u64(c)?;
     let n_pairs = usize::from(read_u16(c)?);
-    let _reserved = read_u16(c)?;
+    read_reserved_u16(c)?;
     require_count(n_pairs, 257, "n_pairs")?;
     Ok((tick, symbol_table_hash, n_pairs))
 }

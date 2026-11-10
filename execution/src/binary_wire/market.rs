@@ -1,6 +1,6 @@
 use super::cursor_io::{
-    read_f32s, read_header, read_price_vol, read_u16, read_u64, require_count, require_len,
-    split_price_vol, write_bytes, write_f32s, write_header, write_price_vol,
+    read_f32s, read_header, read_price_vol, read_reserved_u16, read_u16, read_u64, require_count,
+    require_len, split_price_vol, write_bytes, write_f32s, write_header, write_price_vol,
 };
 use super::{FRAME_MARKET_PULSE, MARKET_PULSE_V1_BYTES, TRAILING_SIGNALS, WIRE_HEADER_BYTES};
 use crate::universe::TradeUniverse;
@@ -157,7 +157,7 @@ fn read_market_prefix(c: &mut Cursor<&[u8]>) -> Result<(u64, u64, usize), String
     let timestamp_ns = read_u64(c)?;
     let symbol_table_hash = read_u64(c)?;
     let n_assets = usize::from(read_u16(c)?);
-    let _reserved = read_u16(c)?;
+    read_reserved_u16(c)?;
     require_count(n_assets, 256, "n_assets")?;
     Ok((timestamp_ns, symbol_table_hash, n_assets))
 }
