@@ -1,0 +1,5 @@
+# Runtime tradeable universe — single source of symbol order for brain + muscle.
+# Override path with LIMEN_UNIVERSE (absolute or repo-relative).
+# Symbols are placeholders. Swap this file to change what trades; do not hardcode venues or coins.
+
+symbols = ["S01", "S02", "S03", "S04", "S05", "S06", "S07"]

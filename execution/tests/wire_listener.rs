@@ -1,6 +1,7 @@
-//! Exercise the shipped binary, using independent wire bytes and private IPC.
+//! Exercise the shipped binary, using hand-built NervousWire v2 bytes and private IPC.
 #![cfg(unix)]
 
+use spikenaut_execution_engine::universe::TradeUniverse;
 use std::fs;
 use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
@@ -26,18 +27,39 @@ fn wait_for(log: &std::path::Path, needle: &str) -> String {
     }
 }
 
-fn readout(tick: i64) -> Vec<u8> {
-    let mut frame = b"NW1R\x01\x00\x00\x00".to_vec();
-    frame.extend_from_slice(&tick.to_le_bytes());
-    frame.extend_from_slice(&[0; 64]);
+/// `LNRV`, version 2, frame type, two reserved bytes, then the 20-byte prefix.
+fn v2_prefix(frame_type: u8, ts: [u8; 8], hash: u64, count: u16) -> Vec<u8> {
+    let mut frame = b"LNRV".to_vec();
+    frame.extend_from_slice(&[2, frame_type, 0, 0]);
+    frame.extend_from_slice(&ts);
+    frame.extend_from_slice(&hash.to_le_bytes());
+    frame.extend_from_slice(&count.to_le_bytes());
+    frame.extend_from_slice(&[0, 0]);
+    frame
+}
+
+fn readout(u: &TradeUniverse, tick: i64) -> Vec<u8> {
+    let mut frame = v2_prefix(2, tick.to_le_bytes(), u.hash, u.n_pairs() as u16);
+    frame.extend(std::iter::repeat_n(0u8, u.n_out() * 4));
     for _ in 0..4 {
         frame.extend_from_slice(&0.25_f32.to_le_bytes());
     }
     frame
 }
 
+fn market(u: &TradeUniverse, ts: u64) -> Vec<u8> {
+    let mut frame = v2_prefix(1, ts.to_le_bytes(), u.hash, u.n_assets() as u16);
+    for _ in 0..u.n_assets() {
+        frame.extend_from_slice(&1.0_f32.to_le_bytes()); // price
+        frame.extend_from_slice(&0.0_f32.to_le_bytes()); // vol
+    }
+    frame.extend(std::iter::repeat_n(0u8, 11 * 4));
+    frame
+}
+
 #[test]
-fn real_listener_rejects_legacy_replay_stale_and_restarts_then_stops_on_sigint() {
+fn real_listener_rejects_replay_stale_restart_and_bad_headers_then_stops_on_sigint() {
+    let u = TradeUniverse::load(&TradeUniverse::default_config_path()).unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let context = zmq::Context::new();
     let publisher = context.socket(zmq::PUB).unwrap();
@@ -50,6 +72,7 @@ fn real_listener_rejects_legacy_replay_stale_and_restarts_then_stops_on_sigint()
             .env("LIMEN_IPC_SUB", &ep)
             .env("LIMEN_IPC_PUB", &ep)
             .env("LIMEN_WIRE", "binary")
+            .env_remove("LIMEN_UNIVERSE")
             .env("ZMQ_CURVE", "0")
             .env("LIMEN_CONFIDENCE_THRESHOLD", "0.15")
             .env("LIMEN_PULSE_MAX_AGE_MS", "2000")
@@ -64,36 +87,36 @@ fn real_listener_rejects_legacy_replay_stale_and_restarts_then_stops_on_sigint()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos() as u64;
-    let mut market = b"NW1P\x01\x00\x00\x00".to_vec();
-    let mut raw = fs::read(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../wire/fixtures/marketpulse.bin"
-    ))
-    .unwrap();
-    raw[..8].copy_from_slice(&now.to_le_bytes());
-    market.extend_from_slice(&raw);
-    publisher.send(market, 0).unwrap();
-    let valid = readout(now as i64);
+    publisher.send(market(&u, now), 0).unwrap();
+    let valid = readout(&u, now as i64);
     publisher.send(&valid, 0).unwrap();
     wait_for(&log, "Signal rejected: confidence");
     publisher.send(&valid, 0).unwrap(); // duplicate
-    publisher.send(readout(now as i64 - 1), 0).unwrap(); // out of order
-    publisher.send(readout(42), 0).unwrap(); // pre-restart counter
+    publisher.send(readout(&u, now as i64 - 1), 0).unwrap(); // out of order
+    publisher.send(readout(&u, 42), 0).unwrap(); // pre-restart counter
     publisher
-        .send(readout(now as i64 - 3_000_000_000), 0)
+        .send(readout(&u, now as i64 - 3_000_000_000), 0)
         .unwrap(); // stale
     publisher
-        .send(readout(now as i64 + 60_000_000_000), 0)
+        .send(readout(&u, now as i64 + 60_000_000_000), 0)
         .unwrap(); // future
-    publisher.send(&valid[8..], 0).unwrap(); // legacy bare frame
-    let mut wrong_version = valid;
-    wrong_version[4] = 2;
+    let mut wrong_version = readout(&u, now as i64 + 1);
+    wrong_version[4] = 3;
     publisher.send(wrong_version, 0).unwrap();
-    // Wait until all seven refusals arrive, without relying on a fixed delay.
+    let mut reserved = readout(&u, now as i64 + 1);
+    reserved[7] = 1;
+    publisher.send(reserved, 0).unwrap();
+    let v1 = fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../wire/fixtures/readout.bin"
+    ))
+    .unwrap();
+    publisher.send(v1, 0).unwrap(); // header-less legacy frame
+                                    // Wait until all eight refusals arrive, without relying on a fixed delay.
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let text = fs::read_to_string(&log).unwrap();
-        if text.matches("Binary frame refused:").count() == 7 {
+        if text.matches("Binary frame refused:").count() == 8 {
             assert_eq!(text.matches("Signal rejected: confidence").count(), 1);
             break;
         }

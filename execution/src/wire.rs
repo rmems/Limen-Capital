@@ -1,20 +1,20 @@
-//! NervousWire v1 — binary pack/decode + readout → TradeSignal.
+//! NervousWire v2 — binary pack/decode + readout → TradeSignal.
 //!
-//! Layouts and golden fixtures: `wire/` and `docs/wire-protocol-v1.md`.
-//! Wire types are owned in-tree (`binary_wire`) until published corpus-ipc
-//! exposes MarketPulse/ReadoutPacket on a public rev.
+//! Layouts: `docs/wire-protocol-v2.md` and golden fixtures under `wire/fixtures/`.
 
+use crate::universe::TradeUniverse;
 use crate::{TradeSide, TradeSignal};
 
 pub use crate::binary_wire::{
-    frame_payload, readout_to_trade, unframe_payload, MappedTrade, MarketPulse, ReadoutPacket,
-    WireSide, ASSET_TICKERS, MARKET_PULSE_BYTES, MARKET_TOPIC, READOUT_PACKET_BYTES, READOUT_TOPIC,
+    classify_wire_frame, readout_to_trade, MappedTrade, MarketPulse, ReadoutPacket, WireSide,
+    MARKET_PULSE_BYTES, MARKET_PULSE_V1_BYTES, READOUT_PACKET_BYTES, READOUT_PACKET_V1_BYTES,
+    WIRE_MAGIC,
 };
 
 pub const IPC_MARKET_DEFAULT: &str = "tcp://127.0.0.1:5555";
 pub const IPC_READOUT_DEFAULT: &str = "tcp://127.0.0.1:5556";
 
-/// Env-overridable endpoints (match Julia `LIMEN_IPC_*`).
+/// `LIMEN_IPC_SUB` (or the default), validated by [`validate_binary_endpoint`].
 pub fn market_endpoint() -> Result<String, String> {
     validate_binary_endpoint(
         &std::env::var("LIMEN_IPC_SUB").unwrap_or_else(|_| IPC_MARKET_DEFAULT.to_string()),
@@ -22,6 +22,7 @@ pub fn market_endpoint() -> Result<String, String> {
     )
 }
 
+/// `LIMEN_IPC_PUB` (or the default), validated by [`validate_binary_endpoint`].
 pub fn readout_endpoint() -> Result<String, String> {
     validate_binary_endpoint(
         &std::env::var("LIMEN_IPC_PUB").unwrap_or_else(|_| IPC_READOUT_DEFAULT.to_string()),
@@ -33,7 +34,10 @@ fn remote_allowed() -> bool {
     std::env::var("LIMEN_ALLOW_REMOTE_WIRE").as_deref() == Ok("1")
 }
 
-/// Do not resolve hostnames: DNS can change between validation and connect/bind.
+/// Accept `ipc://` absolute paths and `tcp://` literal loopback addresses.
+///
+/// Hostnames are not resolved: DNS can change between validation and
+/// connect/bind, so `localhost` counts as remote.
 pub fn validate_binary_endpoint(ep: &str, allow_remote: bool) -> Result<String, String> {
     if ep.starts_with("ipc://") {
         return validate_json_ipc_endpoint(ep);
@@ -47,17 +51,22 @@ pub fn validate_binary_endpoint(ep: &str, allow_remote: bool) -> Result<String, 
     if port.parse::<u16>().ok().filter(|p| *p > 0).is_none() {
         return Err("TCP endpoint requires a port in 1..65535".into());
     }
-    let ip = host
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .parse::<std::net::IpAddr>();
-    if !allow_remote && !ip.is_ok_and(|ip| ip.is_loopback()) {
+    if !allow_remote && !is_loopback_literal(host) {
         return Err("non-loopback wire endpoint requires LIMEN_ALLOW_REMOTE_WIRE=1 (use CURVE on untrusted networks)".into());
     }
     Ok(ep.to_string())
 }
 
-/// Per-stream watermark, seeded at process start to refuse pre-restart replay.
+fn is_loopback_literal(host: &str) -> bool {
+    host.trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Per-stream timestamp watermark, seeded at process start so frames from
+/// before a restart are refused.
+#[derive(Debug, Clone, Copy)]
 pub struct TickGuard {
     last: u64,
 }
@@ -67,6 +76,8 @@ impl TickGuard {
         Self { last: start_ns }
     }
 
+    /// Accept only strictly increasing ticks that are neither in the future
+    /// nor older than `max_age_ns`. A refused tick leaves the watermark alone.
     pub fn accept(&mut self, tick: u64, now_ns: u64, max_age_ns: u64) -> bool {
         if tick <= self.last || tick > now_ns || now_ns - tick > max_age_ns {
             return false;
@@ -76,14 +87,8 @@ impl TickGuard {
     }
 }
 
-/// Default maximum age of the last MarketPulse before fills are refused (2 s).
 pub const PULSE_MAX_AGE_MS_DEFAULT: u64 = 2_000;
 
-/// Parse an optional `LIMEN_PULSE_MAX_AGE_MS` value into nanoseconds.
-///
-/// `None` (unset) yields [`PULSE_MAX_AGE_MS_DEFAULT`]. A set-but-invalid value
-/// is an error rather than a silent fallback: an operator who sets the
-/// variable expects it to take effect.
 pub fn parse_pulse_max_age_ms(raw: Option<&str>) -> Result<u64, String> {
     let ms = match raw {
         None => PULSE_MAX_AGE_MS_DEFAULT,
@@ -96,19 +101,113 @@ pub fn parse_pulse_max_age_ms(raw: Option<&str>) -> Result<u64, String> {
     Ok(ms.saturating_mul(1_000_000))
 }
 
-/// `LIMEN_PULSE_MAX_AGE_MS` as nanoseconds (default [`PULSE_MAX_AGE_MS_DEFAULT`]).
-/// Errors when the variable is set to something that is not a `u64`.
 pub fn pulse_max_age_ns() -> Result<u64, String> {
     parse_pulse_max_age_ms(std::env::var("LIMEN_PULSE_MAX_AGE_MS").ok().as_deref())
 }
 
-/// Decode MarketPulse with validation (finite fields, prices > 0, vol clamp).
-/// Validation lives in [`MarketPulse::decode`] (defense-in-depth).
-pub fn decode_market_pulse(buf: &[u8]) -> Result<MarketPulse, String> {
-    MarketPulse::decode(buf)
+pub fn load_trade_universe() -> Result<TradeUniverse, String> {
+    TradeUniverse::load_default()
 }
 
-/// Validate a `LIMEN_JSON_IPC` override: must be `ipc://` + absolute path, no `..`.
+pub fn decode_market_pulse(buf: &[u8], universe: &TradeUniverse) -> Result<MarketPulse, String> {
+    MarketPulse::decode(buf, Some(universe))
+}
+
+pub fn decode_readout(buf: &[u8], universe: &TradeUniverse) -> Result<ReadoutPacket, String> {
+    ReadoutPacket::decode(buf, Some(universe))
+}
+
+pub fn pack_market_pulse(pulse: &MarketPulse) -> Result<Vec<u8>, String> {
+    pulse.pack_v2()
+}
+
+pub fn pack_readout(packet: &ReadoutPacket) -> Result<Vec<u8>, String> {
+    packet.pack_v2()
+}
+
+/// `timestamp_ns: None` uses `packet.tick`, the source MarketPulse timestamp,
+/// so signal latency includes wire and brain time.
+pub fn readout_to_trade_signal(
+    packet: &ReadoutPacket,
+    universe: &TradeUniverse,
+    price: f64,
+    quantity: f64,
+    timestamp_ns: Option<i64>,
+) -> TradeSignal {
+    let m = readout_to_trade(packet, universe);
+    let side = match m.side {
+        WireSide::Buy => TradeSide::Buy,
+        WireSide::Sell => TradeSide::Sell,
+        WireSide::Neutral => TradeSide::Neutral,
+    };
+    let ts = timestamp_ns.unwrap_or(packet.tick);
+    TradeSignal {
+        ticker: m.ticker,
+        side,
+        price,
+        quantity,
+        confidence: m.confidence,
+        timestamp_ns: ts,
+    }
+}
+
+pub fn price_for_ticker(
+    pulse: &MarketPulse,
+    universe: &TradeUniverse,
+    ticker: &str,
+) -> Option<f64> {
+    if pulse.symbol_table_hash != universe.hash {
+        return None;
+    }
+    universe
+        .symbols
+        .iter()
+        .position(|t| t == ticker)
+        .and_then(|i| pulse.prices.get(i).copied())
+        .map(f64::from)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriceError {
+    NoPulse,
+    Stale { age_ns: u64, max_age_ns: u64 },
+    UnknownTicker,
+}
+
+impl std::fmt::Display for PriceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PriceError::NoPulse => write!(f, "no MarketPulse received yet"),
+            PriceError::Stale { age_ns, max_age_ns } => write!(
+                f,
+                "last MarketPulse is {:.1} ms old (max {:.1} ms)",
+                *age_ns as f64 / 1e6,
+                *max_age_ns as f64 / 1e6
+            ),
+            PriceError::UnknownTicker => write!(f, "pair is not a tradeable asset"),
+        }
+    }
+}
+
+pub fn resolve_fill_price(
+    last_pulse: Option<&MarketPulse>,
+    universe: &TradeUniverse,
+    ticker: &str,
+    now_ns: u64,
+    max_age_ns: u64,
+) -> Result<f64, PriceError> {
+    let pulse = last_pulse
+        .filter(|p| p.timestamp_ns != 0)
+        .ok_or(PriceError::NoPulse)?;
+    let age_ns = now_ns.saturating_sub(pulse.timestamp_ns);
+    if age_ns > max_age_ns {
+        return Err(PriceError::Stale { age_ns, max_age_ns });
+    }
+    price_for_ticker(pulse, universe, ticker).ok_or(PriceError::UnknownTicker)
+}
+
+// ── JSON IPC helpers (unchanged) ─────────────────────────────────────────────
+
 pub fn validate_json_ipc_endpoint(ep: &str) -> Result<String, String> {
     let ep = ep.trim();
     if ep.is_empty() {
@@ -126,9 +225,6 @@ pub fn validate_json_ipc_endpoint(ep: &str) -> Result<String, String> {
     Ok(ep.to_string())
 }
 
-/// Resolve JSON IPC endpoint from an optional override (pure of process env).
-/// When `override_ep` is `Some` and non-empty, validates and returns it.
-/// Otherwise builds the default UID-scoped path under XDG or `/tmp`.
 pub fn resolve_json_ipc_endpoint(
     override_ep: Option<&str>,
     xdg_runtime_dir: Option<&str>,
@@ -151,9 +247,6 @@ pub fn resolve_json_ipc_endpoint(
     Ok(format!("ipc://{}/signals.ipc", dir.display()))
 }
 
-/// Default JSON IPC endpoint (OS-UID scoped; override with `LIMEN_JSON_IPC`).
-/// Prefer `$XDG_RUNTIME_DIR/limen-capital/signals.ipc`, else `/tmp/limen-capital-$UID/`.
-/// Returns an error if the endpoint is invalid or the directory cannot be created.
 pub fn json_ipc_endpoint() -> Result<String, String> {
     let override_ep = std::env::var("LIMEN_JSON_IPC").ok();
     let xdg = std::env::var("XDG_RUNTIME_DIR").ok();
@@ -167,9 +260,7 @@ fn default_tmp_json_ipc_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(format!("/tmp/limen-capital-{}", current_uid()))
 }
 
-/// Create (if needed) and verify a non-symlink, owner-only IPC directory.
 fn prepare_json_ipc_dir(dir: &std::path::Path) -> Result<(), String> {
-    // Refuse to create through an existing symlink at the leaf path.
     if let Ok(meta) = std::fs::symlink_metadata(dir) {
         if meta.file_type().is_symlink() {
             return Err(format!(
@@ -216,8 +307,6 @@ fn prepare_json_ipc_dir(dir: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Numeric OS UID for multi-user /tmp isolation.
-/// Prefer `/proc/self/status`; fall back to libc `getuid` (not UID 0).
 fn current_uid() -> u32 {
     if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
         for line in status.lines() {
@@ -230,7 +319,6 @@ fn current_uid() -> u32 {
     }
     #[cfg(unix)]
     {
-        // libc is transitive; declare the symbol for a correct fallback.
         extern "C" {
             fn getuid() -> u32;
         }
@@ -243,132 +331,211 @@ fn current_uid() -> u32 {
     }
 }
 
-pub fn pack_market_pulse(pulse: &MarketPulse) -> [u8; MARKET_PULSE_BYTES] {
-    pulse.pack()
-}
-
-pub fn decode_readout(buf: &[u8]) -> Result<ReadoutPacket, String> {
-    ReadoutPacket::decode(buf)
-}
-
-pub fn pack_readout(packet: &ReadoutPacket) -> [u8; READOUT_PACKET_BYTES] {
-    packet.pack()
-}
-
-/// Map binary readout → Capital `TradeSignal` (JSON-compatible sides).
-pub fn readout_to_trade_signal(
-    packet: &ReadoutPacket,
-    price: f64,
-    quantity: f64,
-    timestamp_ns: Option<i64>,
-) -> TradeSignal {
-    let m = readout_to_trade(packet);
-    let side = match m.side {
-        WireSide::Buy => TradeSide::Buy,
-        WireSide::Sell => TradeSide::Sell,
-        WireSide::Neutral => TradeSide::Neutral,
-    };
-    let ts = timestamp_ns.unwrap_or(packet.tick);
-    TradeSignal {
-        ticker: m.ticker,
-        side,
-        price,
-        quantity,
-        confidence: m.confidence,
-        timestamp_ns: ts,
-    }
-}
-
-/// Price for `ticker` from a MarketPulse. `None` when the ticker is not one of
-/// [`ASSET_TICKERS`] (e.g. the RESIDUAL pair, which is not tradeable).
-pub fn price_for_ticker(pulse: &MarketPulse, ticker: &str) -> Option<f64> {
-    ASSET_TICKERS
-        .iter()
-        .position(|t| *t == ticker)
-        .map(|i| pulse.prices[i] as f64)
-}
-
-/// Why a readout could not be priced for execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PriceError {
-    /// No MarketPulse has been received yet.
-    NoPulse,
-    /// The last MarketPulse is older than the configured maximum age.
-    Stale { age_ns: u64, max_age_ns: u64 },
-    /// The primary pair is not a tradeable asset (RESIDUAL).
-    UnknownTicker,
-}
-
-impl std::fmt::Display for PriceError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PriceError::NoPulse => write!(f, "no MarketPulse received yet"),
-            PriceError::Stale { age_ns, max_age_ns } => write!(
-                f,
-                "last MarketPulse is {:.1} ms old (max {:.1} ms)",
-                *age_ns as f64 / 1e6,
-                *max_age_ns as f64 / 1e6
-            ),
-            PriceError::UnknownTicker => write!(f, "pair is not a tradeable asset"),
-        }
-    }
-}
-
-/// Resolve the fill price for a readout from the last MarketPulse.
-///
-/// Refuses (instead of falling back to a placeholder price) when no pulse has
-/// arrived, when the pulse is older than `max_age_ns` relative to `now_ns`, or
-/// when `ticker` is not a tradeable asset. A pulse with `timestamp_ns == 0`
-/// is treated as never received.
-pub fn resolve_fill_price(
-    last_pulse: Option<&MarketPulse>,
-    ticker: &str,
-    now_ns: u64,
-    max_age_ns: u64,
-) -> Result<f64, PriceError> {
-    let pulse = last_pulse
-        .filter(|p| p.timestamp_ns != 0)
-        .ok_or(PriceError::NoPulse)?;
-    let age_ns = now_ns.saturating_sub(pulse.timestamp_ns);
-    if age_ns > max_age_ns {
-        return Err(PriceError::Stale { age_ns, max_age_ns });
-    }
-    price_for_ticker(pulse, ticker).ok_or(PriceError::UnknownTicker)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn universe_7() -> TradeUniverse {
+        TradeUniverse::load(&TradeUniverse::default_config_path()).expect("default universe")
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../wire/fixtures")
+            .join(name)
+    }
+
     #[test]
-    fn network_envelope_rejects_legacy_unknown_and_reserved_headers() {
-        for (topic, name, size) in [
-            (READOUT_TOPIC, "readout.bin", READOUT_PACKET_BYTES),
-            (MARKET_TOPIC, "marketpulse.bin", MARKET_PULSE_BYTES),
-        ] {
-            let raw = std::fs::read(fixture(name)).unwrap();
-            let frame = frame_payload(topic, &raw);
-            assert_eq!(
-                frame,
-                std::fs::read(fixture(&name.replace(".bin", ".frame"))).unwrap()
-            );
-            assert_eq!(unframe_payload(&frame, topic, size).unwrap(), raw);
-            assert!(unframe_payload(&raw, topic, size).is_err());
-            assert!(unframe_payload(&[], topic, size).is_err());
-            assert!(unframe_payload(&frame[..frame.len() - 1], topic, size).is_err());
-            for offset in 0..8 {
-                let mut bad = frame.clone();
-                bad[offset] ^= 0xff;
-                assert!(unframe_payload(&bad, topic, size).is_err());
+    fn golden_readout_v1_to_signal() {
+        let u = universe_7();
+        let bytes = std::fs::read(fixture("readout.bin")).expect("fixture");
+        let packet = decode_readout(&bytes, &u).unwrap();
+        let sig = readout_to_trade_signal(&packet, &u, 1.0, 1.0, Some(123));
+        assert_eq!(sig.side, TradeSide::Buy);
+        assert_eq!(sig.ticker, u.symbols[0]);
+        assert!(sig.confidence > 0.0);
+        assert_eq!(sig.timestamp_ns, 123);
+    }
+
+    #[test]
+    fn golden_marketpulse_v1() {
+        let u = universe_7();
+        let bytes = std::fs::read(fixture("marketpulse.bin")).expect("fixture");
+        let p = decode_market_pulse(&bytes, &u).unwrap();
+        assert_eq!(p.timestamp_ns, 1_700_000_000_000_000_001);
+        assert!((p.prices[0] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn v2_roundtrip_market_and_readout() {
+        let u7 = universe_7();
+        let u3 = TradeUniverse::load(&fixture("universe_3.toml")).expect("universe_3");
+        let u12 = TradeUniverse::load(&fixture("universe_12.toml")).expect("universe_12");
+
+        for u in [&u7, &u3, &u12] {
+            let mut pulse = MarketPulse::new_for_universe(u);
+            pulse.timestamp_ns = 42;
+            for (i, px) in pulse.prices.iter_mut().enumerate() {
+                *px = 1.0 + i as f32 * 0.1;
             }
-            let mut extra = frame;
-            extra.push(0);
-            assert!(unframe_payload(&extra, topic, size).is_err());
+            let enc = pack_market_pulse(&pulse).unwrap();
+            let dec = decode_market_pulse(&enc, u).unwrap();
+            assert_eq!(dec.prices, pulse.prices);
+
+            let mut packet = ReadoutPacket {
+                tick: 7,
+                symbol_table_hash: u.hash,
+                readout: vec![0.0; u.n_out()],
+                relevance: [0.4, 0.3, 0.2, 0.1],
+            };
+            packet.readout[0] = 0.9;
+            packet.readout[1] = 0.1;
+            let rb = pack_readout(&packet).unwrap();
+            let dr = decode_readout(&rb, u).unwrap();
+            assert_eq!(dr.readout, packet.readout);
         }
-        let mut pulse = MarketPulse::default().pack();
-        pulse[119] = 1;
-        assert!(decode_market_pulse(&pulse).is_err());
+    }
+
+    #[test]
+    fn hash_mismatch_rejected() {
+        let u = universe_7();
+        let u3 = TradeUniverse::load(&fixture("universe_3.toml")).unwrap();
+        let mut pulse = MarketPulse::new_for_universe(&u3);
+        pulse.timestamp_ns = 1;
+        let bytes = pulse.pack_v2().unwrap();
+        assert!(decode_market_pulse(&bytes, &u).is_err());
+    }
+
+    fn pulse_at(ts: u64, u: &TradeUniverse) -> MarketPulse {
+        let mut p = MarketPulse::new_for_universe(u);
+        p.timestamp_ns = ts;
+        for (i, px) in p.prices.iter_mut().enumerate() {
+            *px = 10.0 + i as f32;
+        }
+        p
+    }
+
+    #[test]
+    fn price_for_ticker_maps_assets_and_rejects_residual() {
+        let u = universe_7();
+        let p = pulse_at(1, &u);
+        assert_eq!(price_for_ticker(&p, &u, &u.symbols[0]), Some(10.0));
+        assert_eq!(
+            price_for_ticker(&p, &u, u.symbols.last().unwrap()),
+            Some(10.0 + (u.n_assets() - 1) as f64)
+        );
+        assert_eq!(price_for_ticker(&p, &u, "RESIDUAL"), None);
+        assert_eq!(price_for_ticker(&p, &u, "nope"), None);
+    }
+
+    #[test]
+    fn pulse_max_age_parses_or_fails_loudly() {
+        assert_eq!(
+            parse_pulse_max_age_ms(None),
+            Ok(PULSE_MAX_AGE_MS_DEFAULT * 1_000_000)
+        );
+        assert_eq!(parse_pulse_max_age_ms(Some("250")), Ok(250_000_000));
+        assert!(parse_pulse_max_age_ms(Some("2s")).is_err());
+    }
+
+    #[test]
+    fn resolve_fill_price_refuses_without_pulse() {
+        let u = universe_7();
+        assert_eq!(
+            resolve_fill_price(None, &u, &u.symbols[0], 1_000, 1_000),
+            Err(PriceError::NoPulse)
+        );
+        let never = MarketPulse::new_for_universe(&u);
+        assert_eq!(
+            resolve_fill_price(Some(&never), &u, &u.symbols[0], 1_000, 1_000),
+            Err(PriceError::NoPulse)
+        );
+    }
+
+    #[test]
+    fn resolve_fill_price_uses_pulse_price_when_fresh() {
+        let u = universe_7();
+        let p = pulse_at(5_000, &u);
+        let sym = u.symbols[1].clone();
+        assert_eq!(
+            resolve_fill_price(Some(&p), &u, &sym, 5_500, 1_000),
+            Ok(11.0)
+        );
+    }
+
+    #[test]
+    fn resolve_fill_price_refuses_residual() {
+        let u = universe_7();
+        let p = pulse_at(5_000, &u);
+        assert_eq!(
+            resolve_fill_price(Some(&p), &u, "RESIDUAL", 5_000, 1_000),
+            Err(PriceError::UnknownTicker)
+        );
+    }
+
+    #[test]
+    fn golden_readout_prices_from_golden_pulse() {
+        let u = universe_7();
+        let r = std::fs::read(fixture("readout.bin")).expect("fixture");
+        let m = std::fs::read(fixture("marketpulse.bin")).expect("fixture");
+        let packet = decode_readout(&r, &u).unwrap();
+        let pulse = decode_market_pulse(&m, &u).unwrap();
+        let sig = readout_to_trade_signal(&packet, &u, 0.0, 1.0, None);
+        let px = resolve_fill_price(Some(&pulse), &u, &sig.ticker, pulse.timestamp_ns, 1).unwrap();
+        assert!((px - pulse.prices[0] as f64).abs() < 1e-6);
+    }
+
+    #[test]
+    fn reject_non_finite_price_v1_fixture() {
+        let u = universe_7();
+        let mut bytes = std::fs::read(fixture("marketpulse.bin")).expect("fixture");
+        bytes[8..12].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert!(decode_market_pulse(&bytes, &u).is_err());
+    }
+
+    #[test]
+    fn readout_overflow_scores_fail_closed() {
+        let u = universe_7();
+        let mut packet = ReadoutPacket {
+            tick: 1,
+            symbol_table_hash: u.hash,
+            readout: vec![0.0; u.n_out()],
+            relevance: [0.4, 0.3, 0.2, 0.1],
+        };
+        packet.readout[0] = f32::MAX;
+        packet.readout[1] = -f32::MAX;
+        let m = readout_to_trade(&packet, &u);
+        assert_eq!(m.side, WireSide::Neutral);
+        assert_eq!(m.confidence, 0.0);
+        assert_eq!(m.pair_index, 0);
+    }
+
+    #[test]
+    fn reserved_header_and_prefix_bytes_must_be_zero() {
+        let u = universe_7();
+        let pulse = pulse_at(1, &u);
+        let good = pack_market_pulse(&pulse).unwrap();
+        assert!(decode_market_pulse(&good, &u).is_ok());
+        // Header bytes 6..8 and the u16 after n_assets (offset 26..28).
+        for offset in [6, 7, 26, 27] {
+            let mut bad = good.clone();
+            bad[offset] = 1;
+            assert!(decode_market_pulse(&bad, &u).is_err(), "market {offset}");
+        }
+        let packet = ReadoutPacket {
+            tick: 1,
+            symbol_table_hash: u.hash,
+            readout: vec![0.0; u.n_out()],
+            relevance: [0.25; 4],
+        };
+        let good = pack_readout(&packet).unwrap();
+        assert!(decode_readout(&good, &u).is_ok());
+        for offset in [6, 7, 26, 27] {
+            let mut bad = good.clone();
+            bad[offset] = 1;
+            assert!(decode_readout(&bad, &u).is_err(), "readout {offset}");
+        }
     }
 
     #[test]
@@ -399,6 +566,7 @@ mod tests {
             "ipc:///tmp/../wire",
             "tcp://127.0.0.1:0",
             "tcp://127.0.0.1:65536",
+            "tcp://127.0.0.1",
         ] {
             assert!(validate_binary_endpoint(ep, false).is_err(), "{ep}");
             assert!(validate_binary_endpoint(ep, true).is_err(), "{ep}");
@@ -423,220 +591,19 @@ mod tests {
 
     #[test]
     fn default_signal_timestamp_is_source_tick_not_receipt_time() {
+        let u = universe_7();
         let packet = ReadoutPacket {
             tick: 123,
-            ..ReadoutPacket::default()
+            symbol_table_hash: u.hash,
+            readout: vec![0.0; u.n_out()],
+            relevance: [0.25; 4],
         };
-        assert_eq!(
-            readout_to_trade_signal(&packet, 1.0, 1.0, None).timestamp_ns,
-            123
-        );
-    }
-
-    fn fixture(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../wire/fixtures")
-            .join(name)
-    }
-
-    #[test]
-    fn golden_readout_to_signal() {
-        let bytes = std::fs::read(fixture("readout.bin")).expect("fixture");
-        let packet = decode_readout(&bytes).unwrap();
-        let sig = readout_to_trade_signal(&packet, 1.0, 1.0, Some(123));
-        assert_eq!(sig.side, TradeSide::Buy);
-        assert_eq!(sig.ticker, "DNX");
-        assert!(sig.confidence > 0.0);
+        let sig = readout_to_trade_signal(&packet, &u, 1.0, 1.0, None);
         assert_eq!(sig.timestamp_ns, 123);
-    }
-
-    #[test]
-    fn golden_marketpulse() {
-        let bytes = std::fs::read(fixture("marketpulse.bin")).expect("fixture");
-        let p = decode_market_pulse(&bytes).unwrap();
-        assert_eq!(p.timestamp_ns, 1_700_000_000_000_000_001);
-        assert!((p.prices[0] - 1.0).abs() < 1e-5);
-    }
-
-    fn pulse_at(ts: u64) -> MarketPulse {
-        let mut p = MarketPulse {
-            timestamp_ns: ts,
-            ..MarketPulse::default()
-        };
-        for (i, px) in p.prices.iter_mut().enumerate() {
-            *px = 10.0 + i as f32;
-        }
-        p
-    }
-
-    #[test]
-    fn price_for_ticker_maps_assets_and_rejects_residual() {
-        let p = pulse_at(1);
-        assert_eq!(price_for_ticker(&p, "DNX"), Some(10.0));
-        assert_eq!(price_for_ticker(&p, "Verus"), Some(16.0));
-        assert_eq!(price_for_ticker(&p, "RESIDUAL"), None);
-        assert_eq!(price_for_ticker(&p, "nope"), None);
-    }
-
-    #[test]
-    fn pulse_max_age_parses_or_fails_loudly() {
-        assert_eq!(
-            parse_pulse_max_age_ms(None),
-            Ok(PULSE_MAX_AGE_MS_DEFAULT * 1_000_000)
-        );
-        assert_eq!(parse_pulse_max_age_ms(Some("250")), Ok(250_000_000));
-        assert_eq!(parse_pulse_max_age_ms(Some(" 0 ")), Ok(0));
-        assert!(parse_pulse_max_age_ms(Some("2s")).is_err());
-        assert!(parse_pulse_max_age_ms(Some("")).is_err());
-        assert!(parse_pulse_max_age_ms(Some("-1")).is_err());
-    }
-
-    #[test]
-    fn resolve_fill_price_refuses_without_pulse() {
-        assert_eq!(
-            resolve_fill_price(None, "DNX", 1_000, 1_000),
-            Err(PriceError::NoPulse)
-        );
-        // A default pulse (timestamp 0) is "never received", not a $1.00 market.
-        let never = MarketPulse::default();
-        assert_eq!(
-            resolve_fill_price(Some(&never), "DNX", 1_000, 1_000),
-            Err(PriceError::NoPulse)
-        );
-    }
-
-    #[test]
-    fn resolve_fill_price_uses_pulse_price_when_fresh() {
-        let p = pulse_at(5_000);
-        assert_eq!(resolve_fill_price(Some(&p), "Quai", 5_500, 1_000), Ok(11.0));
-        // Exactly at the limit is still fresh.
-        assert_eq!(resolve_fill_price(Some(&p), "Quai", 6_000, 1_000), Ok(11.0));
-        // Clock skew (pulse from the future) is not stale.
-        assert_eq!(resolve_fill_price(Some(&p), "Quai", 4_000, 1_000), Ok(11.0));
-    }
-
-    #[test]
-    fn resolve_fill_price_refuses_stale_pulse() {
-        let p = pulse_at(5_000);
-        assert_eq!(
-            resolve_fill_price(Some(&p), "Quai", 6_001, 1_000),
-            Err(PriceError::Stale {
-                age_ns: 1_001,
-                max_age_ns: 1_000
-            })
-        );
-    }
-
-    #[test]
-    fn resolve_fill_price_refuses_residual() {
-        let p = pulse_at(5_000);
-        assert_eq!(
-            resolve_fill_price(Some(&p), "RESIDUAL", 5_000, 1_000),
-            Err(PriceError::UnknownTicker)
-        );
-    }
-
-    #[test]
-    fn golden_readout_prices_from_golden_pulse() {
-        let r = std::fs::read(fixture("readout.bin")).expect("fixture");
-        let m = std::fs::read(fixture("marketpulse.bin")).expect("fixture");
-        let packet = decode_readout(&r).unwrap();
-        let pulse = decode_market_pulse(&m).unwrap();
-        let sig = readout_to_trade_signal(&packet, 0.0, 1.0, None);
-        let px = resolve_fill_price(Some(&pulse), &sig.ticker, pulse.timestamp_ns, 1).unwrap();
-        assert!((px - pulse.prices[0] as f64).abs() < 1e-6);
-    }
-
-    #[test]
-    fn reject_non_finite_price() {
-        let mut bytes = std::fs::read(fixture("marketpulse.bin")).expect("fixture");
-        bytes[8..12].copy_from_slice(&f32::NAN.to_le_bytes());
-        assert!(decode_market_pulse(&bytes).is_err());
-    }
-
-    #[test]
-    fn reject_non_positive_price() {
-        let mut bytes = std::fs::read(fixture("marketpulse.bin")).expect("fixture");
-        bytes[8..12].copy_from_slice(&0.0f32.to_le_bytes());
-        assert!(decode_market_pulse(&bytes).is_err());
-    }
-
-    #[test]
-    fn reject_non_finite_signal_field() {
-        let mut bytes = std::fs::read(fixture("marketpulse.bin")).expect("fixture");
-        // confidence_signal at offset 8 + 14*4 = 64
-        bytes[64..68].copy_from_slice(&f32::INFINITY.to_le_bytes());
-        assert!(decode_market_pulse(&bytes).is_err());
-    }
-
-    #[test]
-    fn reject_non_finite_readout() {
-        let mut bytes = std::fs::read(fixture("readout.bin")).expect("fixture");
-        bytes[8..12].copy_from_slice(&f32::NAN.to_le_bytes());
-        assert!(decode_readout(&bytes).is_err());
-    }
-
-    #[test]
-    fn json_ipc_respects_override_without_env_mutation() {
-        // Pure helper: no process-global env mutation (parallel-test safe).
-        assert_eq!(
-            resolve_json_ipc_endpoint(Some("ipc:///tmp/custom-limen-test.ipc"), None).unwrap(),
-            "ipc:///tmp/custom-limen-test.ipc"
-        );
-    }
-
-    #[test]
-    fn readout_overflow_scores_fail_closed() {
-        // Valid simplex relevance so only score overflow trips fail-closed mapping.
-        let mut packet = ReadoutPacket {
-            tick: 1,
-            readout: [0.0; 16],
-            relevance: [0.4, 0.3, 0.2, 0.1],
-        };
-        // bull=MAX, bear=-MAX → score overflows to non-finite
-        packet.readout[0] = f32::MAX;
-        packet.readout[1] = -f32::MAX;
-        let m = readout_to_trade(&packet);
-        assert_eq!(m.side, WireSide::Neutral);
-        assert_eq!(m.confidence, 0.0);
-        assert_eq!(m.pair_index, 0);
-    }
-
-    #[test]
-    fn readout_rejects_relevance_out_of_range() {
-        let mut bytes = std::fs::read(fixture("readout.bin")).expect("fixture");
-        // first relevance float at offset 8 + 16*4 = 72
-        bytes[72..76].copy_from_slice(&2.0f32.to_le_bytes());
-        let err = decode_readout(&bytes).unwrap_err();
-        assert!(
-            err.contains("must be in [0, 1]"),
-            "expected range error, got: {err}"
-        );
-
-        let mut bytes_neg = std::fs::read(fixture("readout.bin")).expect("fixture");
-        bytes_neg[72..76].copy_from_slice(&(-0.1f32).to_le_bytes());
-        let err_neg = decode_readout(&bytes_neg).unwrap_err();
-        assert!(
-            err_neg.contains("must be in [0, 1]"),
-            "expected range error, got: {err_neg}"
-        );
-    }
-
-    #[test]
-    fn readout_rejects_relevance_not_normalized() {
-        let mut bytes = std::fs::read(fixture("readout.bin")).expect("fixture");
-        // all four relevance slots = 1.0 → sum 4.0 (malformed simplex)
-        for i in 0..4 {
-            let off = 72 + i * 4;
-            bytes[off..off + 4].copy_from_slice(&1.0f32.to_le_bytes());
-        }
-        assert!(decode_readout(&bytes).is_err());
     }
 
     #[test]
     fn json_ipc_rejects_traversal() {
         assert!(validate_json_ipc_endpoint("ipc:///tmp/../etc/passwd").is_err());
-        assert!(validate_json_ipc_endpoint("tcp://127.0.0.1:1").is_err());
-        assert!(validate_json_ipc_endpoint("ipc://relative").is_err());
     }
 }

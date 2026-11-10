@@ -38,9 +38,7 @@ using Printf
 # ─── Constants ────────────────────────────────────────────────────────────────
 
 const N = 65_536        # Reservoir neuron count per lobe
-const N_IN = 28            # Spiking Input receptors (7 assets × 4: UP, DOWN, VOL_UP, VOL_DOWN)
-const N_OUT = 16            # Output neurons (8 bull/bear pairs)
-const N_ASSETS = 7             # DNX, Quai, Qubic, Kaspa, Monero, Ocean, Verus
+include(joinpath(@__DIR__, "market_types.jl"))
 const CONN_PROB = 0.01          # 1% sparse connectivity → ~42M non-zero synapses
 const DT = 0.1f0         # Simulation timestep (High-res for research)
 const HIST_DEPTH = 1000          # Rolling history depth (ticks) for deep temporal covariance
@@ -82,8 +80,6 @@ const TEMP_THRESH = 75.0f0    # °C — start increasing spike threshold
 const BUFFER_THRESH = 0.8f0     # FPGA buffer load — start increasing threshold
 const INHIB_GAIN = 15.0f0    # mV increase per unit of inhibition signal
 
-# MarketPulse types live in market_types.jl (no CUDA) for unit testing.
-include(joinpath(@__DIR__, "market_types.jl"))
 # Single inhibition map (shared with LiquidCortex adapter path).
 if !@isdefined(hft_inhibition)
     include(joinpath(@__DIR__, "hft_inhibition.jl"))

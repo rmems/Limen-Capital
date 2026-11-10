@@ -80,9 +80,7 @@ function prepare_frame(df::DataFrame)
         ensure_column!(df, col, 0.0)
     end
 
-    asset_cols = (:balance_dnx, :balance_quai, :balance_qubic, :balance_kaspa,
-                  :balance_monero, :balance_ocean, :balance_verus)
-    for col in asset_cols
+    for col in asset_balance_columns(df)
         ensure_column!(df, col, 0.0)
     end
 
@@ -137,10 +135,28 @@ function plot_pnl(df::DataFrame, out_dir::AbstractString)
     savefig(plt, joinpath(out_dir, "pnl_curve.png"))
 end
 
+function asset_balance_columns(df::DataFrame)
+    cols = Symbol[]
+    for name in names(df)
+        s = String(name)
+        if startswith(s, "balance_") && s != "balance_usdt"
+            push!(cols, Symbol(s))
+        end
+    end
+    return cols
+end
+
+function asset_label(col::Symbol)
+    s = String(col)
+    return replace(s, "balance_" => "")
+end
+
 function plot_asset_heatmap(df::DataFrame, out_dir::AbstractString)
-    assets = [:balance_dnx, :balance_quai, :balance_qubic, :balance_kaspa,
-              :balance_monero, :balance_ocean, :balance_verus]
-    asset_labels = ["DNX","QUAI","QUBIC","KAS","XMR","OCEAN","VERUS"]
+    assets = asset_balance_columns(df)
+    if isempty(assets)
+        return
+    end
+    asset_labels = [asset_label(c) for c in assets]
     mat = reduce(hcat, [Float64.(df[!, col]) for col in assets])
     # Normalize per-asset to highlight rotation
     mat_norm = similar(mat)
@@ -190,15 +206,7 @@ function write_summary(df::DataFrame, out_dir::AbstractString)
     total_trades = buy_count + sell_count
     session_hours = (df.timestamp_dt[end] - df.timestamp_dt[1]) / Hour(1)
 
-    final_assets = Dict(
-        "DNX"   => last(df.balance_dnx),
-        "QUAI"  => last(df.balance_quai),
-        "QUBIC" => last(df.balance_qubic),
-        "KAS"   => last(df.balance_kaspa),
-        "XMR"   => last(df.balance_monero),
-        "OCEAN" => last(df.balance_ocean),
-        "VERUS" => last(df.balance_verus),
-    )
+    final_assets = Dict(asset_label(col) => last(df[!, col]) for col in asset_balance_columns(df))
 
     summary_path = joinpath(out_dir, "summary.md")
     open(summary_path, "w") do io

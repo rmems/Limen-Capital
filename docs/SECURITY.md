@@ -27,7 +27,7 @@ Binary bind/connect endpoints are checked in the brain, muscle, and market
 simulator. Non-loopback addresses, hostnames, and wildcard binds require
 `LIMEN_ALLOW_REMOTE_WIRE=1`. This opt-in does not enable encryption or
 authentication: use CURVE and an allowlist on untrusted networks.
-The required topic/version envelope prevents accidental schema mismatches,
+The required v2 magic/version header prevents accidental schema mismatches,
 not forgery. Timestamp watermarks reject duplicate, stale, future, and pre-start
 frames; they require synchronized clocks and are not cryptographic anti-replay.
 

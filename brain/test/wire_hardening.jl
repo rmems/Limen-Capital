@@ -1,18 +1,20 @@
-@testset "Network envelope" begin
-    for (topic, name, size) in (("NW1P", "marketpulse", 120), ("NW1R", "readout", 88))
-        raw = read(joinpath(BRAIN, "..", "wire", "fixtures", "$name.bin"))
-        framed = read(joinpath(BRAIN, "..", "wire", "fixtures", "$name.frame"))
-        @test frame_payload(topic, raw) == framed
-        @test unframe_payload(framed, topic, size) == raw
-        @test_throws ErrorException unframe_payload(raw, topic, size)
-        @test_throws ErrorException unframe_payload(UInt8[], topic, size)
-        @test_throws ErrorException unframe_payload(framed[1:end-1], topic, size)
-        for offset in 1:8
-            bad = copy(framed)
-            bad[offset] ⊻= 0xff
-            @test_throws ErrorException unframe_payload(bad, topic, size)
-        end
+@testset "v2 header and prefix reserved bytes" begin
+    pulse = pack_market_pulse(sample_pulse(ts = UInt64(5)))
+    readout = pack_readout(Int64(5), zeros(Float32, N_OUT), fill(0.25f0, 4))
+    @test decode_market_pulse(pulse).timestamp_ns == UInt64(5)
+    @test decode_readout(readout)[1] == 5
+    # 1-based: header reserved bytes 7–8, prefix reserved u16 at 27–28.
+    for offset in (7, 8, 27, 28)
+        bad = copy(pulse); bad[offset] = 0x01
+        @test_throws ErrorException decode_market_pulse(bad)
+        bad = copy(readout); bad[offset] = 0x01
+        @test_throws ErrorException decode_readout(bad)
     end
+    bad = copy(readout); bad[5] = 0x03
+    @test_throws ErrorException decode_readout(bad)
+    bad = copy(readout); bad[6] = 0x07
+    @test classify_wire_frame(bad) == :unknown
+    @test_throws ErrorException decode_readout(readout[1:end-1])
 end
 
 @testset "Binary endpoint policy" begin
@@ -23,31 +25,51 @@ end
         @test_throws ErrorException validate_binary_endpoint(ep; allow_remote=false)
         @test validate_binary_endpoint(ep; allow_remote=true) == ep
     end
-    for ep in ("", "udp://127.0.0.1:5555", "ipc://relative", "ipc:///tmp/../wire", "tcp://127.0.0.1:0", "tcp://127.0.0.1:65536")
+    for ep in ("", "udp://127.0.0.1:5555", "ipc://relative", "ipc:///tmp/../wire", "tcp://127.0.0.1:0", "tcp://127.0.0.1:65536", "tcp://127.0.0.1")
         @test_throws ErrorException validate_binary_endpoint(ep; allow_remote=false)
         @test_throws ErrorException validate_binary_endpoint(ep; allow_remote=true)
     end
+    withenv("LIMEN_ALLOW_REMOTE_WIRE" => nothing) do
+        @test_throws ErrorException validate_binary_endpoint("tcp://192.0.2.1:5555")
+    end
+    withenv("LIMEN_ALLOW_REMOTE_WIRE" => "1") do
+        @test validate_binary_endpoint("tcp://192.0.2.1:5555") == "tcp://192.0.2.1:5555"
+    end
+end
+
+@testset "Source timestamp guard" begin
+    now = wall_clock_ns()
+    @test now > UInt64(1_600_000_000) * UInt64(1_000_000_000)
+    guard = TimestampGuard(UInt64(100))
+    for ts in (UInt64(0), UInt64(99), UInt64(100))
+        @test !accept_timestamp!(guard, ts)
+    end
+    @test accept_timestamp!(guard, UInt64(150))
+    @test !accept_timestamp!(guard, UInt64(150))
+    @test !accept_timestamp!(guard, UInt64(149))
+    @test accept_timestamp!(guard, UInt64(151))
+    @test guard.last_ns == UInt64(151)
 end
 
 @testset "Readout finite guard" begin
     for bad in (NaN32, Inf32, -Inf32)
-        for index in 1:16
-            output = zeros(Float32, 16)
+        for index in 1:N_OUT
+            output = zeros(Float32, N_OUT)
             output[index] = bad
             @test_throws ErrorException pack_readout(Int64(1), output, fill(0.25f0, 4))
         end
         for index in 1:4
             relevance = fill(0.25f0, 4)
             relevance[index] = bad
-            @test_throws ErrorException pack_readout(Int64(1), zeros(Float32, 16), relevance)
+            @test_throws ErrorException pack_readout(Int64(1), zeros(Float32, N_OUT), relevance)
         end
     end
-    @test_throws ErrorException pack_readout(Int64(1), zeros(Float32, 16), ones(Float32, 4))
-    bad = read(joinpath(BRAIN, "..", "wire", "fixtures", "marketpulse.bin"))
-    bad[end] = 1
+    @test_throws ErrorException pack_readout(Int64(1), zeros(Float32, N_OUT), ones(Float32, 4))
+    @test_throws ErrorException pack_readout(Int64(1), zeros(Float32, N_OUT), Float32[1.2, -0.2, 0, 0])
+    bad = pack_market_pulse(sample_pulse())
+    bad[end-3:end] .= reinterpret(UInt8, [NaN32])
     @test_throws ErrorException decode_market_pulse(bad)
 end
-
 # Load the real NERO implementation without a GPU, not a copy of its equations.
 module NeroRecoveryTests
 using Test, LinearAlgebra, Printf

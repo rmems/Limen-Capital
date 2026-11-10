@@ -18,6 +18,7 @@ pub mod kelly;
 /// Feature-gated; **not** part of the research path and not a research result.
 #[cfg(feature = "live-robinhood")]
 pub mod live;
+pub mod universe;
 pub mod wire;
 pub mod zmq_curve;
 
@@ -301,7 +302,7 @@ mod tests {
     fn test_confidence_gate() {
         let mut engine = ExecutionEngine::new(0.90, 10.0);
         let signal = TradeSignal {
-            ticker: "DNX".into(),
+            ticker: "TESTSYM".into(),
             side: TradeSide::Buy,
             price: 1.0,
             quantity: 1.0,
@@ -319,7 +320,7 @@ mod tests {
         // conf too low for b=0.05 → Kelly 0
         let mut engine = ExecutionEngine::new(0.10, 10.0);
         let signal = TradeSignal {
-            ticker: "DNX".into(),
+            ticker: "TESTSYM".into(),
             side: TradeSide::Buy,
             price: 1.0,
             quantity: 1.0,
@@ -358,7 +359,7 @@ mod tests {
                 .into_owned(),
         );
         let signal = TradeSignal {
-            ticker: "DNX".into(),
+            ticker: "TESTSYM".into(),
             side: TradeSide::Buy,
             price: 1.0,
             quantity: 0.0, // ignored under Kelly
@@ -375,7 +376,7 @@ mod tests {
             } => {
                 assert!(quantity > 0.0);
                 assert!(kelly_fraction > 0.0);
-                assert!(engine.ghost_wallet.balance("DNX") > 0.0);
+                assert!(engine.ghost_wallet.balance("TESTSYM") > 0.0);
             }
             other => panic!("expected Executed, got {other:?}"),
         }
@@ -383,7 +384,7 @@ mod tests {
 
     #[test]
     fn test_json_side_lowercase() {
-        let json = r#"{"ticker":"DNX","side":"buy","price":1.0,"quantity":1.0,"confidence":0.9,"timestamp_ns":0}"#;
+        let json = r#"{"ticker":"TESTSYM","side":"buy","price":1.0,"quantity":1.0,"confidence":0.9,"timestamp_ns":0}"#;
         let sig: TradeSignal = serde_json::from_str(json).unwrap();
         assert_eq!(sig.side, TradeSide::Buy);
     }
@@ -392,7 +393,7 @@ mod tests {
     fn test_neutral() {
         let mut engine = ExecutionEngine::new(0.1, 10.0);
         let signal = TradeSignal {
-            ticker: "DNX".into(),
+            ticker: "TESTSYM".into(),
             side: TradeSide::Neutral,
             price: 1.0,
             quantity: 0.0,

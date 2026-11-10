@@ -30,7 +30,8 @@ and the CPU baseline in **[docs/repro-baseline.md](docs/repro-baseline.md)**.
 
 For the small CPU-only reservoir versus shared forecast baselines campaign, see
 **[docs/cpu-comparison.md](docs/cpu-comparison.md)**. It uses a fixed one-lot paper
-policy, not the live helm's confidence/Kelly path.
+policy, not the live helm's confidence/Kelly path. Research confidence defaults and
+RM-1865 calibration boundaries: **[docs/confidence-defaults.md](docs/confidence-defaults.md)** (GitHub #5).
 
 ## Architecture
 
@@ -140,11 +141,11 @@ julia --project=. spike_helm.jl
 
 ```
 [0..8]    timestamp_ns (UInt64)
-[8..64]   7 assets × (price f32, vol f32) = DNX,Quai,Qubic,Kaspa,XMR,Ocean,Verus
+[8..64]   7 assets × (price f32, vol f32), order from config/universe.toml
 [64..80]  confidence_signal, funding_rate, liquidation_vol, liquidity_delta
 [80..84]  l3_order_imbalance (market signal)
 [84..100] GPU temp/power/util, Basys buffer load (hardware telemetry)
-[100..120] dydx OI delta, dydx funding rate, Qubic fields (108–120 reserved)
+[100..120] OI delta, funding rate, reserved (108–120)
 ```
 
 ### Output: 88-byte readout (Julia → Rust)

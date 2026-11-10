@@ -39,11 +39,11 @@ function run_experiment(cfg::ExperimentConfig)
     end
 
     # ── Substrate ──────────────────────────────────────────────────────────
-    res = build_reservoir(; n_in=cfg.n_in, n_out=cfg.n_out)
+    res = build_reservoir(; n_in=N_IN, n_out=N_OUT)
     ensemble = reservoir_ensemble(res)
     println("[experiment] ", reservoir_status(res))
 
-    encoder = MarketEncoder(7; delta=cfg.delta_encode, rng=MersenneTwister(cfg.seed + 1))
+    encoder = MarketEncoder(N_ASSETS; delta=cfg.delta_encode, rng=MersenneTwister(cfg.seed + 1))
     features = FeatureStream(; base_delta=cfg.delta_encode, use_reflex=false)
     println("[experiment] FeatureStream: Hawkes on  (FastReflex off unless LIMEN_USE_REFLEX=1)")
     nero = NeroOrchestrator()
@@ -59,8 +59,8 @@ function run_experiment(cfg::ExperimentConfig)
         recorder = SpikeRecorder(joinpath(out_dir, "spikes.bin"))
     end
 
-    current_prices = ones(Float32, 7)
-    vols = fill(0.005f0, 7)
+    current_prices = ones(Float32, N_ASSETS)
+    vols = fill(0.005f0, N_ASSETS)
     total_latency = 0.0
     last_tick = 0
 
@@ -73,30 +73,30 @@ function run_experiment(cfg::ExperimentConfig)
             # Market: GBM-ish + scalper feedback
             scalper_rate = Float32(reservoir_lobes(res)[1].last_spike_rate)
             dynamic_vols = vols .* (1.0f0 .+ 5.0f0 * scalper_rate)
-            for i in 1:7
+            for i in 1:N_ASSETS
                 current_prices[i] *= exp(randn(Float32) * dynamic_vols[i])
             end
 
             # FeatureStream: Hawkes on primary price → encoder + Scalper reflex
-            snap = update_features!(features, Float64(current_prices[1]), Float64(tick))
+            snap = update_features!(features, sum(Float64, current_prices) / N_ASSETS, Float64(tick))
             apply_encoder_gain!(encoder, snap)
             λ_sum += snap.hawkes_λ
 
-            pulse = MarketPulse(
-                UInt64(tick),
-                current_prices[1], vols[1], current_prices[2], vols[2],
-                current_prices[3], vols[3], current_prices[4], vols[4],
-                current_prices[5], vols[5], current_prices[6], vols[6],
-                current_prices[7], vols[7],
-                0.95f0,
-                0.0f0, 0.0f0, snap.reflex_signal, 0.0f0,  # liquidity_delta ← Hawkes excess
-                45.0f0, 250.0f0, 0.8f0, 0.1f0,
-                0.0f0, 0.0f0,
+            pulse = MarketPulse(;
+                timestamp_ns=UInt64(tick),
+                prices=current_prices,
+                vols=dynamic_vols,
+                confidence_signal=0.95f0,
+                liquidity_delta=snap.reflex_signal,
+                gpu_temp_c=45.0f0,
+                gpu_power_w=250.0f0,
+                gpu_util_pct=0.8f0,
+                basys_buffer_load=0.1f0,
             )
 
             spikes = encode!(encoder, pulse)
             if features.use_reflex
-                update_features!(features, Float64(current_prices[1]), Float64(tick);
+                update_features!(features, sum(Float64, current_prices) / N_ASSETS, Float64(tick);
                     spikes_cpu=spikes)
             end
             u_gpu = cu(spikes)
@@ -143,6 +143,8 @@ function run_experiment(cfg::ExperimentConfig)
         end
     end
 
+    cfg.n_in = N_IN
+    cfg.n_out = N_OUT
     summary = finalize_metrics(metrics, cfg)
     extra = Dict{String,Any}(
         "backend_resolved" => string(reservoir_status(res).backend),

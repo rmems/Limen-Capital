@@ -67,7 +67,7 @@ function check_cuda_memory()
         return true
     end
 
-    required = MC_PATHS * MC_HORIZON * 7 * 4  # 4 bytes per float32
+    required = MC_PATHS * MC_HORIZON * N_ASSETS * 4  # 4 bytes per float32
     println("[brain] Memory check: MC requires $(round(required/1e9, digits=2))GB, available $(round(available/1e9, digits=2))GB")
 
     if required > available * 0.9  # Leave 10% buffer
@@ -77,11 +77,38 @@ function check_cuda_memory()
     return true
 end
 
+# ─── Input Validation ───────────────────────────────────────────────────────────
+
+function validate_market_pulse(data::Vector{UInt8})
+    kind = classify_wire_frame(data)
+    # Header-less v1 frames are typed only by length; refuse them on the network.
+    if kind != :market_v2
+        @warn "Invalid MarketPulse frame (kind=$kind, len=$(length(data)))"
+        return false
+    end
+
+    ts_off = WIRE_HEADER_BYTES + 1
+    if length(data) < ts_off + 7
+        @warn "MarketPulse frame too short for timestamp"
+        return false
+    end
+    timestamp_ns = reinterpret(UInt64, data[ts_off:ts_off+7])[1]
+    current_ns = wall_clock_ns()
+    # Allow large skew (sim / research clocks); only flag absurd multi-day deltas
+    hour_ns = UInt64(3_600) * UInt64(1_000_000_000)
+    if timestamp_ns > 0 && abs(Int128(current_ns) - Int128(timestamp_ns)) > Int128(24) * Int128(hour_ns)
+        @warn "Suspicious timestamp_ns: $timestamp_ns (current=$(current_ns))"
+    end
+
+    return true
+end
+
 # ─── ZMQ Setup ────────────────────────────────────────────────────────────────
 
 function setup_zmq()
-    validate_binary_endpoint(IPC_ENDPOINT)
-    validate_binary_endpoint(IPC_PUB_ENDPOINT)
+    # Validate before creating sockets so a refused endpoint leaks nothing.
+    market_ep = validate_binary_endpoint(IPC_ENDPOINT)
+    readout_ep = validate_binary_endpoint(IPC_PUB_ENDPOINT)
     ctx = ZMQ.Context()
     zap_state = nothing
 
@@ -102,8 +129,8 @@ function setup_zmq()
         println("[brain] CURVE client on SUB (market feed)")
     end
     ZMQ.subscribe(sub, "")
-    ZMQ.connect(sub, IPC_ENDPOINT)
-    println("[brain] ZMQ SUB connected to $IPC_ENDPOINT")
+    ZMQ.connect(sub, market_ep)
+    println("[brain] ZMQ SUB connected to $market_ep")
 
     # PUB socket: send readout signals back to Rust (CURVE server)
     pub = ZMQ.Socket(ctx, ZMQ.PUB)
@@ -113,8 +140,8 @@ function setup_zmq()
         ZmqCurve.apply_curve_server!(pub, sec; zap=allowlist !== nothing)
         println("[brain] CURVE server on PUB (readout)")
     end
-    ZMQ.bind(pub, IPC_PUB_ENDPOINT)
-    println("[brain] ZMQ PUB bound to $IPC_PUB_ENDPOINT")
+    ZMQ.bind(pub, readout_ep)
+    println("[brain] ZMQ PUB bound to $readout_ep")
 
     return ctx, sub, pub, zap_state
 end
@@ -125,19 +152,20 @@ end
     publish_readout!(buf::Vector{UInt8}, pub::ZMQ.Socket,
                     output::Vector{Float32}, relevance::Vector{Float32}, tick::Int64)
 
-Publish the 16-element readout vector + 4 NERO relevance scores via ZMQ.
+Publish the `N_OUT`-element readout vector + 4 NERO relevance scores as a
+NervousWire v2 Readout frame (`docs/wire-protocol-v2.md`).
 
-Format: NW1R + version/reserved header (8 bytes), then 88-byte LE payload.
-The tick is the originating MarketPulse Unix timestamp in nanoseconds.
-Non-finite output/relevance is rejected before sending.
+`tick` is the source MarketPulse `timestamp_ns`, so the muscle can measure
+end-to-end latency and refuse duplicate, stale, or pre-restart readouts.
+`pack_readout` throws on non-finite values instead of publishing them.
+
+The buffer is pre-allocated in main() and reused every tick.
 """
 function publish_readout!(buf::Vector{UInt8}, pub::ZMQ.Socket,
                           output::Vector{Float32}, relevance::Vector{Float32},
                           tick::Int64)
-    # NervousWire v1: reuse pack_readout (market_types.jl via naut_core)
-    packed = frame_payload("NW1R", pack_readout(tick, output, relevance))
-    resize!(buf, length(packed))
-    copyto!(buf, packed)
+    packed = pack_readout(tick, output, relevance)
+    copyto!(buf, 1, packed, 1, length(packed))
     ZMQ.send(pub, buf)
 end
 
@@ -150,7 +178,7 @@ function main()
     println("║  Spikenaut V3 Enhanced Brain — 4-Lobe Ensemble × 65,536 Neurons ║")
     println("║  RTX 5080 (16GB) │ OU-SDE + STDP │ Secure ZMQ IPC           ║")
     println("║  MC: 1500000 paths × 200 horizon │ Fan-Boost ~13 GB          ║")
-    println("║  Mining-chain SNN │ 120-byte wire │ DNX/Quai/Qubic/KAS/XMR ║")
+    println("║  Market-neutral SNN │ v2 wire │ $(N_ASSETS) symbols │ hash=$(string(TRADE_UNIVERSE.hash, base=16)) ║")
     println("╚══════════════════════════════════════════════════════════════╝")
 
     # ── Security & Resource Checks ─────────────────────────────────────────────────
@@ -163,7 +191,7 @@ function main()
     println("[brain] CUDA memory: ", round(CUDA.available_memory() / 1e9, digits=2), " GB available")
 
     # ── Reservoir façade (LiquidCortex if available, else naut_core) ─────────
-    res = build_reservoir(; n_in=28, n_out=16)
+    res = build_reservoir(; n_in=N_IN, n_out=N_OUT)
     ensemble = reservoir_ensemble(res)  # NERO / vault still expect ensemble
     println("[brain] reservoir status: ", reservoir_status(res))
 
@@ -175,22 +203,20 @@ function main()
 
     # ── Initialize Market Encoder & Vault Recorder (Augmentation) ────────────
     println("[brain] Activating Neuromorphic Augmentation...")
-    encoder = MarketEncoder(7; delta=0.0005f0)
+    encoder = MarketEncoder(N_ASSETS; delta=0.0005f0)
     features = FeatureStream(; base_delta=0.0005f0)
     println("[brain] FeatureStream: Hawkes self-excitation → encoder δ + Scalper reflex")
     vault = VaultRecorder(100) # Commit to DuckDB every 100 ticks
 
-    # ── Pre-allocate 88-byte readout buffer (zero allocation in hot loop) ────
-    readout_buf = Vector{UInt8}(undef, 88)
+    # ── Pre-allocate the v2 readout buffer ───────────────────────────────────
+    readout_buf = Vector{UInt8}(undef, readout_frame_v2_len(N_PAIRS))
 
     # ── Volatility estimates for Monte Carlo (initialized to default) ────────
-    # Volatility estimates per mining chain (updated from covariance every 50 ticks)
-    # DNX=high, Quai=high, Qubic=very high, Kaspa=high, Monero=low (mature), Ocean=med, Verus=high
-    vol_estimates = Float32[0.05, 0.06, 0.08, 0.06, 0.02, 0.04, 0.07]  # DNX,Quai,Qubic,Kaspa,Monero,Ocean,Verus
+    vol_estimates = fill(0.05f0, N_ASSETS)
 
     # ── Optional MC buffer (disabled when LIMEN_MC_PATHS=0) ─────────────────
     mc_result_buf = if MC_PATHS > 0
-        CUDA.zeros(Float32, MC_PATHS, MC_HORIZON, 7)
+        CUDA.zeros(Float32, MC_PATHS, MC_HORIZON, N_ASSETS)
     else
         nothing
     end
@@ -205,7 +231,8 @@ function main()
 
     tick = 0
     mc_tick = 0
-    last_pulse_ns = UInt64(round(Int64, time() * 1e9))
+    # Seeded at startup so pulses replayed from before a restart are refused.
+    pulse_clock = TimestampGuard(wall_clock_ns())
 
     try
         while true
@@ -214,23 +241,25 @@ function main()
             raw = Vector{UInt8}(msg)
 
             # ── Input Validation ───────────────────────────────────────────────
+            if !validate_market_pulse(raw)
+                continue
+            end
+
             # ── 2. Decode first (fail-closed); only then advance experiment tick ─
             pulse = try
-                decode_market_pulse(unframe_payload(raw, "NW1P", 120))
+                decode_market_pulse(raw)
             catch e
                 @warn "Rejecting invalid MarketPulse frame" exception = e
                 continue
             end
-            now = UInt64(round(Int64, time() * 1e9))
-            if !(last_pulse_ns < pulse.timestamp_ns <= now)
-                @warn "Rejecting non-increasing, pre-start, or future market timestamp"
+            if !accept_timestamp!(pulse_clock, pulse.timestamp_ns)
+                @warn "Rejecting duplicate, out-of-order, or pre-start MarketPulse" timestamp_ns = pulse.timestamp_ns
                 continue
             end
-            last_pulse_ns = pulse.timestamp_ns
             tick += 1
 
-            # ── 2.5 FeatureStream (Hawkes on DNX price) ───────────────────────
-            snap = update_features!(features, Float64(pulse.dnx_price), Float64(tick))
+            ref_px = sum(Float64, pulse.prices) / max(length(pulse.prices), 1)
+            snap = update_features!(features, ref_px, Float64(tick))
             apply_encoder_gain!(encoder, snap)
             # Inject Hawkes excess into liquidity_delta slot for Scalper flash-learning
             # (MarketPulse is immutable struct — pass via reservoir_step kwargs)
@@ -261,8 +290,8 @@ function main()
                         # Extract diagonal variance from subsampled covariance
                         diag_var = Array(CUDA.diag(C))
                         # Map subsampled neuron groups to asset volatility proxies
-                        sub_group = div(COV_SUBSAMPLE, 7)
-                        for a in 1:7
+                        sub_group = max(div(COV_SUBSAMPLE, N_ASSETS), 1)
+                        for a in 1:N_ASSETS
                             start_idx = (a - 1) * sub_group + 1
                             end_idx = min(a * sub_group, length(diag_var))
                             if end_idx >= start_idx
@@ -278,11 +307,7 @@ function main()
             # ── 6. Optional Monte Carlo (only if LIMEN_MC_PATHS > 0) ──────────
             if mc_result_buf !== nothing && tick % MC_INTERVAL == 0
                 mc_tick += 1
-                current_prices = Float32[
-                    pulse.dnx_price, pulse.quai_price, pulse.qubic_price,
-                    pulse.kaspa_price, pulse.monero_price,
-                    pulse.ocean_price, pulse.verus_price
-                ]
+                current_prices = copy(pulse.prices)
                 if any(abs.(current_prices) .> 0.001f0)
                     monte_carlo_paths!(mc_result_buf, current_prices, vol_estimates)
                 end
@@ -290,12 +315,18 @@ function main()
 
             # ── 7–8. NERO relevance (causal) → re-aggregate → publish ────────
             # route_and_aggregate!: relevance weights replace static LOBE_WEIGHTS
+            # `nothing` means NERO saw non-finite state and reset; skip this tick.
             output = route_and_aggregate!(nero, ensemble)
             if output === nothing
-                @warn "Non-finite neural state; reset NERO and skipped readout"
-                continue
+                @warn "Skipping readout: non-finite NERO state was reset" tick
+            else
+                try
+                    publish_readout!(readout_buf, pub, output, nero.relevance, Int64(pulse.timestamp_ns))
+                catch e
+                    e isa ErrorException || rethrow()
+                    @warn "Skipping readout that fails wire validation" exception = e
+                end
             end
-            publish_readout!(readout_buf, pub, output, nero.relevance, Int64(pulse.timestamp_ns))
 
             # ── 9. Diagnostics ───────────────────────────────────────────────
             if tick % 20 == 0
