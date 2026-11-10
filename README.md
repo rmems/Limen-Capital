@@ -17,8 +17,8 @@ Validated Rust packages use **crates.io releases** with `Cargo.lock`, except
 | Package | Role |
 |---------|------|
 | **metabolic-ledger** | Ghost wallet, ATP gates, JSONL (git pin) |
-| **LiquidCortex.jl** | Preferred CUDA LSM (optional; else `naut_core`) |
-| **TemporalFocus** (NeuroPulse.jl) | Optional relevance package |
+| **LiquidCortex.jl** | Preferred CUDA LSM; fallback `naut_core` also requires CUDA in the helms |
+| **TemporalFocus** (NeuroPulse.jl) | Pinned dependency, not wired into the helms; `adapters.jl` has a load probe |
 | **binary_wire** (in-tree) | MarketPulse 120B / ReadoutPacket 88B; corpus-ipc migration deferred |
 | **kinetic-signals / neuromod** | Optional published libraries (`kinetic` / `snn`) |
 | **corpus-ipc / axon-encoder / plasticity-lab** | Optional published libraries (same-named features); runtime wiring deferred |
@@ -42,7 +42,7 @@ RM-1865 calibration boundaries: **[docs/confidence-defaults.md](docs/confidence-
 │       ↓                                                 │
 │  LiquidCortex EnsembleBrain (4 lobes × 65K)             │
 │       ↓                                                 │
-│  TemporalFocus / NERO relevance                         │
+│  In-tree causal NERO relevance                          │
 │       ↓                                                 │
 │  16-element readout + 4 relevance scores                │
 └──────────────────────┬──────────────────────────────────┘
@@ -50,8 +50,8 @@ RM-1865 calibration boundaries: **[docs/confidence-defaults.md](docs/confidence-
                        ↓
 ┌──────────────────────────────────────────────────────────┐
 │  Rust Muscle                                             │
-│  Confidence gates → fractional Kelly → metabolic-ledger  │
-│  optional dydx feed → latency tracking → JSONL           │
+│  Confidence / Kelly policy gates → ledger-sized fills    │
+│  latency tracking → JSONL; dydx adapter unwired          │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -74,7 +74,10 @@ Limen-Capital/
 ### Prerequisites
 
 - Julia **1.13** (Pkg `[sources]` pins; CI uses latest stable 1.13), Rust **1.99+** (CI pins 1.99.0), network for first-time dependencies
-- Optional: NVIDIA GPU for full EnsembleBrain / research runs
+- NVIDIA CUDA-capable GPU required for `test_brain.jl`, `research_helm.jl`
+  (`ExperimentRunner`), and `spike_helm.jl`, including with `naut_core`.
+  Rust, the brain CPU unit suite, and the separate
+  [root CPU comparison](docs/cpu-comparison.md) need no GPU.
 
 ### 1. Structure + unit tests
 
@@ -93,7 +96,7 @@ cd brain/
 julia --project=. test_brain.jl
 ```
 
-### 3. Research experiment (metrics + artifacts)
+### 3. Synthetic research experiment (GPU; metrics + artifacts)
 
 ```bash
 cd brain/
@@ -102,11 +105,16 @@ julia --project=. research_helm.jl --duration 200 --seed 42 --horizon 5
 # Options: --cost-bps 1.0 --output-dir runs --record-spikes --backend naut_core
 ```
 
-`ExperimentRunner` (`experiment_runner.jl` + `metrics.jl`) records walk-forward **hit_rate**, **PnL proxy**, and **latency p50/p99**.  
-Reservoir façade picks **LiquidCortex** when loadable (`LIMEN_RESERVOIR` / `--backend`).  
+`ExperimentRunner` (`experiment_runner.jl` + `metrics.jl`) generates a synthetic
+random-walk price series with reservoir-dependent volatility. It records
+future-horizon **hit_rate**, **PnL proxy**, and **latency p50/p99** on that
+simulation, not historical-market walk-forward evaluation or evidence of a
+tradable edge.
+Reservoir façade picks **LiquidCortex** when loadable (`LIMEN_RESERVOIR` / `--backend`);
+`--backend naut_core` selects the local CUDA ensemble, not a CPU fallback.
 MC fan-out stays **off** in research mode (`LIMEN_MC_PATHS` only for live helm).
 
-### 4. Rust Decision path (gates + fractional Kelly + metabolic-ledger)
+### 4. Rust Decision path (policy gates + ledger-sized ghost fills)
 
 ```bash
 cd execution/
@@ -117,7 +125,7 @@ cargo run --release --bin market_sim
 # Terminal B: muscle — SUBs to readouts on :5556 and pulses on :5555
 cargo run --release
 # LIMEN_WIRE=json for legacy IPC
-# LIMEN_CONFIDENCE_THRESHOLD=0.15  (research default in main)
+# LIMEN_CONFIDENCE_THRESHOLD=0.15  (initial research gate only, not the effective Kelly floor)
 # LIMEN_PULSE_MAX_AGE_MS=2000      (readouts are refused when the last pulse is older)
 ```
 
@@ -125,10 +133,21 @@ Fills are priced from the last `MarketPulse`. A readout that arrives before the
 first pulse, after the pulse goes stale, or whose primary pair is RESIDUAL is
 refused and logged — never filled at a placeholder price.
 
-`ExecutionEngine::process_signal`: confidence gate → Neutral → **0.25× Kelly size**
-(from ATP bankroll, b=0.05) → max-qty gate → ghost fill. Zero Kelly → `RejectedNoEdge`.
+`ExecutionEngine::process_signal`: confidence gate → Neutral filter →
+**0.25× Kelly policy quantity** (from ATP bankroll, b=0.05) → max-qty gate →
+ledger call. With default Kelly enabled, positive policy size requires
+`p > 1 / (1 + 0.05) ≈ 0.952381`; passing 0.15 alone is insufficient.
+Zero Kelly → `RejectedNoEdge`. SNN confidence is not a calibrated win probability.
 
-### 5. Julia live helm (binary wire v1)
+**The policy quantity is not the filled quantity.** `execute_buy` / `execute_sell`
+take no quantity: the pinned ledger buys from ATP × its adaptive Kelly fraction
+(less metabolic cost), or sells that fraction of inventory. Rust's max-qty check
+and `ExecutionDecision::Executed.quantity` describe the policy quantity, not an
+enforced fill limit or confirmed fill. `with_kelly_sizing(false)` only switches
+the policy gate to `signal.quantity`; it does not bypass ledger sizing. Exact
+upstream-sized fills and ADR 0001's single-sizing-authority rule remain unimplemented.
+
+### 5. Julia live helm (GPU required)
 
 ```bash
 cd brain/
@@ -200,7 +219,8 @@ Optional Limen-Neural dependencies are typically MIT/Apache-2.0 as well.
 - [x] Binary NervousWire (120/88) + golden fixtures
 - [x] Reservoir façade + causal NERO + FeatureStream (Hawkes)
 - [x] ExperimentRunner metrics artifacts
-- [x] Decision path: fractional Kelly + metabolic-ledger
+- [x] Decision path: fractional Kelly policy gates + ledger-sized ghost execution
+- [ ] Enforce one sizing authority and pass accepted quantities to accounting (ADR 0001)
 - [x] Git rev pins for validated library deps (no sibling clones)
 - [ ] Replace JSON serialization with FlatBuffers (proto/signal.fbs)
 - [ ] Add WebSocket streaming for dydx (replace REST polling)

@@ -17,8 +17,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # CPU-only research path; avoid requiring LiquidCortex GPU packages in CI.
-  LIMEN_RESERVOIR: naut_core
 
 jobs:
   rust:
@@ -104,7 +102,8 @@ jobs:
 
       # Unit tests only need Test + Random + local includes.
       # Skip full Project.toml instantiate (CUDA / DuckDB / LiquidCortex are heavy
-      # and optional for the CPU wire/encoder suite).
+      # and not loaded by the CPU wire/encoder suite). No reservoir is built here;
+      # LIMEN_RESERVOIR would not select or qualify a CPU backend.
       - name: Run Capital unit tests
         run: |
           julia --color=yes --project=. test/runtests.jl

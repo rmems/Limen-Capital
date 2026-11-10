@@ -272,8 +272,8 @@ if [ "$TESTS_FAILED" -eq 0 ]; then
     echo ""
     echo "Next steps:"
     echo "  1. cargo test -p limen-execution  (cd execution)"
-    echo "  2. julia --project=brain test/runtests.jl"
-    echo "  3. research: julia --project=brain research_helm.jl"
+    echo "  2. julia --project=brain brain/test/runtests.jl"
+    echo "  3. synthetic research (CUDA required): julia --project=brain brain/research_helm.jl"
     exit 0
 else
     echo -e "${RED}✗ Some checks failed${NC}"

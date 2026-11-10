@@ -11,16 +11,17 @@
 
 Limen-Capital is the integrated application: a Julia brain (`brain/`, `math/`)
 emits an 88-byte `ReadoutPacket` over ZMQ and the Rust muscle (`execution/`)
-consumes it (confidence gate → fractional Kelly → `metabolic-ledger` ghost
+consumes it (confidence/Kelly policy gates → ledger-sized ghost
 fills). DendriteTrader.jl PRs #84–#86 landed deterministic L2 replay, causal
 features/labels, and chronological splits — Tasks 1–3 of
 `docs/superpowers/plans/2026-09-20-snn-hft-experiments.md`. Task 4 (forecast /
 encoder / baseline contracts) proceeds independently inside DendriteTrader.
 
-Today three Kelly implementations can stack silently: DendriteTrader
-`SizingModule` (half-Kelly, cap 0.20), `execution/src/kelly.rs` (0.25×
-fractional, `b=0.05`), and `metabolic-ledger`'s internal adaptive Kelly on ATP.
-This ADR fixes the ownership contract before any dependency integration.
+There are three sizing mechanisms to reconcile: DendriteTrader `SizingModule`
+(half-Kelly, cap 0.20), `execution/src/kelly.rs` (0.25× fractional, `b=0.05`
+policy gates), and `metabolic-ledger`'s internal adaptive Kelly on ATP/inventory
+(actual fills). This ADR defines the ownership contract before dependency
+integration; it does not implement that contract.
 
 ## Ownership contract
 
@@ -34,18 +35,31 @@ This ADR fixes the ownership contract before any dependency integration.
 | Fill application, persistent accounting, realized PnL, JSONL audit | `rmems/metabolic-ledger` (`GhostWallet`, `execute_buy`/`execute_sell`) |
 | Transport schemas | `corpus-ipc` once it publishes `MarketPulse`/`ReadoutPacket`; until then in-tree `execution/src/binary_wire.rs` — corpus-ipc is generic transport, never a venue/trading engine |
 
-## Sizing authority — exactly one per run
+## Sizing authority — exactly one per run (target contract, unimplemented)
+
+**Implementation status:** this section is the intended contract, not current
+behavior. In `execution/src/lib.rs`, `kelly.rs` produces a policy quantity used
+for the no-edge/max-quantity gates and logging. Neither `execute_buy` nor
+`execute_sell` receives that quantity. The pinned ledger actually sizes buys
+from ATP × its adaptive Kelly fraction (less metabolic cost), and sells that
+fraction of inventory. Ledger Kelly is therefore **applied**, not merely
+observed. `ExecutionDecision::Executed.quantity` is a policy quantity, not a
+confirmed fill, and the max-quantity gate does not cap actual ledger fills.
+`use_kelly_sizing = false` changes the policy gate input to `signal.quantity`;
+it does not make the ledger accounting-only or enforce an external proposal.
+The sizing follow-up must enforce this contract before either mode below can
+claim a single sizing authority.
 
 `forecast → sizing proposal → safety decision → accepted fill → accounting`
 
-- **Research runs** (default): DendriteTrader `SizingModule` is the single
+- **Planned integrated research runs**: DendriteTrader `SizingModule` is the single
   sizing authority. Limen-Capital `execution/` applies **safety gates only**
   (confidence threshold, max-quantity, ATP bounds) — it must not re-run Kelly
   on a proposal (`use_kelly_sizing = false` when consuming external proposals).
   `metabolic-ledger` records fills accounting-only; its adaptive Kelly state is
   observed for reporting, never applied on top of an upstream proposal.
-- **Legacy live-helm runs** (self-contained, no DendriteTrader proposals):
-  Rust `kelly.rs` remains the single authority (current default behavior);
+- **Legacy live-helm runs, target behavior** (self-contained, no DendriteTrader proposals):
+  Rust `kelly.rs` is to be the single authority;
   ledger Kelly stays observed-not-applied as above.
 - The authority is an explicit per-run selection, never implied by which
   libraries happen to be loaded. Applying two Kelly layers to one signal is a

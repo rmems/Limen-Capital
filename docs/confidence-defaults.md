@@ -18,7 +18,13 @@ separate, train-only calibration study and held-out evaluation.
 
 - `ExecutionEngine::new(0.15, …)` — sub-threshold signals are rejected before sizing.
 - `PositionSizer` uses **0.25× fractional Kelly** and payoff ratio **b = 0.05** by default (`execution/src/kelly.rs`, `execution/src/lib.rs`).
-- With small **b**, positive Kelly only appears at very high implied **p**; treating SNN confidence as **p** without calibration tends to produce **zero** size (fail-closed), which is intentional for research.
+- With **b = 0.05**, positive policy Kelly requires `p > 1 / (1 + b) ≈ 0.952381`.
+  The **0.15** threshold is only the initial gate; passing it does not imply a
+  nonzero policy quantity. SNN confidence is not calibrated as **p**.
+- This is a **policy gate**, not exact fill sizing. The pinned ledger helpers
+  accept no quantity and apply their own adaptive Kelly to ATP/inventory;
+  Rust's policy quantity and max-quantity gate do not constrain actual fills.
+  ADR 0001's one-authority rule remains unimplemented.
 - Override via environment: `LIMEN_CONFIDENCE_THRESHOLD` (documented in `README.md`).
 
 ## CPU comparison campaign defaults
