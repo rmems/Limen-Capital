@@ -49,18 +49,17 @@ publishes for that pulse, and `TradeSignal.timestamp_ns` defaults to that
 value, so measured latency includes wire and brain time.
 
 Each listener keeps a per-stream watermark seeded with the wall clock at
-startup. The brain drops a MarketPulse whose timestamp is not strictly greater
-than the last accepted one. The muscle refuses MarketPulse and Readout frames
-that are duplicate or out of order, older than `LIMEN_PULSE_MAX_AGE_MS`
-(default 2000), later than its own clock, or from before it started (for
-example, a brain tick counter from before a restart). A refused frame does not
+startup. The brain (MarketPulse) and the muscle (MarketPulse and Readout) refuse
+frames that are duplicate or out of order, older than `LIMEN_PULSE_MAX_AGE_MS`
+(default 2000), later than the local clock, or from before the listener
+started (for example, a brain tick counter from before a restart). A refused frame does not
 move the watermark. These checks assume synchronized clocks; they are not
 cryptographic anti-replay.
 
 ## Endpoints
 
 `LIMEN_IPC_SUB` / `LIMEN_IPC_PUB` must be `ipc://` with an absolute path and no
-`..` segments, or `tcp://` with a literal loopback IP (`127.0.0.0/8`, `[::1]`)
+`..` segments, or `tcp://` with a literal loopback IP (`127.0.0.0/8`, or `[::1]`; IPv6 must be bracketed)
 and a port in 1–65535. Hostnames (including `localhost`), wildcards, and other
 addresses need `LIMEN_ALLOW_REMOTE_WIRE=1`. The brain, muscle, and
 `market_sim` all apply this check before connecting or binding.
