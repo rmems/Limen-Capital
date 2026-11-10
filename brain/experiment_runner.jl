@@ -110,8 +110,9 @@ function run_experiment(cfg::ExperimentConfig)
             end
 
             output = route_and_aggregate!(nero, ensemble)
-            score = direction_score(output)
-            conf = Float64(maximum(nero.relevance)) * tanh(abs(score))
+            # `nothing`: NERO reset after non-finite state; record a flat tick.
+            score = output === nothing ? 0.0 : direction_score(output)
+            conf = output === nothing ? 0.0 : Float64(maximum(nero.relevance)) * tanh(abs(score))
             conf = clamp(conf, 0.0, 1.0)
             dom = Int(argmax(nero.relevance))
 

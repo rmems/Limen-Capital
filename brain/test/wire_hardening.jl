@@ -21,7 +21,7 @@ end
     for ep in ("tcp://127.0.0.1:5555", "tcp://127.42.0.1:5556", "tcp://[::1]:5555", "ipc:///tmp/wire.sock")
         @test validate_binary_endpoint(ep; allow_remote=false) == ep
     end
-    for ep in ("tcp://0.0.0.0:5555", "tcp://*:5555", "tcp://[::]:5555", "tcp://192.0.2.1:5555", "tcp://localhost:5555", "tcp://example.org:5555")
+    for ep in ("tcp://0.0.0.0:5555", "tcp://*:5555", "tcp://[::]:5555", "tcp://192.0.2.1:5555", "tcp://localhost:5555", "tcp://example.org:5555", "tcp://::1:5555", "tcp://[127.0.0.1]:5555")
         @test_throws ErrorException validate_binary_endpoint(ep; allow_remote=false)
         @test validate_binary_endpoint(ep; allow_remote=true) == ep
     end
@@ -40,15 +40,18 @@ end
 @testset "Source timestamp guard" begin
     now = wall_clock_ns()
     @test now > UInt64(1_600_000_000) * UInt64(1_000_000_000)
-    guard = TimestampGuard(UInt64(100))
-    for ts in (UInt64(0), UInt64(99), UInt64(100))
-        @test !accept_timestamp!(guard, ts)
+    guard = TimestampGuard(UInt64(100), UInt64(50))
+    for ts in (0, 99, 100, 201)
+        @test !accept_timestamp!(guard, UInt64(ts), UInt64(200))
     end
-    @test accept_timestamp!(guard, UInt64(150))
-    @test !accept_timestamp!(guard, UInt64(150))
-    @test !accept_timestamp!(guard, UInt64(149))
-    @test accept_timestamp!(guard, UInt64(151))
+    @test !accept_timestamp!(guard, UInt64(149), UInt64(200)) # stale
+    @test accept_timestamp!(guard, UInt64(150), UInt64(200))
+    @test !accept_timestamp!(guard, UInt64(150), UInt64(200))
+    @test accept_timestamp!(guard, UInt64(151), UInt64(200))
     @test guard.last_ns == UInt64(151)
+    @test pulse_max_age_ns(nothing) == UInt64(2_000_000_000)
+    @test pulse_max_age_ns("250") == UInt64(250_000_000)
+    @test_throws ErrorException pulse_max_age_ns("2s")
 end
 
 @testset "Readout finite guard" begin

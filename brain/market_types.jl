@@ -347,10 +347,12 @@ end
 _is_loopback(ip::IPv4) = (ip.host >> 24) == 127
 _is_loopback(ip::IPv6) = ip == IPv6(1)
 
+# ZeroMQ needs IPv6 hosts in brackets (`[::1]`); a bare `::1` is refused.
 function _loopback_literal(host::AbstractString)
-    bare = strip(host, ['[', ']'])
+    bracketed = startswith(host, "[") && endswith(host, "]")
+    T = bracketed ? IPv6 : IPv4
     ip = try
-        parse(IPAddr, bare)
+        parse(T, bracketed ? host[2:end-1] : host)
     catch e
         e isa ArgumentError || rethrow()
         return false
@@ -385,13 +387,28 @@ function validate_binary_endpoint(ep::AbstractString;
     return String(ep)
 end
 
-"""Per-stream watermark seeded at startup; refuses duplicate, older, and pre-restart timestamps."""
-mutable struct TimestampGuard
-    last_ns::UInt64
+const PULSE_MAX_AGE_MS_DEFAULT = 2_000
+
+"""`LIMEN_PULSE_MAX_AGE_MS` in nanoseconds; a set-but-invalid value is an error."""
+function pulse_max_age_ns(raw::Union{Nothing,AbstractString} = get(ENV, "LIMEN_PULSE_MAX_AGE_MS", nothing))
+    raw === nothing && return UInt64(PULSE_MAX_AGE_MS_DEFAULT) * UInt64(1_000_000)
+    ms = tryparse(UInt64, strip(raw))
+    ms === nothing && error("LIMEN_PULSE_MAX_AGE_MS=$(repr(raw)) is not a non-negative integer of milliseconds")
+    return ms * UInt64(1_000_000)
 end
 
-function accept_timestamp!(guard::TimestampGuard, ts::UInt64)
-    ts > guard.last_ns || return false
+"""
+Per-stream watermark seeded at startup. Same rule as the Rust `TickGuard`:
+accept only strictly increasing timestamps that are not in the future and not
+older than `max_age_ns`. A refused timestamp leaves the watermark alone.
+"""
+mutable struct TimestampGuard
+    last_ns::UInt64
+    max_age_ns::UInt64
+end
+
+function accept_timestamp!(guard::TimestampGuard, ts::UInt64, now_ns::UInt64)
+    (ts > guard.last_ns && ts <= now_ns && now_ns - ts <= guard.max_age_ns) || return false
     guard.last_ns = ts
     return true
 end

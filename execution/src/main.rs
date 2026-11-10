@@ -213,11 +213,29 @@ fn curve_sub(
     Ok(sock)
 }
 
+/// Which socket to read: `Some(true)` = market, `Some(false)` = readout.
+///
+/// When both are readable the choice alternates, so a busy stream cannot
+/// starve the other (stale pulses would otherwise refuse every readout).
+fn pick_market(readout_ready: bool, market_ready: bool, market_next: &mut bool) -> Option<bool> {
+    match (readout_ready, market_ready) {
+        (true, true) => {
+            let pick = *market_next;
+            *market_next = !pick;
+            Some(pick)
+        }
+        (false, true) => Some(true),
+        (true, false) => Some(false),
+        (false, false) => None,
+    }
+}
+
 /// Wait for one frame on either socket. `Ok(None)` means nothing arrived.
 fn poll_pair(
     readout: &zmq::Socket,
     market: &zmq::Socket,
     timeout_ms: i32,
+    market_next: &mut bool,
 ) -> Result<Option<Vec<u8>>, zmq::Error> {
     let mut items = [
         readout.as_poll_item(zmq::POLLIN),
@@ -228,14 +246,11 @@ fn poll_pair(
         Ok(_) => (),
         Err(e) => return Err(e),
     }
-    let sock = if items[0].is_readable() {
-        readout
-    } else if items[1].is_readable() {
-        market
-    } else {
-        return Ok(None);
-    };
-    recv_frame(sock)
+    match pick_market(items[0].is_readable(), items[1].is_readable(), market_next) {
+        Some(true) => recv_frame(market),
+        Some(false) => recv_frame(readout),
+        None => Ok(None),
+    }
 }
 
 fn recv_frame(sock: &zmq::Socket) -> Result<Option<Vec<u8>>, zmq::Error> {
@@ -264,9 +279,7 @@ fn run_listener(
     }
 }
 
-async fn start_binary_listener(engine: ExecutionEngine) -> Result<(), Box<dyn std::error::Error>> {
-    let readout_ep = readout_endpoint()?;
-    let market_ep = market_endpoint()?;
+fn binary_state(engine: ExecutionEngine) -> Result<BinaryState, Box<dyn std::error::Error>> {
     let universe = load_trade_universe()?;
     info!(
         "Trade universe: {} symbols (hash 0x{:016x})",
@@ -274,47 +287,85 @@ async fn start_binary_listener(engine: ExecutionEngine) -> Result<(), Box<dyn st
         universe.hash
     );
     let max_age_ns = pulse_max_age_ns()?;
-    let mut state = BinaryState::new(engine, universe, now_ns(), max_age_ns);
-    let stop = Arc::new(AtomicBool::new(false));
-
-    let context = zmq::Context::new();
-    let _zap = zmq_curve::maybe_start_zap(&context).map_err(|e| format!("ZAP setup: {e}"))?;
-    let timeout_ms = RECV_TIMEOUT.as_millis() as i32;
-    let stop_flag = stop.clone();
-
-    let listener = if zmq_curve::curve_enabled() {
-        let client_sec = zmq_curve::client_secret_key_z85()?;
-        let readout_pub = zmq_curve::readout_server_public_z85()?;
-        let market_pub = zmq_curve::market_server_public_z85()?;
-        let sub_readout = curve_sub(&context, &readout_pub, &client_sec, &readout_ep, timeout_ms)?;
-        let sub_market = curve_sub(&context, &market_pub, &client_sec, &market_ep, timeout_ms)?;
-        info!(
-            "Binary CURVE SUBs: readout {readout_ep}, market {market_ep} (ZAP allowlist active: {})",
-            _zap.is_some()
-        );
-        tokio::task::spawn_blocking(move || {
-            run_listener(&stop_flag, &mut state, || {
-                poll_pair(&sub_readout, &sub_market, timeout_ms)
-            });
-        })
-    } else {
-        let subscriber = context.socket(zmq::SUB)?;
-        subscriber.connect(&readout_ep)?;
-        subscriber.connect(&market_ep)?;
-        subscriber.set_subscribe(b"")?;
-        subscriber.set_rcvtimeo(timeout_ms)?;
-        info!(
-            "Binary SUB connected to readout {readout_ep} and market {market_ep} (pulse max age {} ms)",
-            max_age_ns / 1_000_000
-        );
-        tokio::task::spawn_blocking(move || {
-            run_listener(&stop_flag, &mut state, || recv_frame(&subscriber));
-        })
-    };
-
-    supervise("binary", stop, listener).await
+    Ok(BinaryState::new(engine, universe, now_ns(), max_age_ns))
 }
 
+struct Endpoints {
+    readout: String,
+    market: String,
+}
+
+fn spawn_curve_listener(
+    context: &zmq::Context,
+    eps: &Endpoints,
+    stop: Arc<AtomicBool>,
+    mut state: BinaryState,
+    zap_active: bool,
+) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error>> {
+    let timeout_ms = RECV_TIMEOUT.as_millis() as i32;
+    let client_sec = zmq_curve::client_secret_key_z85()?;
+    let readout_pub = zmq_curve::readout_server_public_z85()?;
+    let market_pub = zmq_curve::market_server_public_z85()?;
+    let sub_readout = curve_sub(context, &readout_pub, &client_sec, &eps.readout, timeout_ms)?;
+    let sub_market = curve_sub(context, &market_pub, &client_sec, &eps.market, timeout_ms)?;
+    info!(
+        "Binary CURVE SUBs: readout {}, market {} (ZAP allowlist active: {zap_active})",
+        eps.readout, eps.market
+    );
+    Ok(tokio::task::spawn_blocking(move || {
+        let mut market_next = true;
+        run_listener(&stop, &mut state, || {
+            poll_pair(&sub_readout, &sub_market, timeout_ms, &mut market_next)
+        });
+    }))
+}
+
+fn plain_sub(context: &zmq::Context, eps: &Endpoints) -> Result<zmq::Socket, zmq::Error> {
+    let subscriber = context.socket(zmq::SUB)?;
+    subscriber.connect(&eps.readout)?;
+    subscriber.connect(&eps.market)?;
+    subscriber.set_subscribe(b"")?;
+    subscriber.set_rcvtimeo(RECV_TIMEOUT.as_millis() as i32)?;
+    Ok(subscriber)
+}
+
+fn spawn_plain_listener(
+    context: &zmq::Context,
+    eps: &Endpoints,
+    stop: Arc<AtomicBool>,
+    mut state: BinaryState,
+) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error>> {
+    let subscriber = plain_sub(context, eps)?;
+    info!(
+        "Binary SUB connected to readout {} and market {} (pulse max age {} ms)",
+        eps.readout,
+        eps.market,
+        state.max_age_ns / 1_000_000
+    );
+    Ok(tokio::task::spawn_blocking(move || {
+        run_listener(&stop, &mut state, || recv_frame(&subscriber));
+    }))
+}
+
+async fn start_binary_listener(engine: ExecutionEngine) -> Result<(), Box<dyn std::error::Error>> {
+    let eps = Endpoints {
+        readout: readout_endpoint()?,
+        market: market_endpoint()?,
+    };
+    let state = binary_state(engine)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let context = zmq::Context::new();
+    let zap = zmq_curve::maybe_start_zap(&context).map_err(|e| format!("ZAP setup: {e}"))?;
+    let listener = if zmq_curve::curve_enabled() {
+        spawn_curve_listener(&context, &eps, stop.clone(), state, zap.is_some())?
+    } else {
+        spawn_plain_listener(&context, &eps, stop.clone(), state)?
+    };
+    // `zap` must outlive the listener: dropping it stops the ZAP handler.
+    let result = supervise("binary", stop, listener).await;
+    drop(zap);
+    result
+}
 async fn start_json_listener(
     mut engine: ExecutionEngine,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -424,6 +475,18 @@ mod tests {
         state.process_checked(&market(201, 10.0), 201).unwrap();
         state.process_checked(&readout(201), 201).unwrap();
         assert_eq!(state.unpriced, 0);
+    }
+
+    #[test]
+    fn busy_stream_cannot_starve_the_other() {
+        let mut market_next = true;
+        let picks: Vec<_> = (0..4)
+            .map(|_| pick_market(true, true, &mut market_next))
+            .collect();
+        assert_eq!(picks, [Some(true), Some(false), Some(true), Some(false)]);
+        assert_eq!(pick_market(true, false, &mut market_next), Some(false));
+        assert_eq!(pick_market(false, true, &mut market_next), Some(true));
+        assert_eq!(pick_market(false, false, &mut market_next), None);
     }
 
     #[tokio::test]

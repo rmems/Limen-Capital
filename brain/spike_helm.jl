@@ -232,7 +232,7 @@ function main()
     tick = 0
     mc_tick = 0
     # Seeded at startup so pulses replayed from before a restart are refused.
-    pulse_clock = TimestampGuard(wall_clock_ns())
+    pulse_clock = TimestampGuard(wall_clock_ns(), pulse_max_age_ns())
 
     try
         while true
@@ -252,8 +252,8 @@ function main()
                 @warn "Rejecting invalid MarketPulse frame" exception = e
                 continue
             end
-            if !accept_timestamp!(pulse_clock, pulse.timestamp_ns)
-                @warn "Rejecting duplicate, out-of-order, or pre-start MarketPulse" timestamp_ns = pulse.timestamp_ns
+            if !accept_timestamp!(pulse_clock, pulse.timestamp_ns, wall_clock_ns())
+                @warn "Rejecting duplicate, out-of-order, stale, future, or pre-start MarketPulse" timestamp_ns = pulse.timestamp_ns
                 continue
             end
             tick += 1

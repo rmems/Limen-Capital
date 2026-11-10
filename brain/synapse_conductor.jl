@@ -308,9 +308,11 @@ function aggregate_with_relevance!(ensemble, relevance::AbstractVector{<:Real})
 end
 
 """
-    route_and_aggregate!(nero, ensemble) -> Vector{Float32}
+    route_and_aggregate!(nero, ensemble) -> Union{Vector{Float32}, Nothing}
 
 Update NERO from ensemble state, re-aggregate with relevance, return CPU readout.
+Returns `nothing` (after resetting NERO) when state or output is non-finite;
+callers must skip that tick rather than publish or score it.
 """
 function route_and_aggregate!(nero::NeroOrchestrator, ensemble)
     update_relevance!(nero, ensemble) || return nothing

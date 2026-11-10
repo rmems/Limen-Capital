@@ -57,11 +57,16 @@ pub fn validate_binary_endpoint(ep: &str, allow_remote: bool) -> Result<String, 
     Ok(ep.to_string())
 }
 
+/// ZeroMQ needs IPv6 hosts in brackets (`[::1]`); a bare `::1` is refused.
 fn is_loopback_literal(host: &str) -> bool {
-    host.trim_start_matches('[')
-        .trim_end_matches(']')
-        .parse::<std::net::IpAddr>()
-        .is_ok_and(|ip| ip.is_loopback())
+    match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        Some(v6) => v6
+            .parse::<std::net::Ipv6Addr>()
+            .is_ok_and(|ip| ip.is_loopback()),
+        None => host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| ip.is_loopback()),
+    }
 }
 
 /// Per-stream timestamp watermark, seeded at process start so frames from
@@ -555,6 +560,8 @@ mod tests {
             "tcp://192.0.2.1:5555",
             "tcp://localhost:5555",
             "tcp://example.org:5555",
+            "tcp://::1:5555",
+            "tcp://[127.0.0.1]:5555",
         ] {
             assert!(validate_binary_endpoint(ep, false).is_err(), "{ep}");
             assert_eq!(validate_binary_endpoint(ep, true).unwrap(), ep);

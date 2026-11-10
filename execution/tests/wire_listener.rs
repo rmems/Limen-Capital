@@ -3,6 +3,7 @@
 
 use limen_execution::universe::TradeUniverse;
 use std::fs;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -15,7 +16,7 @@ impl Drop for ChildGuard {
     }
 }
 
-fn wait_for(log: &std::path::Path, needle: &str) -> String {
+fn wait_for(log: &Path, needle: &str) -> String {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let text = fs::read_to_string(log).unwrap();
@@ -57,72 +58,61 @@ fn market(u: &TradeUniverse, ts: u64) -> Vec<u8> {
     frame
 }
 
-#[test]
-fn real_listener_rejects_replay_stale_restart_and_bad_headers_then_stops_on_sigint() {
-    let u = TradeUniverse::load(&TradeUniverse::default_config_path()).unwrap();
-    let tmp = tempfile::tempdir().unwrap();
-    let context = zmq::Context::new();
-    let publisher = context.socket(zmq::PUB).unwrap();
-    let ep = format!("ipc://{}/feed", tmp.path().display());
-    publisher.bind(&ep).unwrap();
-    let log = tmp.path().join("listener.log");
-    let mut child = ChildGuard(
+fn spawn_listener(dir: &Path, ep: &str, log: &Path) -> ChildGuard {
+    ChildGuard(
         Command::new(env!("CARGO_BIN_EXE_limen-execution"))
-            .current_dir(tmp.path())
-            .env("LIMEN_IPC_SUB", &ep)
-            .env("LIMEN_IPC_PUB", &ep)
+            .current_dir(dir)
+            .env("LIMEN_IPC_SUB", ep)
+            .env("LIMEN_IPC_PUB", ep)
             .env("LIMEN_WIRE", "binary")
             .env_remove("LIMEN_UNIVERSE")
             .env("ZMQ_CURVE", "0")
             .env("LIMEN_CONFIDENCE_THRESHOLD", "0.15")
             .env("LIMEN_PULSE_MAX_AGE_MS", "2000")
-            .stdout(fs::File::create(&log).unwrap())
+            .stdout(fs::File::create(log).unwrap())
             .stderr(Stdio::null())
             .spawn()
             .unwrap(),
-    );
-    wait_for(&log, "Binary SUB connected");
-    sleep(Duration::from_millis(200)); // PUB/SUB subscription propagation
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64;
-    publisher.send(market(&u, now), 0).unwrap();
-    let valid = readout(&u, now as i64);
-    publisher.send(&valid, 0).unwrap();
-    wait_for(&log, "Signal rejected: confidence");
-    publisher.send(&valid, 0).unwrap(); // duplicate
-    publisher.send(readout(&u, now as i64 - 1), 0).unwrap(); // out of order
-    publisher.send(readout(&u, 42), 0).unwrap(); // pre-restart counter
-    publisher
-        .send(readout(&u, now as i64 - 3_000_000_000), 0)
-        .unwrap(); // stale
-    publisher
-        .send(readout(&u, now as i64 + 60_000_000_000), 0)
-        .unwrap(); // future
-    let mut wrong_version = readout(&u, now as i64 + 1);
+    )
+}
+
+/// Frames the listener must refuse after accepting a readout stamped `now`.
+fn refused_frames(u: &TradeUniverse, now: i64) -> Vec<Vec<u8>> {
+    let mut wrong_version = readout(u, now + 1);
     wrong_version[4] = 3;
-    publisher.send(wrong_version, 0).unwrap();
-    let mut reserved = readout(&u, now as i64 + 1);
+    let mut reserved = readout(u, now + 1);
     reserved[7] = 1;
-    publisher.send(reserved, 0).unwrap();
     let v1 = fs::read(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../wire/fixtures/readout.bin"
     ))
     .unwrap();
-    publisher.send(v1, 0).unwrap(); // header-less legacy frame
-                                    // Wait until all eight refusals arrive, without relying on a fixed delay.
+    vec![
+        readout(u, now),                  // duplicate
+        readout(u, now - 1),              // out of order
+        readout(u, 42),                   // pre-restart counter
+        readout(u, now - 3_000_000_000),  // stale
+        readout(u, now + 60_000_000_000), // future
+        wrong_version,
+        reserved,
+        v1, // header-less legacy frame
+    ]
+}
+
+/// Wait until `needle` appears `n` times, without relying on a fixed delay.
+fn wait_for_count(log: &Path, needle: &str, n: usize) -> String {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let text = fs::read_to_string(&log).unwrap();
-        if text.matches("Binary frame refused:").count() == 8 {
-            assert_eq!(text.matches("Signal rejected: confidence").count(), 1);
-            break;
+        let text = fs::read_to_string(log).unwrap();
+        if text.matches(needle).count() == n {
+            return text;
         }
         assert!(Instant::now() < deadline, "{text}");
         sleep(Duration::from_millis(20));
     }
+}
+
+fn sigint_and_wait(child: &mut ChildGuard) -> Duration {
     let shutdown = Instant::now();
     assert!(Command::new("kill")
         .args(["-INT", &child.0.id().to_string()])
@@ -132,14 +122,41 @@ fn real_listener_rejects_replay_stale_restart_and_bad_headers_then_stops_on_sigi
     loop {
         if let Some(status) = child.0.try_wait().unwrap() {
             assert!(status.success());
-            break;
+            return shutdown.elapsed();
         }
         assert!(shutdown.elapsed() < Duration::from_secs(3), "Ctrl+C hung");
         sleep(Duration::from_millis(20));
     }
-    println!("Idle listener Ctrl+C shutdown: {:?}", shutdown.elapsed());
 }
 
+#[test]
+fn real_listener_rejects_replay_stale_restart_and_bad_headers_then_stops_on_sigint() {
+    let u = TradeUniverse::load(&TradeUniverse::default_config_path()).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let context = zmq::Context::new();
+    let publisher = context.socket(zmq::PUB).unwrap();
+    let ep = format!("ipc://{}/feed", tmp.path().display());
+    publisher.bind(&ep).unwrap();
+    let log = tmp.path().join("listener.log");
+    let mut child = spawn_listener(tmp.path(), &ep, &log);
+    wait_for(&log, "Binary SUB connected");
+    sleep(Duration::from_millis(200)); // PUB/SUB subscription propagation
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    publisher.send(market(&u, now), 0).unwrap();
+    publisher.send(readout(&u, now as i64), 0).unwrap();
+    wait_for(&log, "Signal rejected: confidence");
+    let bad = refused_frames(&u, now as i64);
+    for frame in &bad {
+        publisher.send(frame, 0).unwrap();
+    }
+    let text = wait_for_count(&log, "Binary frame refused:", bad.len());
+    assert_eq!(text.matches("Signal rejected: confidence").count(), 1);
+    let elapsed = sigint_and_wait(&mut child);
+    println!("Idle listener Ctrl+C shutdown: {elapsed:?}");
+}
 #[test]
 fn real_binary_refuses_remote_endpoint_without_opt_in() {
     let output = Command::new(env!("CARGO_BIN_EXE_limen-execution"))
