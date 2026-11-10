@@ -3,22 +3,21 @@
 //! Kelly Fraction = (p·b − q) / b  with q = 1 − p, b = expected payoff ratio.
 //!
 //! SNN "confidence" is **not** a calibrated win probability. Prefer fractional
-//! Kelly (default 0.25×) and realistic `b` (e.g. 0.02–0.10 for short-horizon moves).
-//! With b = 0.01, positive Kelly only appears when p > ~0.990.
+//! Kelly (default 0.25×). `b` is expected gain / expected loss, NOT a
+//! percentage return. Positive Kelly requires p > 1 / (1 + b).
 
 use tracing::info;
 
 /// Kelly criterion calculator for position sizing
 pub struct KellyCriterion {
-    /// Expected payoff ratio (price move / entry price)
-    /// Example: 0.02 means expecting 2% move
+    /// Expected gain / expected loss (e.g. 2 for +2% versus -1%).
     pub expected_payoff_ratio: f64,
 }
 
 impl Default for KellyCriterion {
     fn default() -> Self {
         Self {
-            expected_payoff_ratio: 0.01, // 1% expected move (conservative)
+            expected_payoff_ratio: 1.0, // symmetric gain/loss; not a calibrated estimate
         }
     }
 }
@@ -75,6 +74,13 @@ impl KellyCriterion {
     /// Risk-adjusted Kelly (fractional Kelly)
     /// Most professionals use 0.5x or 0.25x Kelly for safety
     pub fn fractional_kelly(kelly_frac: f64, fraction: f64) -> f64 {
+        if !kelly_frac.is_finite()
+            || !(0.0..=1.0).contains(&kelly_frac)
+            || !fraction.is_finite()
+            || !(0.0 < fraction && fraction <= 1.0)
+        {
+            return 0.0;
+        }
         (kelly_frac * fraction).min(1.0)
     }
 }
@@ -211,6 +217,16 @@ mod tests {
         let kelly_frac = 0.6;
         let quarter = KellyCriterion::fractional_kelly(kelly_frac, 0.25);
         assert!((quarter - 0.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fractional_kelly_fails_closed_on_invalid_inputs() {
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.1, 1.1] {
+            assert_eq!(KellyCriterion::fractional_kelly(0.6, invalid), 0.0);
+            assert_eq!(KellyCriterion::fractional_kelly(invalid, 0.25), 0.0);
+        }
+        assert_eq!(KellyCriterion::fractional_kelly(0.6, 0.0), 0.0);
+        assert_eq!(KellyCriterion::fractional_kelly(0.6, 1.0), 0.6);
     }
 
     #[test]

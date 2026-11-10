@@ -17,9 +17,21 @@ separate, train-only calibration study and held-out evaluation.
 ## Rust muscle defaults (ghost / research)
 
 - `ExecutionEngine::new(0.15, …)` — sub-threshold signals are rejected before sizing.
-- `PositionSizer` uses **0.25× fractional Kelly** and payoff ratio **b = 0.05** by default (`execution/src/kelly.rs`, `execution/src/lib.rs`).
-- With small **b**, positive Kelly only appears at very high implied **p**; treating SNN confidence as **p** without calibration tends to produce **zero** size (fail-closed), which is intentional for research.
-- Override via environment: `LIMEN_CONFIDENCE_THRESHOLD` (documented in `README.md`).
+- The listener requires **`LIMEN_KELLY_B`**, an experiment-supplied expected
+  gain / expected loss ratio, **not** percentage price movement. Neither a
+  confidence score nor the current `MarketPulse` contains that estimate.
+- Fractional Kelly defaults to **0.25×** (`LIMEN_KELLY_SCALAR`); per-order quote
+  notional defaults to **10** (`LIMEN_MAX_ORDER_NOTIONAL`). Oversized orders are
+  capped in the actual ghost fill, not rejected or re-sized by ledger Kelly.
+- Positive Kelly requires **p > 1/(1+b)** as well as **p ≥ threshold**.
+  `b=0.05` therefore requires `p > 0.952381`, regardless of a 0.15 threshold.
+  The scalar changes size, not breakeven. Library convenience constructors use
+  symmetric `b=1`; the executable always requires explicit odds.
+- All sizing env values are strictly validated at startup. See `README.md` for
+  ranges, dust/inventory gates, and summary logging.
+- [RM-2440's synthetic sim check](results/rm-2440/README.md) measures the mapped
+  confidence distribution and decision counts through the shipped listener and
+  `market_sim`. It is **not** a measured distribution of the GPU brain.
 
 ## CPU comparison campaign defaults
 
