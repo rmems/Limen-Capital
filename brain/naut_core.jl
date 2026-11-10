@@ -247,8 +247,7 @@ Execute one simulation timestep:
 4. **STDP Update**: ΔWᵢⱼ = η · trace_pre_i · trace_post_j (covariance rule)
    reflex_eta allows Scalper lobe to "flash-learn" on liquidity events
 5. **Readout**: y = W_out · S (weighted spike count)
-"""
-"""
+
     step!(brain, u; inhibition=0, reflex_eta=ETA)
 
 LiquidCortex-compatible keyword API. Prefer this for new call sites.
@@ -378,7 +377,8 @@ which would be 65536² × 4 = 17 GB — doesn't fit in 16GB VRAM.
 Uses the brain's internal rolling history buffer (HIST_DEPTH × N).
 Returns (C::CuMatrix, indices::Vector{Int}) or nothing if history not full.
 """
-function compute_reservoir_covariance!(brain::SparseBrain)
+# Shared lobe history interface (naut_core and LiquidCortex).
+function compute_reservoir_covariance!(brain)
     if !brain.hist_full
         return nothing
     end
@@ -506,8 +506,7 @@ dYdX OI Arousal: positive OI delta signals accumulation → lowers effective
 Reflex Gating: When |liquidity_delta| > 0.1 (significant on-chain event),
   the Scalper lobe (index 1, τ_m=10ms) gets a 5× learning rate boost,
   enabling "flash-learning" — rapid synaptic adaptation to liquidity shocks.
-"""
-"""
+
     ensemble_step!(eb, u; inhibition=0, reflex_eta=ETA, reflex_signal=0)
 
 LiquidCortex-compatible keyword API.

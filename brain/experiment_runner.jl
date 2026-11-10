@@ -13,6 +13,9 @@ using Random
 
 include(joinpath(@__DIR__, "metrics.jl"))
 include(joinpath(@__DIR__, "feature_stream.jl"))
+if !@isdefined(SpikeRecorder)
+    include(joinpath(@__DIR__, "spike_recorder.jl"))
+end
 
 """
     run_experiment(cfg::ExperimentConfig) -> NamedTuple
@@ -55,7 +58,6 @@ function run_experiment(cfg::ExperimentConfig)
 
     recorder = nothing
     if cfg.record_spikes
-        include_once_spike_recorder()
         recorder = SpikeRecorder(joinpath(out_dir, "spikes.bin"))
     end
 
@@ -165,10 +167,4 @@ function run_experiment(cfg::ExperimentConfig)
     println("[experiment] artifacts → $out_dir")
 
     return (summary=summary, dir=out_dir, config=cfg)
-end
-
-function include_once_spike_recorder()
-    if !@isdefined(SpikeRecorder)
-        include(joinpath(@__DIR__, "spike_recorder.jl"))
-    end
 end
