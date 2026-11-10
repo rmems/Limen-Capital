@@ -81,8 +81,10 @@ async fn notional_size_has_no_qty_field() {
     let body: Value = serde_json::from_str(&server.requests().await[0].body).unwrap();
     assert_eq!(body["notional"], "5.00");
     assert!(body.get("qty").is_none());
-    assert_eq!(body["type"], "limit");
-    assert_eq!(body["time_in_force"], "day");
+    assert_eq!(
+        (body["type"].as_str(), body["time_in_force"].as_str()),
+        (Some("limit"), Some("day"))
+    );
 }
 
 #[tokio::test]
@@ -115,8 +117,10 @@ async fn lost_post_response_recovers_by_client_id_without_second_order() {
         assert_eq!(result.filled_qty, 0.01);
         let requests = server.requests().await;
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].method, "POST");
-        assert_eq!(requests[1].method, "GET");
+        assert_eq!(
+            (requests[0].method.as_str(), requests[1].method.as_str()),
+            ("POST", "GET")
+        );
         assert_eq!(requests[1].path, lookup());
     }
 }
@@ -145,8 +149,10 @@ async fn cancel_sends_one_delete_and_accepts_empty_204() {
         assert_eq!(result.is_ok(), status == 204);
         let requests = server.requests().await;
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].method, "DELETE");
-        assert_eq!(requests[0].path, "/v2/orders/venue-id");
+        assert_eq!(
+            (requests[0].method.as_str(), requests[0].path.as_str()),
+            ("DELETE", "/v2/orders/venue-id")
+        );
         assert!(requests[0].body.is_empty());
     }
 }
@@ -243,9 +249,11 @@ async fn poll_budget_returns_still_open_order_and_list_includes_closed() {
     let result = c.poll_order("venue-id", 2, Duration::ZERO).await.unwrap();
     assert_eq!(result.status, OrderState::Open);
     assert!(!result.status.is_terminal());
-    assert_eq!(c.get_orders().await.unwrap()[0].status, OrderState::Expired);
+    let orders = c.get_orders().await.unwrap();
+    assert_eq!(orders[0].status, OrderState::Expired);
     assert_eq!(server.requests().await.len(), 3);
-    assert!(c.poll_order("venue-id", 0, Duration::ZERO).await.is_err());
+    let rejected = c.poll_order("venue-id", 0, Duration::ZERO).await;
+    assert!(rejected.is_err());
     assert_eq!(server.requests().await.len(), 3);
 }
 
@@ -254,8 +262,9 @@ fn fixed_live_endpoint_and_debug_never_expose_keys() {
     let c = AlpacaClient::new("secret-id-value", "secret-key-value").unwrap();
     assert_eq!(c.base_url(), "https://api.alpaca.markets");
     assert!(!format!("{c:?}").contains("secret"));
-    assert!(AlpacaClient::new("", "secret").is_err());
-    assert!(AlpacaClient::new("id", "bad\nheader").is_err());
+    for (key, secret) in [("", "secret"), ("id", "bad\nheader")] {
+        assert!(AlpacaClient::new(key, secret).is_err());
+    }
 }
 
 #[tokio::test]
@@ -353,11 +362,13 @@ fn risk_approval_preserves_uuid_and_rounded_wire_values() {
     let req = PlaceLimitOrderRequest::from(&approved);
     assert_eq!(req.client_order_id, approved.client_order_id);
     assert!(uuid::Uuid::parse_str(&req.client_order_id).is_ok());
-    assert_eq!(req.limit_price, approved.limit_price_str);
     assert_eq!(
-        req.size,
-        LimitSize::Qty {
-            qty: approved.asset_qty_str
-        }
+        (req.limit_price.as_str(), &req.size),
+        (
+            approved.limit_price_str.as_str(),
+            &LimitSize::Qty {
+                qty: approved.asset_qty_str
+            }
+        )
     );
 }
