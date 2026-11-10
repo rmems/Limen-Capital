@@ -14,7 +14,7 @@ Use before creating/updating a **personal** GitHub remote (e.g. `rmems/...`).
 - [ ] Remote URL is **your** user/org — not `github.com/Limen-Neural/...`
 - [x] Validated dependencies use crates.io releases + lockfile or **git+rev** pins (no sibling path clones required)
 - [ ] `git status` clean of secrets, runs, jsonl
-- [ ] Local: `cargo test` + `julia --project=brain test/runtests.jl`
+- [ ] Local (from repo root): `(cd execution && cargo test --locked)` + `julia --project=brain brain/test/runtests.jl`
 
 ## Suggested first commit scope
 

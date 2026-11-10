@@ -28,11 +28,19 @@ done)
 ## Architecture Overview
 
 Experimental SNN-HFT stack: **Julia brain** (`brain/`) produces binary `ReadoutPacket`
-frames; **Rust muscle** (`execution/`) consumes wire frames, applies gates/Kelly, and
-ghost-trades via `metabolic-ledger`. Wire contracts live in-tree at
+frames; **Rust muscle** (`execution/`) consumes wire frames and gates/logs a
+fractional-Kelly policy quantity. The pinned `metabolic-ledger` helpers accept no
+quantity and size actual ghost trades themselves using adaptive Kelly.
+ADR 0001's single-sizing-authority rule is a target, not implemented behavior.
+Both `research_helm.jl` / `ExperimentRunner` and `spike_helm.jl` require CUDA,
+even with `LIMEN_RESERVOIR=naut_core`. The brain CPU unit suite builds no reservoir;
+the separate root CPU comparison explicitly uses `reference_cpu`.
+Wire contracts live in-tree at
 `execution/src/binary_wire.rs`; migration to the optional published corpus-ipc
 dependency is deferred. See `docs/deps.md` for release policy and feature boundaries.
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- Keep documentation explicit about synthetic experiments versus held-out market evidence.
+- Track work in GitHub/Linear; no beads setup is required.
+- Preserve user changes and stashes. Stashes are shared across worktrees; do not clear them.

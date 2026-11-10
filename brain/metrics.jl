@@ -1,6 +1,7 @@
 # metrics.jl — Experiment metrics (pure CPU, no CUDA)
 #
-# Walk-forward style labels from future returns; direction from readout scores.
+# Future-horizon labels from supplied prices; direction from readout scores.
+# ExperimentRunner supplies synthetic random-walk prices, not market replay.
 # Used by experiment_runner.jl; unit-testable offline.
 
 using Statistics
@@ -87,7 +88,8 @@ end
 """
     finalize_metrics(m, cfg) -> NamedTuple
 
-Walk-forward hit-rate and PnL proxy using `cfg.horizon` future returns.
+Future-horizon hit-rate and PnL proxy using supplied prices.
+This does not implement walk-forward training/evaluation splits.
 """
 function finalize_metrics(m::MetricsCollector, cfg::ExperimentConfig)
     h = cfg.horizon
