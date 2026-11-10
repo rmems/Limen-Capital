@@ -22,6 +22,52 @@ fn short_id_never_panics() {
     assert_eq!(short_id(""), "");
 }
 
+#[tokio::test]
+async fn tick_counts_offline_spend_without_calling_postmortem() {
+    struct MustNotDecide;
+    impl Decider for MustNotDecide {
+        fn name(&self) -> &str {
+            "zero-cost-must-not-decide"
+        }
+        fn decide<'a>(
+            &'a mut self,
+            _: &'a MarketState,
+            _: &'a [String],
+        ) -> crate::live::decider::DecideFuture<'a> {
+            panic!("offline spend must stop decision calls");
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("offline-budget.md");
+    let c = cfg(&p, 1);
+    crate::live::cost::reserve(
+        &p,
+        &Utc::now().format("%Y-%m-%d").to_string(),
+        1.0,
+        0.0,
+        1.0,
+    )
+    .unwrap();
+    let mut parts = build_parts(&c, &Secrets::default()).await.unwrap();
+    // Any decision call would panic. No Anthropic credentials or server exist.
+    parts.decider = Box::new(MustNotDecide);
+    let result = run_with_parts(
+        &c,
+        &RunOptions {
+            once: true,
+            max_ticks: 0,
+        },
+        parts,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.ticks, 1);
+    assert_eq!(result.orders_placed, 0);
+    assert!(std::fs::read_to_string(p)
+        .unwrap()
+        .contains("llm_budget_exhausted"));
+}
+
 /// Scripted quotes for deterministic loop tests.
 struct ScriptedMarket(std::collections::VecDeque<(f64, f64)>);
 

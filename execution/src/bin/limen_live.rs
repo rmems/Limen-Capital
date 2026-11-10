@@ -2,11 +2,12 @@
 //!
 //! ```text
 //! limen-live [--config PATH] [--paper] [--once] [--max-ticks N] [--journal PATH]
-//!            [--model ID] [--symbol PAIR]
+//!            [--model ID] [--symbol PAIR] [--postmortem]
 //! ```
 //!
 //! Requires `--features live-robinhood`. Secrets come from the environment:
-//! `ROBINHOOD_API_KEY`, `ROBINHOOD_PRIVATE_KEY` (and later `ANTHROPIC_API_KEY`).
+//! `ROBINHOOD_API_KEY`, `ROBINHOOD_PRIVATE_KEY`, `ANTHROPIC_API_KEY`.
+//! `--postmortem` needs only the Anthropic key and never enters the tick loop.
 //!
 //! `--once --paper` runs a single read-only tick: account, pair rules,
 //! holdings, bid/ask, decision and risk verdict, with no order submission.
@@ -23,9 +24,10 @@ struct Args {
     journal: Option<String>,
     model: Option<String>,
     symbol: Option<String>,
+    postmortem: bool,
 }
 
-const USAGE: &str = "usage: limen-live [--config PATH] [--paper] [--once] [--max-ticks N] [--journal PATH] [--model ID] [--symbol PAIR]
+const USAGE: &str = "usage: limen-live [--config PATH] [--paper] [--once] [--max-ticks N] [--journal PATH] [--model ID] [--symbol PAIR] [--postmortem]
 
   --config PATH    TOML config (defaults: BTC-USD, paper, 900 s ticks, rules decider)
   --paper          force paper mode (never submit orders)
@@ -34,18 +36,30 @@ const USAGE: &str = "usage: limen-live [--config PATH] [--paper] [--once] [--max
   --journal PATH   override journal_path
   --model ID       override the decider model id
   --symbol PAIR    override the trading pair (BTC-USD | ETH-USD)
+  --postmortem     analyze an existing --journal with Sonnet 5.5; no ticks or orders
 ";
 
 fn parse_args(it: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut args = Args::default();
     let mut it = it;
+    let mut tick_limit_given = false;
     while let Some(a) = it.next() {
         match a.as_str() {
             "--paper" => args.paper = true,
             "--once" => args.once = true,
+            "--postmortem" => args.postmortem = true,
+            "--max-ticks" => {
+                tick_limit_given = true;
+                args.set_value(&a, &mut it)?;
+            }
             "-h" | "--help" => return Err(USAGE.to_string()),
             other => args.set_value(other, &mut it)?,
         }
+    }
+    if args.postmortem && (args.once || tick_limit_given || args.model.is_some()) {
+        return Err(
+            "--postmortem cannot use --once, --max-ticks, or --model (Sonnet 5.5 only)".into(),
+        );
     }
     Ok(args)
 }
@@ -138,6 +152,18 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if args.postmortem {
+        return match live::postmortem::run(&cfg, &Secrets::from_env()).await {
+            Ok(path) => {
+                println!("post-mortem: {}", path.display());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("limen-live post-mortem: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if !cfg.paper {
         // Belt and braces: live submission is not wired yet, and when it is,
         // it must be an explicit config choice (`paper = false`), never a default.
@@ -230,6 +256,23 @@ mod tests {
         assert_eq!(cfg.journal_path, "paper.md");
         let args = parse(&["--symbol", "DOGE-USD"]).unwrap();
         assert!(load_config(&args).is_err());
+    }
+
+    #[test]
+    fn postmortem_is_explicit_and_cannot_override_model_or_run_ticks() {
+        assert!(
+            parse(&["--postmortem", "--journal", "fixture.md"])
+                .unwrap()
+                .postmortem
+        );
+        for flags in [
+            vec!["--postmortem", "--model", "claude-haiku-5-5"],
+            vec!["--postmortem", "--once"],
+            vec!["--postmortem", "--max-ticks", "1"],
+            vec!["--max-ticks", "0", "--postmortem"],
+        ] {
+            assert!(parse(&flags).is_err());
+        }
     }
 
     #[test]

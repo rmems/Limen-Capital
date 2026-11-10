@@ -215,7 +215,11 @@ impl Runner<'_> {
             last_order_secs: self.last_order_secs,
             open_orders: self.parts.book.open_orders.len(),
             daily_pnl_usd: self.parts.book.realized_pnl_usd - self.day_start_realized,
-            llm_cost_today_usd: self.parts.decider.llm_cost_today_usd(),
+            llm_cost_today_usd: self.parts.decider.llm_cost_today_usd()
+                + crate::live::cost::spent(
+                    &self.parts.journal.path().canonicalize()?,
+                    &Utc::now().format("%Y-%m-%d").to_string(),
+                )?,
             resting_notional_usd: self.parts.book.resting_notional_usd(),
         };
         let mut row = report::row(&state, &self.parts);
