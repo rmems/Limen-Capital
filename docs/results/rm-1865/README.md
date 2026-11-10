@@ -2,8 +2,9 @@
 
 Recorded 2026-11-09, Julia 1.13.3, Linux x86_64, CPU `icelake-server`,
 one Julia thread and one BLAS thread. Protocol: [CPU comparison](../../cpu-comparison.md).
-Revalidated after updating to origin/main `bd98433`: all 18 numerical outcomes
-are unchanged from the original run.
+Revalidated on origin/main `28ae81e` (2026-11-10): all 18 numerical outcomes
+remain unchanged from the original run. Confidence/calibration boundaries:
+[confidence-defaults.md](../../confidence-defaults.md).
 
 **Outcome: adapter qualified; no evidence of a useful temporal-reservoir advantage.**
 All six preregistered candidates completed all three seeds (18/18, zero failures).

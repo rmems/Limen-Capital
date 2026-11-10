@@ -30,7 +30,8 @@ and the CPU baseline in **[docs/repro-baseline.md](docs/repro-baseline.md)**.
 
 For the small CPU-only reservoir versus shared forecast baselines campaign, see
 **[docs/cpu-comparison.md](docs/cpu-comparison.md)**. It uses a fixed one-lot paper
-policy, not the live helm's confidence/Kelly path.
+policy, not the live helm's confidence/Kelly path. Research confidence defaults and
+RM-1865 calibration boundaries: **[docs/confidence-defaults.md](docs/confidence-defaults.md)** (GitHub #5).
 
 ## Architecture
 
