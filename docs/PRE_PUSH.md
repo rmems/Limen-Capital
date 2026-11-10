@@ -12,7 +12,7 @@ Use before creating/updating a **personal** GitHub remote (e.g. `rmems/...`).
 - [x] `quantum_navigator.jl` removed
 - [x] README states this is **not** the Limen-Neural org
 - [ ] Remote URL is **your** user/org — not `github.com/Limen-Neural/...`
-- [x] Limen-Neural deps are **git+rev** only (no sibling path clones required)
+- [x] Validated dependencies use crates.io releases + lockfile or **git+rev** pins (no sibling path clones required)
 - [ ] `git status` clean of secrets, runs, jsonl
 - [ ] Local: `cargo test` + `julia --project=brain test/runtests.jl`
 
@@ -24,7 +24,7 @@ Source + docs + fixtures + lockfile; no `target/`, no agent tooling, no vault DB
 
 ```text
 git clone <your-remote> Limen-Capital
-cd Limen-Capital/execution && cargo test   # fetches validated LN crates by rev
+cd Limen-Capital/execution && cargo test   # fetches validated releases and git pins
 cd ../brain && julia --project=. -e 'using Pkg; Pkg.instantiate()'
 julia --project=. test/runtests.jl
 ```

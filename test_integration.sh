@@ -47,9 +47,9 @@ for d in execution brain math strategy proto; do
     fi
 done
 
-# Test 2: validated git+rev pins — require git URL + full 40-char rev (sibling optional)
+# Test 2: validated releases + remaining git pins (sibling optional)
 echo ""
-echo "Test 2: validated git+rev library pins..."
+echo "Test 2: validated library releases and git pins..."
 # Portable full-SHA match (mawk lacks {40} interval quantifiers): exactly 40 hex chars.
 _HEX40='[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]'
 # Shared awk helper (one copy so Cargo + Julia gates cannot drift).
@@ -100,6 +100,33 @@ assert_cargo_git_rev() {
         fail "$crate missing exact git URL and/or full 40-char rev pin in execution/Cargo.toml"
     fi
 }
+assert_cargo_release() {
+    local crate="$1" version="$2" feature="$3"
+    if awk -v crate="$crate" -v version="$version" -v feature="$feature" '
+'"$_AWK_EXTRACT_QUOTED"'
+        BEGIN { dep = 0; gate = 0; defaults = 0; section = "" }
+        /^\[/ { section = strip_comment($0); next }
+        section == "[dependencies]" && $0 ~ "^"crate"[[:space:]]*=" {
+            block = strip_comment($0)
+            while (block !~ /}/ && (getline line) > 0) {
+                block = block " " strip_comment(line)
+            }
+            dep = (extract_quoted(block, "version") == version &&
+                block ~ /(^|[^A-Za-z0-9_])optional[[:space:]]*=[[:space:]]*true([[:space:]]|,|})/ &&
+                block !~ /(^|[^A-Za-z0-9_])(git|rev|path|registry)[[:space:]]*=/)
+        }
+        section == "[features]" {
+            line = strip_comment($0)
+            if (line ~ ("^" feature "[[:space:]]*=[[:space:]]*\\[[[:space:]]*\"dep:" crate "\"[[:space:]]*\\][[:space:]]*$")) gate = 1
+            if (line ~ /^default[[:space:]]*=[[:space:]]*\[[[:space:]]*\][[:space:]]*$/) defaults = 1
+        }
+        END { exit(dep && gate && defaults ? 0 : 1) }
+    ' "$ROOT/execution/Cargo.toml"; then
+        pass "$crate crates.io $version, optional feature $feature, empty defaults"
+    else
+        fail "$crate must use crates.io $version behind feature $feature with empty defaults"
+    fi
+}
 assert_julia_source_rev() {
     local pkg="$1" expected_url="$2"
     if awk -v pkg="$pkg" -v expected="$expected_url" -v hex40="$_HEX40" '
@@ -126,8 +153,11 @@ assert_julia_source_rev() {
     fi
 }
 assert_cargo_git_rev "metabolic-ledger" "https://github.com/rmems/metabolic-ledger"
-assert_cargo_git_rev "kinetic-signals" "https://github.com/rmems/kinetic-signals"
-assert_cargo_git_rev "neuromod" "https://github.com/Limen-Neural/neuromod"
+assert_cargo_release "kinetic-signals" "0.5.0" "kinetic"
+assert_cargo_release "neuromod" "0.7.0" "snn"
+assert_cargo_release "corpus-ipc" "0.2.1" "corpus-ipc"
+assert_cargo_release "axon-encoder" "0.6.0" "axon-encoder"
+assert_cargo_release "plasticity-lab" "0.2.1" "plasticity-lab"
 assert_julia_source_rev "LiquidCortex" "https://github.com/rmems/LiquidCortex.jl"
 assert_julia_source_rev "TemporalFocus" "https://github.com/rmems/NeuroPulse.jl"
 if [ -n "$LIMEN_NEURAL" ] && [ -d "$LIMEN_NEURAL" ]; then

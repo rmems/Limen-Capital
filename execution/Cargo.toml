@@ -2,20 +2,22 @@
 name = "spikenaut-execution-engine"
 version = "0.1.0"
 edition = "2021"
-# CI pins Rust 1.98.1; declared MSRV floor is 1.98.
-rust-version = "1.98"
+# CI pins Rust 1.99.0 to verify the declared MSRV.
+rust-version = "1.99"
 description = "Limen-Capital Rust muscle — ZMQ signal consumer, gates, metabolic-ledger ghost execution"
 license = "MIT"
 
 [dependencies]
 # Validated git+rev library pins — no sibling path clones
 metabolic-ledger = { git = "https://github.com/rmems/metabolic-ledger", rev = "91822f842c13b0a2b5d8d7b75160933fab2459d6" }
-# MarketPulse/ReadoutPacket: in-tree `src/binary_wire.rs` until corpus-ipc publishes them.
+# Wire contracts remain in-tree at `src/binary_wire.rs`; IPC migration is separate.
 
-# Optional validated packages (enable via features)
-kinetic-signals = { git = "https://github.com/rmems/kinetic-signals", rev = "ccc883107e6763969179f036ac33ae22dffdc865", optional = true }
-# neuromod has no rmems transfer; still hosted at Limen-Neural
-neuromod = { git = "https://github.com/Limen-Neural/neuromod", rev = "2a548da6006fedb732b07491b69023476b0cc339", optional = true }
+# Optional published packages (enable via features; resolved versions in Cargo.lock)
+kinetic-signals = { version = "0.5.0", optional = true }
+neuromod = { version = "0.7.0", optional = true }
+corpus-ipc = { version = "0.2.1", optional = true }
+axon-encoder = { version = "0.6.0", optional = true }
+plasticity-lab = { version = "0.2.1", optional = true }
 
 # ZMQ bridge for Julia → Rust signal flow
 zmq = "0.10"
@@ -57,6 +59,10 @@ default = []
 kinetic = ["dep:kinetic-signals"]
 # Reference LIF primitives (research helpers)
 snn = ["dep:neuromod"]
+# Dependency adoption only; runtime IPC/encoder/STDP wiring is separate.
+corpus-ipc = ["dep:corpus-ipc"]
+axon-encoder = ["dep:axon-encoder"]
+plasticity-lab = ["dep:plasticity-lab"]
 # Live micro-capital experiment: Robinhood Crypto adapter + decision loop (RM-2436).
 # Off by default so `cargo build` compiles no new dependencies.
 live-robinhood = ["dep:ed25519-dalek", "dep:base64", "dep:uuid", "dep:rand", "dep:toml"]
