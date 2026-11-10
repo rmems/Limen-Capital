@@ -752,6 +752,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
+name = "limen-execution"
+version = "0.1.0"
+dependencies = [
+ "axon-encoder",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "corpus-ipc",
+ "ed25519-dalek",
+ "kinetic-signals",
+ "metabolic-ledger",
+ "neuromod 0.7.0",
+ "plasticity-lab",
+ "rand 0.8.8",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zmq",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -787,7 +815,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "metabolic-ledger"
 version = "0.1.0"
-source = "git+https://github.com/rmems/metabolic-ledger?rev=91822f842c13b0a2b5d8d7b75160933fab2459d6#91822f842c13b0a2b5d8d7b75160933fab2459d6"
+source = "git+https://github.com/rmems/metabolic-ledger?rev=825d6a9a8683356104e856dd22d31d8cb22dae1b#825d6a9a8683356104e856dd22d31d8cb22dae1b"
 dependencies = [
  "chrono",
  "serde",
@@ -1388,34 +1416,6 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "limen-execution"
-version = "0.1.0"
-dependencies = [
- "axon-encoder",
- "base64 0.22.1",
- "bytes",
- "chrono",
- "corpus-ipc",
- "ed25519-dalek",
- "kinetic-signals",
- "metabolic-ledger",
- "neuromod 0.7.0",
- "plasticity-lab",
- "rand 0.8.8",
- "reqwest",
- "serde",
- "serde_json",
- "serial_test",
- "tempfile",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "zmq",
 ]
 
 [[package]]

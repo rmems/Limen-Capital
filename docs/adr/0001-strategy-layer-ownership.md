@@ -31,7 +31,7 @@ This ADR fixes the ownership contract before any dependency integration.
 | Sizing **proposal** | `rmems/DendriteTrader.jl` (`SizingModule`) |
 | Paper simulation and research execution engine | `rmems/DendriteTrader.jl` (`ExecutionEngine`, `Backtest`) |
 | Orchestration, wire adapters (ZMQ/`binary_wire`), systems measurement, dydx feed | `rmems/Limen-Capital` (`brain/`, `execution/`, `wire/`, `strategy/`) |
-| Fill application, persistent accounting, realized PnL, JSONL audit | `rmems/metabolic-ledger` (`GhostWallet`, `execute_buy`/`execute_sell`) |
+| Fill application, persistent accounting, realized PnL, JSONL audit | `rmems/metabolic-ledger` (`GhostWallet`, `apply_ghost_fill`) |
 | Transport schemas | `corpus-ipc` once it publishes `MarketPulse`/`ReadoutPacket`; until then in-tree `execution/src/binary_wire.rs` — corpus-ipc is generic transport, never a venue/trading engine |
 
 ## Sizing authority — exactly one per run
@@ -50,6 +50,15 @@ This ADR fixes the ownership contract before any dependency integration.
 - The authority is an explicit per-run selection, never implied by which
   libraries happen to be loaded. Applying two Kelly layers to one signal is a
   bug, not a compounding feature.
+
+RM-2439 enforces this on the legacy multi-asset ghost path:
+`process_signal` passes its accepted quantity and explicit simulated friction
+to `apply_ghost_fill`, never to the ledger's ATP/Kelly-sizing `execute_*`
+helpers. `Executed` requires a committed fill and reports the ledger's `f32`
+price/quantity. Flat sells, oversells, unfunded fills, and log-write failures
+are explicit rejections. Buy friction enters cost basis and is realized on
+sale. This is still the legacy floating-point ghost path, not the separate
+integer `PaperLedger` parity path.
 
 ## Identifiers, units, clocks
 
