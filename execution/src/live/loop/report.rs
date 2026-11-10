@@ -1,7 +1,7 @@
 //! Journal and logging presentation, separate from tick sequencing.
 
 use super::*;
-use crate::live::robinhood::types::BestBidAsk;
+use crate::live::alpaca::types::BestBidAsk;
 
 pub(super) fn start(
     cfg: &LiveConfig,

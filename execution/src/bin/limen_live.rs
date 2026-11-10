@@ -5,8 +5,8 @@
 //!            [--model ID] [--symbol PAIR]
 //! ```
 //!
-//! Requires `--features live-robinhood`. Secrets come from the environment:
-//! `ROBINHOOD_API_KEY`, `ROBINHOOD_PRIVATE_KEY` (and later `ANTHROPIC_API_KEY`).
+//! Requires `--features live-alpaca`. Secrets come from the environment:
+//! `APCA_API_KEY_ID`, `APCA_API_SECRET_KEY` (and later `ANTHROPIC_API_KEY`).
 //!
 //! `--once --paper` runs a single read-only tick: account, pair rules,
 //! holdings, bid/ask, decision and risk verdict, with no order submission.
@@ -27,13 +27,13 @@ struct Args {
 
 const USAGE: &str = "usage: limen-live [--config PATH] [--paper] [--once] [--max-ticks N] [--journal PATH] [--model ID] [--symbol PAIR]
 
-  --config PATH    TOML config (defaults: BTC-USD, paper, 900 s ticks, rules decider)
+  --config PATH    TOML config (defaults: AAPL, paper, 900 s ticks, rules decider)
   --paper          force paper mode (never submit orders)
   --once           single tick: account, pair rules, bid/ask, decision, risk verdict; no orders
   --max-ticks N    stop after N ticks (default: run until Ctrl-C or the daily-loss halt)
   --journal PATH   override journal_path
   --model ID       override the decider model id
-  --symbol PAIR    override the trading pair (BTC-USD | ETH-USD)
+  --symbol PAIR    override the trading pair (AAPL | SPY)
 ";
 
 fn parse_args(it: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -203,9 +203,9 @@ mod tests {
             "--model",
             "model-id",
             "--symbol",
-            "BTC-USD",
+            "AAPL",
             "--symbol",
-            "eth-usd",
+            "spy",
         ])
         .unwrap();
         assert_eq!(args.config.as_deref(), Some("run.toml"));
@@ -214,7 +214,7 @@ mod tests {
         assert_eq!(args.max_ticks, 7);
         assert_eq!(args.journal.as_deref(), Some("paper.md"));
         assert_eq!(args.model.as_deref(), Some("model-id"));
-        assert_eq!(args.symbol.as_deref(), Some("eth-usd"));
+        assert_eq!(args.symbol.as_deref(), Some("spy"));
     }
 
     #[test]
@@ -224,9 +224,9 @@ mod tests {
         assert!(!args.paper);
         assert!(!args.once);
         assert_eq!(load_config(&args).unwrap(), LiveConfig::default());
-        let args = parse(&["--symbol", "eth-usd", "--journal", "paper.md"]).unwrap();
+        let args = parse(&["--symbol", "spy", "--journal", "paper.md"]).unwrap();
         let cfg = load_config(&args).unwrap();
-        assert_eq!(cfg.symbol, "ETH-USD");
+        assert_eq!(cfg.symbol, "SPY");
         assert_eq!(cfg.journal_path, "paper.md");
         let args = parse(&["--symbol", "DOGE-USD"]).unwrap();
         assert!(load_config(&args).is_err());

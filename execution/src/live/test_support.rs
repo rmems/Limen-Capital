@@ -4,9 +4,6 @@
 //! route table. Enough for the venue client and the LLM decider; not a
 //! general HTTP implementation.
 
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine;
-use ed25519_dalek::{Signature, Verifier};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -27,35 +24,6 @@ impl RecordedRequest {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_str())
-    }
-
-    /// Verify the Robinhood `x-signature` header against `pub_key_b64`.
-    pub fn verify_signature(&self, api_key: &str, pub_key_b64: &str) -> bool {
-        let (Some(sig), Some(ts), Some(key)) = (
-            self.header("x-signature"),
-            self.header("x-timestamp"),
-            self.header("x-api-key"),
-        ) else {
-            return false;
-        };
-        if key != api_key {
-            return false;
-        }
-        let Ok(ts) = ts.parse::<u64>() else {
-            return false;
-        };
-        let Ok(vk) = crate::live::sign::verifying_key_from_b64(pub_key_b64) else {
-            return false;
-        };
-        let Ok(sig_bytes) = B64.decode(sig) else {
-            return false;
-        };
-        let Ok(sig) = Signature::from_slice(&sig_bytes) else {
-            return false;
-        };
-        let msg =
-            crate::live::sign::signing_message(api_key, ts, &self.path, &self.method, &self.body);
-        vk.verify(msg.as_bytes(), &sig).is_ok()
     }
 }
 
@@ -139,6 +107,10 @@ async fn serve_connection(
     };
     let (status, body) = route_response(&mut routes.lock().await, &request);
     requests.lock().await.push(request);
+    // Status zero simulates a lost response after the venue accepted the request.
+    if status == 0 {
+        return;
+    }
     let response = format!(
         "HTTP/1.1 {status} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         reason_phrase(status),

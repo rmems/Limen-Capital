@@ -4,15 +4,15 @@
 //! Live order submission is **not** wired yet (arrives in a later step behind
 //! `paper = false`); starting with `paper = false` is refused here.
 
+use crate::live::alpaca::AlpacaClient;
 use crate::live::config::{DeciderKind, LiveConfig, MarketSourceConfig, Secrets};
 use crate::live::decider::rules::RulesDecider;
 use crate::live::decider::Decider;
 use crate::live::journal::{Journal, JournalHeader, JournalRow};
-use crate::live::market::{MarketSource, RobinhoodMarket, SyntheticMarket};
+use crate::live::market::{AlpacaMarket, MarketSource, SyntheticMarket};
 use crate::live::market_state::MarketState;
 use crate::live::paper::{PaperBook, PaperEvent};
 use crate::live::risk::{self, PairRules, RiskInputs, RiskVerdict};
-use crate::live::robinhood::RobinhoodClient;
 use chrono::{DateTime, Datelike, Utc};
 use std::fmt;
 use std::time::Duration;
@@ -42,7 +42,7 @@ pub struct RunSummary {
 #[derive(Debug)]
 pub enum LoopError {
     Config(String),
-    Venue(Box<crate::live::robinhood::ClientError>),
+    Venue(Box<crate::live::alpaca::ClientError>),
     Journal(std::io::Error),
 }
 
@@ -58,8 +58,8 @@ impl fmt::Display for LoopError {
 
 impl std::error::Error for LoopError {}
 
-impl From<crate::live::robinhood::ClientError> for LoopError {
-    fn from(e: crate::live::robinhood::ClientError) -> Self {
+impl From<crate::live::alpaca::ClientError> for LoopError {
+    fn from(e: crate::live::alpaca::ClientError) -> Self {
         LoopError::Venue(Box::new(e))
     }
 }
@@ -198,7 +198,7 @@ impl Runner<'_> {
 
     async fn process_quote(
         &mut self,
-        quote: &crate::live::robinhood::types::BestBidAsk,
+        quote: &crate::live::alpaca::types::BestBidAsk,
         now: i64,
     ) -> Result<(), LoopError> {
         // Resting orders react before the decider sees available balances.
@@ -237,7 +237,7 @@ impl Runner<'_> {
 
     fn market_state(
         &self,
-        quote: &crate::live::robinhood::types::BestBidAsk,
+        quote: &crate::live::alpaca::types::BestBidAsk,
         now: i64,
     ) -> MarketState {
         let book = &self.parts.book;

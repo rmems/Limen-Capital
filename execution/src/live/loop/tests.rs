@@ -31,7 +31,7 @@ impl MarketSource for ScriptedMarket {
     }
     fn quote<'a>(&'a mut self, symbol: &'a str) -> crate::live::market::QuoteFuture<'a> {
         let (bid, ask) = self.0.pop_front().unwrap_or((100.0, 100.1));
-        let q = crate::live::robinhood::types::BestBidAsk {
+        let q = crate::live::alpaca::types::BestBidAsk {
             symbol: symbol.to_string(),
             bid,
             ask,
@@ -59,15 +59,13 @@ impl MarketSource for FailingMarket {
         let first = std::mem::replace(&mut self.0, false);
         Box::pin(async move {
             if first {
-                Ok(crate::live::robinhood::types::BestBidAsk {
+                Ok(crate::live::alpaca::types::BestBidAsk {
                     symbol: symbol.into(),
                     bid: 100.0,
                     ask: 100.1,
                 })
             } else {
-                Err(crate::live::robinhood::ClientError::NotFound(
-                    "quote".into(),
-                ))
+                Err(crate::live::alpaca::ClientError::NotFound("quote".into()))
             }
         })
     }
@@ -243,7 +241,7 @@ async fn refuses_live_mode_and_claude_decider_for_now() {
     let p = dir.path().join("refuse.md");
     let mut c = cfg(&p, 1);
     c.paper = false;
-    c.market = MarketSourceConfig::Robinhood;
+    c.market = MarketSourceConfig::Alpaca;
     let err = build_parts(&c, &Secrets::default()).await.unwrap_err();
     assert!(err.to_string().contains("not implemented"), "{err}");
     let mut c = cfg(&p, 1);
@@ -253,13 +251,13 @@ async fn refuses_live_mode_and_claude_decider_for_now() {
 }
 
 #[tokio::test]
-async fn robinhood_source_needs_secrets() {
+async fn alpaca_source_needs_secrets() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("secrets.md");
     let mut c = cfg(&p, 1);
-    c.market = MarketSourceConfig::Robinhood;
+    c.market = MarketSourceConfig::Alpaca;
     let err = build_parts(&c, &Secrets::default()).await.unwrap_err();
-    assert!(err.to_string().contains("ROBINHOOD_API_KEY"), "{err}");
+    assert!(err.to_string().contains("APCA_API_KEY_ID"), "{err}");
 }
 
 #[tokio::test]

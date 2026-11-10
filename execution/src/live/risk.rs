@@ -20,9 +20,9 @@
 //! rejected. Sizes are rounded to the pair's increments and the rounded
 //! notional must still clear the pair's minimum.
 
+use crate::live::alpaca::types::OrderSide;
 use crate::live::decider::{Action, Decision};
 use crate::live::market_state::MarketState;
-use crate::live::robinhood::types::{OrderSide, TradingPair};
 use serde::{Deserialize, Serialize};
 mod increments;
 mod reject;
@@ -94,19 +94,6 @@ pub struct PairRules {
     pub min_order_amount: Option<f64>,
     pub max_order_size: Option<f64>,
     pub is_api_tradable: bool,
-}
-
-impl From<&TradingPair> for PairRules {
-    fn from(p: &TradingPair) -> Self {
-        Self {
-            symbol: p.symbol.clone(),
-            asset_increment: p.asset_increment,
-            quote_increment: p.quote_increment,
-            min_order_amount: p.min_order_amount,
-            max_order_size: p.max_order_size,
-            is_api_tradable: p.is_api_tradable,
-        }
-    }
 }
 
 impl PairRules {
