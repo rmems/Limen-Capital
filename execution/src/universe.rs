@@ -32,6 +32,33 @@ pub struct TradeUniverse {
     pub hash: u64,
 }
 
+fn parse_symbols(raw: &str) -> Result<Vec<String>, String> {
+    let doc: toml::Value = raw.parse().map_err(|e| format!("parse universe: {e}"))?;
+    let arr = symbol_array(&doc)?;
+    let mut symbols = Vec::with_capacity(arr.len());
+    for entry in arr {
+        symbols.push(symbol_name(entry)?);
+    }
+    Ok(symbols)
+}
+
+fn symbol_array(doc: &toml::Value) -> Result<&Vec<toml::Value>, String> {
+    doc.get("symbols")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "universe.toml missing `symbols` array".to_string())
+}
+
+fn symbol_name(entry: &toml::Value) -> Result<String, String> {
+    let s = entry
+        .as_str()
+        .ok_or_else(|| "each symbol must be a string".to_string())?
+        .trim();
+    if s.is_empty() {
+        return Err("empty symbol in universe".into());
+    }
+    Ok(s.to_string())
+}
+
 impl TradeUniverse {
     pub fn new(symbols: Vec<String>) -> Result<Self, String> {
         if symbols.is_empty() {
@@ -50,25 +77,7 @@ impl TradeUniverse {
     pub fn load(path: &Path) -> Result<Self, String> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| format!("read universe {}: {e}", path.display()))?;
-        let doc: toml::Value = raw
-            .parse()
-            .map_err(|e| format!("parse universe {}: {e}", path.display()))?;
-        let arr = doc
-            .get("symbols")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| "universe.toml missing `symbols` array".to_string())?;
-        let mut symbols = Vec::with_capacity(arr.len());
-        for entry in arr {
-            let s = entry
-                .as_str()
-                .ok_or_else(|| "each symbol must be a string".to_string())?
-                .trim();
-            if s.is_empty() {
-                return Err("empty symbol in universe".into());
-            }
-            symbols.push(s.to_string());
-        }
-        Self::new(symbols)
+        Self::new(parse_symbols(&raw)?)
     }
 
     pub fn resolve_path() -> Result<PathBuf, String> {
