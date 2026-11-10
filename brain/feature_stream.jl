@@ -82,7 +82,7 @@ end
 """
     update_features!(fs, price, timestamp; spikes_cpu=nothing) -> FeatureSnapshot
 
-`price` — primary asset (e.g. DNX). `timestamp` — tick index as Float64.
+`price` — reference asset (index 0 in the runtime universe). `timestamp` — tick index as Float64.
 If `use_reflex` and `spikes_cpu` is a 28-vector, run FastReflex.
 """
 function update_features!(

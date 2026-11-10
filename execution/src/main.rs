@@ -18,10 +18,11 @@
 //!   cargo run --release
 //!   LIMEN_WIRE=json cargo run --release
 
+use spikenaut_execution_engine::universe::TradeUniverse;
 use spikenaut_execution_engine::wire::{
-    decode_readout, json_ipc_endpoint, market_endpoint, pulse_max_age_ns, readout_endpoint,
-    readout_to_trade_signal, resolve_fill_price, MarketPulse, MARKET_PULSE_BYTES,
-    READOUT_PACKET_BYTES,
+    classify_wire_frame, decode_market_pulse, decode_readout, json_ipc_endpoint,
+    load_trade_universe, market_endpoint, pulse_max_age_ns, readout_endpoint,
+    readout_to_trade_signal, resolve_fill_price, MarketPulse,
 };
 use spikenaut_execution_engine::{zmq_curve, ExecutionEngine, TradeSignal};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -99,27 +100,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn dispatch_readout_frame(
     bytes: &[u8],
+    universe: &Arc<TradeUniverse>,
     eng: &Arc<tokio::sync::Mutex<ExecutionEngine>>,
     pulse: &Arc<tokio::sync::Mutex<Option<MarketPulse>>>,
     unpriced: &Arc<AtomicU64>,
     max_age_ns: u64,
 ) {
-    let packet = match decode_readout(bytes) {
+    let packet = match decode_readout(bytes, universe) {
         Ok(p) => p,
         Err(e) => {
             error!("Readout decode failed: {e}");
             return;
         }
     };
-    let mut sig = readout_to_trade_signal(&packet, 0.0, 1.0, None);
+    let mut sig = readout_to_trade_signal(&packet, universe, 0.0, 1.0, None);
     let engine_clone = eng.clone();
     let pulse_clone = pulse.clone();
     let unpriced = unpriced.clone();
+    let universe_async = universe.clone();
     tokio::spawn(async move {
         let mut e = engine_clone.lock().await;
         let priced = {
             let p = pulse_clone.lock().await;
-            resolve_fill_price(p.as_ref(), &sig.ticker, now_ns(), max_age_ns)
+            resolve_fill_price(
+                p.as_ref(),
+                &universe_async,
+                &sig.ticker,
+                now_ns(),
+                max_age_ns,
+            )
         };
         match priced {
             Ok(px) => sig.price = px,
@@ -141,22 +150,30 @@ fn dispatch_readout_frame(
 
 fn process_binary_frame(
     bytes: &[u8],
+    universe: &Arc<TradeUniverse>,
     eng: &Arc<tokio::sync::Mutex<ExecutionEngine>>,
     pulse: &Arc<tokio::sync::Mutex<Option<MarketPulse>>>,
     unpriced: &Arc<AtomicU64>,
     max_age_ns: u64,
 ) {
-    match bytes.len() {
-        READOUT_PACKET_BYTES => {
-            dispatch_readout_frame(bytes, eng, pulse, unpriced, max_age_ns);
+    let kind = match classify_wire_frame(bytes) {
+        Ok(k) => k,
+        Err(e) => {
+            warn!("{e}");
+            return;
         }
-        MARKET_PULSE_BYTES => match spikenaut_execution_engine::wire::decode_market_pulse(bytes) {
+    };
+    match kind {
+        "readout_v2" | "readout_v1" => {
+            dispatch_readout_frame(bytes, universe, eng, pulse, unpriced, max_age_ns);
+        }
+        "market_v2" | "market_v1" => match decode_market_pulse(bytes, universe) {
             Ok(mp) => {
                 *pulse.blocking_lock() = Some(mp);
             }
             Err(e) => warn!("MarketPulse decode failed: {e}"),
         },
-        _ => warn!("Unexpected binary frame {} bytes", bytes.len()),
+        _ => warn!("Unhandled wire frame kind {kind}"),
     }
 }
 
@@ -165,6 +182,12 @@ async fn start_binary_listener(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let readout_ep = readout_endpoint();
     let market_ep = market_endpoint();
+    let universe = Arc::new(load_trade_universe()?);
+    info!(
+        "Trade universe: {} symbols (hash 0x{:016x})",
+        universe.n_assets(),
+        universe.hash
+    );
     let max_age_ns = pulse_max_age_ns()?;
     // Last MarketPulse; `None` until the feed delivers one. Fills are refused
     // without a fresh pulse rather than priced at a placeholder.
@@ -185,6 +208,8 @@ async fn start_binary_listener(
     let stop_flag = stop.clone();
     let unpriced_c = unpriced.clone();
     let max_age = max_age_ns;
+    let universe_curve = universe.clone();
+    let universe_plain = universe.clone();
 
     let listener = if curve_on {
         let client_sec = zmq_curve::client_secret_key_z85()?;
@@ -234,7 +259,7 @@ async fn start_binary_listener(
                 let Ok(bytes) = sock.recv_bytes(0) else {
                     continue;
                 };
-                process_binary_frame(&bytes, &eng, &pulse, &unpriced_c, max_age);
+                process_binary_frame(&bytes, &universe_curve, &eng, &pulse, &unpriced_c, max_age);
             }
         })
     } else {
@@ -258,7 +283,7 @@ async fn start_binary_listener(
                         return;
                     }
                 };
-                process_binary_frame(&bytes, &eng, &pulse, &unpriced_c, max_age);
+                process_binary_frame(&bytes, &universe_plain, &eng, &pulse, &unpriced_c, max_age);
             }
         })
     };

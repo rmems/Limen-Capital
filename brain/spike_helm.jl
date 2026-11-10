@@ -67,7 +67,7 @@ function check_cuda_memory()
         return true
     end
 
-    required = MC_PATHS * MC_HORIZON * 7 * 4  # 4 bytes per float32
+    required = MC_PATHS * MC_HORIZON * N_ASSETS * 4  # 4 bytes per float32
     println("[brain] Memory check: MC requires $(round(required/1e9, digits=2))GB, available $(round(available/1e9, digits=2))GB")
 
     if required > available * 0.9  # Leave 10% buffer
@@ -80,13 +80,19 @@ end
 # ─── Input Validation ───────────────────────────────────────────────────────────
 
 function validate_market_pulse(data::Vector{UInt8})
-    if length(data) != 120
-        @warn "Invalid MarketPulse size: $(length(data)) bytes, expected 120"
+    kind = classify_wire_frame(data)
+    if kind ∉ (:market_v2, :market_v1)
+        @warn "Invalid MarketPulse frame (kind=$kind, len=$(length(data)))"
         return false
     end
     
-    # Timestamp is Unix nanoseconds (MarketPulse wire layout)
-    timestamp_ns = reinterpret(UInt64, data[1:8])[1]
+    # v2 timestamp follows the 8-byte header; v1 starts at byte 1.
+    ts_off = kind == :market_v2 ? WIRE_HEADER_BYTES + 1 : 1
+    if length(data) < ts_off + 7
+        @warn "MarketPulse frame too short for timestamp"
+        return false
+    end
+    timestamp_ns = reinterpret(UInt64, data[ts_off:ts_off+7])[1]
     current_ns = time_ns()
     # Allow large skew (sim / research clocks); only flag absurd multi-day deltas
     hour_ns = UInt64(3_600) * UInt64(1_000_000_000)
@@ -155,9 +161,8 @@ The buffer is pre-allocated in main() and reused every tick (zero allocation).
 function publish_readout!(buf::Vector{UInt8}, pub::ZMQ.Socket,
                           output::Vector{Float32}, relevance::Vector{Float32},
                           tick::Int64)
-    # NervousWire v1: reuse pack_readout (market_types.jl via naut_core)
     packed = pack_readout(tick, output, relevance)
-    copyto!(buf, 1, packed, 1, 88)
+    copyto!(buf, 1, packed, 1, length(packed))
     ZMQ.send(pub, buf)
 end
 
@@ -170,7 +175,7 @@ function main()
     println("║  Spikenaut V3 Enhanced Brain — 4-Lobe Ensemble × 65,536 Neurons ║")
     println("║  RTX 5080 (16GB) │ OU-SDE + STDP │ Secure ZMQ IPC           ║")
     println("║  MC: 1500000 paths × 200 horizon │ Fan-Boost ~13 GB          ║")
-    println("║  Mining-chain SNN │ 120-byte wire │ DNX/Quai/Qubic/KAS/XMR ║")
+    println("║  Market-neutral SNN │ v2 wire │ $(N_ASSETS) symbols │ hash=$(string(TRADE_UNIVERSE.hash, base=16)) ║")
     println("╚══════════════════════════════════════════════════════════════╝")
 
     # ── Security & Resource Checks ─────────────────────────────────────────────────
@@ -183,7 +188,7 @@ function main()
     println("[brain] CUDA memory: ", round(CUDA.available_memory() / 1e9, digits=2), " GB available")
 
     # ── Reservoir façade (LiquidCortex if available, else naut_core) ─────────
-    res = build_reservoir(; n_in=28, n_out=16)
+    res = build_reservoir(; n_in=N_IN, n_out=N_OUT)
     ensemble = reservoir_ensemble(res)  # NERO / vault still expect ensemble
     println("[brain] reservoir status: ", reservoir_status(res))
 
@@ -195,22 +200,20 @@ function main()
 
     # ── Initialize Market Encoder & Vault Recorder (Augmentation) ────────────
     println("[brain] Activating Neuromorphic Augmentation...")
-    encoder = MarketEncoder(7; delta=0.0005f0)
+    encoder = MarketEncoder(N_ASSETS; delta=0.0005f0)
     features = FeatureStream(; base_delta=0.0005f0)
     println("[brain] FeatureStream: Hawkes self-excitation → encoder δ + Scalper reflex")
     vault = VaultRecorder(100) # Commit to DuckDB every 100 ticks
 
     # ── Pre-allocate 88-byte readout buffer (zero allocation in hot loop) ────
-    readout_buf = Vector{UInt8}(undef, 88)
+    readout_buf = Vector{UInt8}(undef, readout_frame_v2_len(N_PAIRS))
 
     # ── Volatility estimates for Monte Carlo (initialized to default) ────────
-    # Volatility estimates per mining chain (updated from covariance every 50 ticks)
-    # DNX=high, Quai=high, Qubic=very high, Kaspa=high, Monero=low (mature), Ocean=med, Verus=high
-    vol_estimates = Float32[0.05, 0.06, 0.08, 0.06, 0.02, 0.04, 0.07]  # DNX,Quai,Qubic,Kaspa,Monero,Ocean,Verus
+    vol_estimates = fill(0.05f0, N_ASSETS)
 
     # ── Optional MC buffer (disabled when LIMEN_MC_PATHS=0) ─────────────────
     mc_result_buf = if MC_PATHS > 0
-        CUDA.zeros(Float32, MC_PATHS, MC_HORIZON, 7)
+        CUDA.zeros(Float32, MC_PATHS, MC_HORIZON, N_ASSETS)
     else
         nothing
     end
@@ -246,8 +249,8 @@ function main()
             end
             tick += 1
 
-            # ── 2.5 FeatureStream (Hawkes on DNX price) ───────────────────────
-            snap = update_features!(features, Float64(pulse.dnx_price), Float64(tick))
+            ref_px = sum(Float64, pulse.prices) / max(length(pulse.prices), 1)
+            snap = update_features!(features, ref_px, Float64(tick))
             apply_encoder_gain!(encoder, snap)
             # Inject Hawkes excess into liquidity_delta slot for Scalper flash-learning
             # (MarketPulse is immutable struct — pass via reservoir_step kwargs)
@@ -278,8 +281,8 @@ function main()
                         # Extract diagonal variance from subsampled covariance
                         diag_var = Array(CUDA.diag(C))
                         # Map subsampled neuron groups to asset volatility proxies
-                        sub_group = div(COV_SUBSAMPLE, 7)
-                        for a in 1:7
+                        sub_group = max(div(COV_SUBSAMPLE, N_ASSETS), 1)
+                        for a in 1:N_ASSETS
                             start_idx = (a - 1) * sub_group + 1
                             end_idx = min(a * sub_group, length(diag_var))
                             if end_idx >= start_idx
@@ -295,11 +298,7 @@ function main()
             # ── 6. Optional Monte Carlo (only if LIMEN_MC_PATHS > 0) ──────────
             if mc_result_buf !== nothing && tick % MC_INTERVAL == 0
                 mc_tick += 1
-                current_prices = Float32[
-                    pulse.dnx_price, pulse.quai_price, pulse.qubic_price,
-                    pulse.kaspa_price, pulse.monero_price,
-                    pulse.ocean_price, pulse.verus_price
-                ]
+                current_prices = copy(pulse.prices)
                 if any(abs.(current_prices) .> 0.001f0)
                     monte_carlo_paths!(mc_result_buf, current_prices, vol_estimates)
                 end
