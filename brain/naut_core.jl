@@ -8,7 +8,7 @@
 #   Varying time constants: τ_m ∈ {10ms, 25ms, 50ms, 100ms}
 #   Xavier/Glorot W_out initialization (breaks zero-readout deadlock)
 #   Sparse connectivity (1% connection probability, Float16 weights)
-#   STDP covariance learning rule
+#   Balanced pair STDP readout learning
 #   Rolling 1,000-tick spike history for deep temporal covariance
 #   Global inhibition from hardware proprioception
 #
@@ -34,6 +34,7 @@ using LinearAlgebra
 using Statistics
 using Random
 using Printf
+include(joinpath(@__DIR__, "model_math.jl"))
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -62,8 +63,8 @@ const V_RESET = -70.0f0       # Post-spike reset (mV)
 const SIGMA = 2.0f0         # OU noise amplitude
 const REFRAC_T = 5             # Refractory period (timesteps)
 
-# ── STDP Covariance Learning Parameters ──────────────────────────────────────
-# ΔWᵢⱼ = η · Cᵢⱼ · exp(-|Δt| / τ_spike)
+# ── STDP Learning Parameters ─────────────────────────────────────────────────
+# ΔW_out[i,j] = η · (post[i] · trace_pre[j] - trace_post[i] · pre[j])
 
 const ETA = 0.001f0       # Learning rate
 const TAU_SPIKE = 20.0f0        # STDP time constant
@@ -121,7 +122,7 @@ mutable struct SparseBrain
 
     # ── STDP eligibility traces ──────────────────────────────────────────────
     trace_pre::CuVector{Float32}  # Pre-synaptic trace
-    trace_post::CuVector{Float32} # Post-synaptic trace
+    trace_post::CuVector{Float32} # Post-synaptic trace (N_OUT output events)
 
     # ── Readout state ────────────────────────────────────────────────────────
     output::CuVector{Float32}     # 16-element readout
@@ -150,7 +151,8 @@ Initialize a 65,536-neuron sparse CUDA reservoir lobe.
 
 Weight initialization:
   - W_recurrent: Sparse CSC, 1% connectivity, Float16
-    Spectral radius controlled via scaling: ||W|| ≈ 0.9 (echo state property)
+    Random-matrix spectral-radius proxy ||W||_F / √N scaled to ≈ 0.9.
+    This is not an eigenvalue bound or a proof of the echo-state property.
   - W_in: Dense Float32, Xavier initialization √(2/N_IN)
   - W_out: Dense Float32, Xavier/Glorot initialization √(2/N)
     (Breaks zero-readout deadlock — reservoir produces signals from tick 1)
@@ -174,15 +176,14 @@ function SparseBrain(tau_m::Float32; name::String="default")
         W_cpu[i, i] = Float16(0)
     end
 
-    # Scale for spectral radius ≈ 0.9 (echo state property)
-    frob = norm(W_cpu)
+    # Zero-mean random-matrix proxy: ||W||_F / √N, not RMS nonzero weight.
     actual_nnz = nnz(W_cpu)
-    spectral_approx = frob / sqrt(actual_nnz)
+    spectral_approx = spectral_radius_proxy(W_cpu)
     target_rho = 0.9f0
     scale_factor = target_rho / max(spectral_approx, 1e-6)
     W_cpu .*= Float16(scale_factor)
 
-    println("[brain:$name] W_sparse: $(actual_nnz) nnz, ρ≈$(round(target_rho, digits=2))")
+    println("[brain:$name] W_sparse: $(actual_nnz) nnz, ρ_proxy≈$(round(spectral_radius_proxy(W_cpu), digits=3)) (not a bound)")
 
     # Transfer to GPU as CuSparseMatrixCSC
     W_gpu = CUDA.CUSPARSE.CuSparseMatrixCSC(W_cpu)
@@ -204,7 +205,7 @@ function SparseBrain(tau_m::Float32; name::String="default")
 
     # ── 5. STDP traces ──────────────────────────────────────────────────────
     trace_pre = CUDA.zeros(Float32, N)
-    trace_post = CUDA.zeros(Float32, N)
+    trace_post = CUDA.zeros(Float32, N_OUT)
 
     # ── 6. Output ────────────────────────────────────────────────────────────
     output = CUDA.zeros(Float32, N_OUT)
@@ -229,7 +230,7 @@ function SparseBrain(tau_m::Float32; name::String="default")
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Simulation Step: OU-SDE Dynamics + STDP Learning
+# Simulation Step: OU-SDE Dynamics + Balanced STDP Learning
 # ═══════════════════════════════════════════════════════════════════════════════
 
 """
@@ -244,7 +245,7 @@ Execute one simulation timestep:
 2. **OU-SDE Dynamics**: 
    dV_j = ((V_rest - V_j)/τ_m + Σᵢ Wᵢⱼ·Sᵢ(t) + W_in·u) dt + σ·dWₜ
 3. **Spike Detection**: V_j > V_thresh_dynamic → spike, reset to V_reset
-4. **STDP Update**: ΔWᵢⱼ = η · trace_pre_i · trace_post_j (covariance rule)
+4. **STDP Update**: ΔWᵢⱼ = η · (post_i · trace_pre_j - trace_post_i · pre_j)
    reflex_eta allows Scalper lobe to "flash-learn" on liquidity events
 5. **Readout**: y = W_out · S (weighted spike count)
 """
@@ -302,22 +303,11 @@ function step!(brain::SparseBrain, u::CuVector{Float32};
         brain.hist_full = true
     end
 
-    # ── 5. STDP Covariance Learning (reflex_eta enables flash-learning) ─────
-    brain.trace_pre .= brain.trace_pre .* (1.0f0 - DT / TAU_TRACE) .+ brain.S
-    brain.trace_post .= brain.trace_post .* (1.0f0 - DT / TAU_TRACE) .+ brain.S
-
-    # STDP weight update on W_out every 10 ticks (Hebbian readout rule):
-    # ΔW_out[i,j] = reflex_eta * S_out[i] * trace_pre[j]
-    # reflex_eta > ETA for Scalper lobe during liquidity events → "flash-learning"
-    if brain.tick_count % 10 == 0
-        S_out = brain.output .> 0.0f0
-        dW_out = reflex_eta .* (Float32.(S_out) * brain.trace_pre')
-        brain.W_out .+= dW_out
-        clamp!(brain.W_out, -W_MAX, W_MAX)
-    end
-
-    # ── 6. Readout Layer ─────────────────────────────────────────────────────
-    brain.output .= brain.W_out * brain.S
+    # ── 5–6. Balanced STDP + current-tick readout ──────────────────────────
+    # Both traces advance every tick; learning retains the 10-tick cadence.
+    update_readout!(brain.W_out, brain.trace_pre, brain.trace_post, brain.S, brain.output;
+        decay=1.0f0 - DT / TAU_TRACE, eta=reflex_eta, w_max=W_MAX,
+        learn=brain.tick_count % 10 == 0)
 
     CUDA.synchronize()
     return nothing

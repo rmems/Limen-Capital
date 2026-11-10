@@ -2,6 +2,7 @@
 
 using Test
 using Random
+using LinearAlgebra
 
 const BRAIN = dirname(@__DIR__)
 
@@ -146,5 +147,7 @@ end
 end
 
 include(joinpath(@__DIR__, "wire_hardening.jl"))
+include(joinpath(@__DIR__, "model_math.jl"))
+include(joinpath(@__DIR__, "model_math_comparison.jl"))
 
 println("All Capital unit tests finished.")

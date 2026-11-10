@@ -132,8 +132,13 @@ refused and logged — never filled at a placeholder price.
 
 ```bash
 cd brain/
-julia --project=. spike_helm.jl
+LIMEN_SEED=42 julia --project=. spike_helm.jl
 ```
+
+The live helm logs `LIMEN_SEED` (default `42`) and seeds both host and CUDA RNGs
+before reservoir initialization. Replay also requires the same accepted pulse
+sequence, configuration, backend, Julia/package versions and GPU stack.
+`LIMEN_MC_PATHS=0` disables both MC paths and their covariance workload.
 
 ## Signal Pipeline
 
@@ -174,10 +179,18 @@ See `brain/feature_stream.jl`.
 dV = ((V_rest - V) / τ_m + W_rec·S + W_in·u) dt + σ·dW
 ```
 
-**STDP Covariance Learning:**
+**Local `naut_core` readout STDP (RM-2443):**
 ```
-ΔW = η · trace_pre · trace_post
+ΔW_out[i,j] = η · (post[i] · trace_pre[j] - trace_post[i] · pre[j])
 ```
+
+`post` is the current positive-readout event; traces decay before learning and
+receive current events afterwards. Both potentiation and depression run every
+10 ticks, with weights clamped to ±1. Recurrent initialization uses the random
+matrix proxy `||W||_F / sqrt(N) ≈ 0.9`, not RMS nonzero weight. This estimate does
+not guarantee echo-state stability. These changes invalidate earlier local-model
+results. See the [fixed-seed before/after comparison](docs/brain-model-math.md).
+The optional LiquidCortex backend keeps its pinned upstream learning rules.
 
 **Global Inhibition ("Cortisol"):**
 - GPU temp > 75°C → raise spike threshold
