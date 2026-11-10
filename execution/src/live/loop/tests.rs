@@ -1,5 +1,6 @@
 use super::*;
 use crate::live::config::MarketSourceConfig;
+use chrono::TimeZone;
 
 mod notifications;
 
@@ -240,20 +241,178 @@ async fn max_size_buy_never_drives_paper_cash_negative() {
 }
 
 #[tokio::test]
-async fn refuses_live_mode_and_claude_decider_for_now() {
+async fn live_mode_stays_refused_even_with_a_valid_claude_decider() {
+    use crate::live::test_support::claude::{claude_cfg, TEST_KEY};
     let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("refuse.md");
-    let mut c = cfg(&p, 1);
+    let mut c = claude_cfg("http://127.0.0.1:9", dir.path());
     c.paper = false;
     c.market = MarketSourceConfig::Robinhood;
-    let err = build_parts(&c, &Secrets::default()).await.unwrap_err();
+    let secrets = Secrets {
+        anthropic_api_key: Some(TEST_KEY.into()),
+        ..Default::default()
+    };
+    let err = build_parts(&c, &secrets).await.unwrap_err();
     assert!(err.to_string().contains("not implemented"), "{err}");
-    let mut c = cfg(&p, 1);
-    c.decider = DeciderKind::Claude;
-    let err = build_parts(&c, &Secrets::default()).await.unwrap_err();
-    assert!(err.to_string().contains("claude"), "{err}");
+    // The ledger is not even opened when live mode is refused.
+    assert!(!std::path::Path::new(&c.llm.ledger_path).exists());
 }
 
+#[tokio::test]
+async fn claude_decider_needs_its_key_and_budget_config() {
+    use crate::live::test_support::claude::{claude_cfg, TEST_KEY};
+    let dir = tempfile::tempdir().unwrap();
+    let c = claude_cfg("http://127.0.0.1:9", dir.path());
+    let err = build_parts(&c, &Secrets::default()).await.unwrap_err();
+    assert!(err.to_string().contains("ANTHROPIC_API_KEY"), "{err}");
+    let secrets = Secrets {
+        anthropic_api_key: Some(TEST_KEY.into()),
+        ..Default::default()
+    };
+    let parts = build_parts(&c, &secrets).await.unwrap();
+    assert_eq!(parts.decider.name(), "claude");
+    drop(parts);
+    let mut c = claude_cfg("http://127.0.0.1:9", dir.path());
+    c.llm.max_llm_cost_usd_total = None;
+    let err = build_parts(&c, &secrets).await.unwrap_err();
+    assert!(err.to_string().contains("max_llm_cost_usd_total"), "{err}");
+}
+
+async fn claude_parts(
+    c: &LiveConfig,
+    clock: &crate::live::test_support::claude::TestClock,
+    quotes: &[(f64, f64)],
+) -> LoopParts {
+    use crate::live::decider::budget::FileStore;
+    use crate::live::test_support::claude::TEST_KEY;
+    let mut rules_cfg = c.clone();
+    rules_cfg.decider = DeciderKind::Rules;
+    let mut parts = scripted_parts(&rules_cfg, quotes, 10.0).await;
+    let store = FileStore::open(&c.llm.ledger_path).unwrap();
+    parts.decider =
+        Box::new(ClaudeDecider::with_store(c, TEST_KEY, Box::new(store), clock.clock()).unwrap());
+    parts
+}
+
+#[tokio::test]
+async fn claude_decisions_are_risk_gated_and_journaled_with_usage_and_cost() {
+    use crate::live::test_support::claude::*;
+    use crate::live::test_support::MockServer;
+    let server = MockServer::start(vec![messages_route(vec![
+        (200, decision("buy", 2.0, "dip, small entry")),
+        (200, decision("buy", 50.0, "oversized")),
+        (500, "{}".into()),
+    ])])
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = claude_cfg(&server.base_url(), dir.path());
+    c.risk.min_tick_interval_secs = 1;
+    c.llm.max_retries = 0;
+    let clock = TestClock::new();
+    let parts = claude_parts(
+        &c,
+        &clock,
+        &[(100.0, 100.1), (100.0, 100.1), (100.0, 100.1)],
+    )
+    .await;
+    let s = run_with_parts(
+        &c,
+        &RunOptions {
+            once: false,
+            max_ticks: 3,
+        },
+        parts,
+    )
+    .await
+    .unwrap();
+    assert_eq!(s.ticks, 3);
+    assert_eq!(s.orders_placed, 1, "{s:?}");
+    let text = std::fs::read_to_string(&c.journal_path).unwrap();
+    assert!(
+        text.contains("decision_model=claude-sonnet-5-5 helper_model=off"),
+        "{text}"
+    );
+    assert!(text.contains("dip, small entry"));
+    assert!(text.contains("approved buy"));
+    assert!(
+        text.contains("rejected:"),
+        "oversized buy is refused by risk: {text}"
+    );
+    assert!(
+        text.contains("decider claude-sonnet-5-5 ok in=1000 out=200 cache_r=0 cache_w=0 $0.004000"),
+        "{text}"
+    );
+    assert!(text.contains("| 0.004000 |"));
+    // The failed tick holds with the error, with no rules fallback.
+    let last = text.lines().last().unwrap();
+    assert!(
+        last.contains("| hold |") && last.contains("decider_error"),
+        "{last}"
+    );
+    assert!(!text.contains("warming_up") && !text.contains("flat,"));
+    assert!(!text.contains("PRIVATE-THOUGHT") && !text.contains(TEST_KEY));
+}
+
+#[tokio::test]
+async fn expired_llm_budget_leaves_protective_handling_working() {
+    use crate::live::risk::ApprovedOrder;
+    use crate::live::robinhood::types::OrderSide;
+    use crate::live::test_support::claude::*;
+    use crate::live::test_support::MockServer;
+    let server = MockServer::start(vec![]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let c = claude_cfg(&server.base_url(), dir.path());
+    let clock = TestClock::at(chrono::Utc.with_ymd_and_hms(2026, 11, 14, 0, 0, 0).unwrap());
+    let mut parts = claude_parts(&c, &clock, &[(100.0, 100.1); 4]).await;
+    // A resting buy far below the market: it must go stale and be cancelled.
+    parts.book.place(
+        &ApprovedOrder {
+            client_order_id: "c8f53536-d7b4-44fd-8076-cac31e8f3880".into(),
+            symbol: "BTC-USD".into(),
+            side: OrderSide::Buy,
+            limit_price: 50.0,
+            asset_qty: 0.02,
+            notional_usd: 1.0,
+            limit_price_str: "50.00".into(),
+            asset_qty_str: "0.02".into(),
+        },
+        0,
+    );
+    let s = run_with_parts(
+        &c,
+        &RunOptions {
+            once: false,
+            max_ticks: 4,
+        },
+        parts,
+    )
+    .await
+    .unwrap();
+    assert!(s.cancels >= 1, "{s:?}");
+    assert!(
+        server.requests().await.is_empty(),
+        "no paid call after expiry"
+    );
+    let text = std::fs::read_to_string(&c.journal_path).unwrap();
+    assert!(text.contains("no new paid calls"), "{text}");
+
+    // The daily-loss halt also fires regardless of the LLM state.
+    let dir = tempfile::tempdir().unwrap();
+    let c = claude_cfg(&server.base_url(), dir.path());
+    let mut parts = claude_parts(&c, &clock, &[(100.0, 100.1)]).await;
+    parts.book.realized_pnl_usd = -5.0;
+    parts.day_start_realized = Some(0.0);
+    let s = run_with_parts(
+        &c,
+        &RunOptions {
+            once: false,
+            max_ticks: 3,
+        },
+        parts,
+    )
+    .await
+    .unwrap();
+    assert_eq!(s.halted_reason.as_deref(), Some("daily_loss_breached"));
+}
 #[tokio::test]
 async fn robinhood_source_needs_secrets() {
     let dir = tempfile::tempdir().unwrap();

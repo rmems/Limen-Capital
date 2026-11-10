@@ -1,15 +1,23 @@
 //! Decision contract. Deciders are **advisory**: they propose an action and a
-//! size; `risk::check` owns execution and may reject or shrink nothing — it
-//! only approves or rejects.
+//! size; `risk::check` owns execution and only approves or rejects.
+//!
+//! A decider error never falls back to another decider or model: the loop
+//! journals the error and holds that tick. Protective handling (stale-order
+//! cancels, the daily-loss halt) runs in the loop independent of any decider.
 
+pub mod budget;
+pub mod claude;
+pub mod helper;
+pub mod llm;
 pub mod rules;
 
 use crate::live::market_state::MarketState;
+use budget::{BudgetError, Role};
+use llm::Usage;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Action {
@@ -77,36 +85,124 @@ impl Decision {
 
 #[derive(Debug)]
 pub enum DeciderError {
-    /// Transport / venue failure; the loop falls back to the rules decider.
+    /// Transport failure or API error status; the loop holds this tick.
     Http(String),
-    /// The model answered but not in the agreed schema.
+    /// No response within the per-attempt timeout.
+    Timeout {
+        after_ms: u64,
+    },
+    /// The model answered but not with exactly one valid decision tool call.
     Parse {
         raw: String,
         detail: String,
     },
-    /// Per-day LLM budget reached; the loop idles.
-    BudgetExhausted {
-        spent_usd: f64,
-        cap_usd: f64,
+    /// The decision would act on a quote older than the freshness deadline.
+    Stale {
+        detail: String,
     },
+    /// A 200 response without usable `usage`; paid calls halt.
+    MissingUsage(String),
+    /// No configured price for the model or tier; paid calls halt.
+    Pricing(String),
+    /// Prompt above `llm.max_input_tokens`; nothing was sent.
+    PromptTooLarge {
+        estimated_tokens: u64,
+        limit: u64,
+    },
+    /// Budget, expiry, halt, or ledger persistence refused the call.
+    Budget(BudgetError),
     Other(String),
+}
+
+impl DeciderError {
+    /// Short stable tag for the journal.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            DeciderError::Http(_) => "http",
+            DeciderError::Timeout { .. } => "timeout",
+            DeciderError::Parse { .. } => "parse",
+            DeciderError::Stale { .. } => "stale",
+            DeciderError::MissingUsage(_) => "missing_usage",
+            DeciderError::Pricing(_) => "missing_pricing",
+            DeciderError::PromptTooLarge { .. } => "prompt_too_large",
+            DeciderError::Budget(BudgetError::Expired { .. }) => "expired",
+            DeciderError::Budget(_) => "budget",
+            DeciderError::Other(_) => "other",
+        }
+    }
 }
 
 impl fmt::Display for DeciderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DeciderError::Http(e) => write!(f, "decider http: {e}"),
+            DeciderError::Timeout { after_ms } => write!(f, "decider timeout after {after_ms} ms"),
             DeciderError::Parse { detail, .. } => write!(f, "decider parse_error: {detail}"),
-            DeciderError::BudgetExhausted { spent_usd, cap_usd } => write!(
-                f,
-                "llm budget exhausted: spent ${spent_usd:.4} of ${cap_usd:.2} today"
-            ),
+            DeciderError::Stale { detail } => write!(f, "decision stale: {detail}"),
+            DeciderError::MissingUsage(m) => write!(f, "missing usage: {m}"),
+            DeciderError::Pricing(m) => write!(f, "missing pricing: {m}"),
+            DeciderError::PromptTooLarge {
+                estimated_tokens,
+                limit,
+            } => write!(f, "prompt ~{estimated_tokens} tokens > limit {limit}"),
+            DeciderError::Budget(e) => write!(f, "llm budget: {e}"),
             DeciderError::Other(e) => write!(f, "decider: {e}"),
         }
     }
 }
 
 impl std::error::Error for DeciderError {}
+
+/// Audit record for one logical LLM call (retries folded in). Carries no
+/// secrets and no thinking content.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LlmCallReport {
+    pub role: Role,
+    pub model: String,
+    pub attempts: u32,
+    pub usage: Usage,
+    pub cost_usd: f64,
+    pub latency_ms: u64,
+    pub outcome: String,
+    /// Sanitized helper note (helper role only).
+    pub note: Option<String>,
+}
+
+impl LlmCallReport {
+    pub fn new(role: Role, model: &str) -> Self {
+        Self {
+            role,
+            model: model.to_string(),
+            attempts: 0,
+            usage: Usage::default(),
+            cost_usd: 0.0,
+            latency_ms: 0,
+            outcome: String::new(),
+            note: None,
+        }
+    }
+
+    pub fn summary(&self) -> String {
+        let u = &self.usage;
+        let mut s = format!(
+            "{} {} {} in={} out={} cache_r={} cache_w={} ${:.6} {}ms x{}",
+            self.role,
+            self.model,
+            self.outcome,
+            u.input_tokens,
+            u.output_tokens,
+            u.cache_read_input_tokens,
+            u.cache_creation_input_tokens,
+            self.cost_usd,
+            self.latency_ms,
+            self.attempts
+        );
+        if let Some(note) = &self.note {
+            s.push_str(&format!(" note=\"{note}\""));
+        }
+        s
+    }
+}
 
 /// Boxed future so the trait stays object-safe without an `async_trait` dependency.
 pub type DecideFuture<'a> =
@@ -124,12 +220,16 @@ pub trait Decider: Send {
         recent_journal: &'a [String],
     ) -> DecideFuture<'a>;
 
-    /// Estimated LLM spend so far this UTC day, in USD (0 for non-LLM deciders).
+    /// LLM spend (committed plus reserved) this UTC day, in USD (0 for non-LLM deciders).
     fn llm_cost_today_usd(&self) -> f64 {
         0.0
     }
-}
 
+    /// LLM call audit records produced since the last call.
+    fn take_llm_reports(&mut self) -> Vec<LlmCallReport> {
+        Vec::new()
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

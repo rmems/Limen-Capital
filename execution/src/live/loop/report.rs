@@ -24,6 +24,18 @@ pub(super) fn start(
             DeciderKind::Rules => None,
         },
         limits: cfg.risk.clone(),
+        llm: match cfg.decider {
+            DeciderKind::Claude => Some(format!(
+                "decision_model={} helper_model={} effort=medium max_llm_cost_usd_total={} max_llm_cost_usd_per_day={} credit_expiry={} ledger={}",
+                cfg.model,
+                cfg.helper_model.as_deref().unwrap_or("off"),
+                cfg.llm.max_llm_cost_usd_total.unwrap_or(0.0),
+                cfg.risk.max_llm_cost_usd_per_day,
+                cfg.llm.credit_expiry.as_deref().unwrap_or("-"),
+                cfg.llm.ledger_path,
+            )),
+            DeciderKind::Rules => None,
+        },
     })?;
     info!(
         "limen-live start: mode={} market={} symbol={} decider={} journal={} tick_interval={}s max_ticks={}",

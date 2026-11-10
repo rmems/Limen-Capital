@@ -1,0 +1,65 @@
+# limen-live example: Claude decider (RM-2461).
+#
+#   cargo run --features live-robinhood --bin limen-live -- --config config/live.example.toml --paper --once
+#
+# Secrets come from the environment only: ROBINHOOD_API_KEY, ROBINHOOD_PRIVATE_KEY,
+# ANTHROPIC_API_KEY. `paper = false` stays refused until RM-2463 unlocks it; nothing
+# below depends on paper mode.
+
+symbol = "BTC-USD"
+tick_interval_secs = 900
+paper = true
+journal_path = "journal.md"
+
+decider = "claude"
+# Decision role: the only model that may propose buy/sell/hold.
+model = "claude-sonnet-5-5"
+# Optional helper role (off by default). Writes journal tags only; never trades.
+# helper_model = "claude-haiku-5-5"
+
+[risk]
+max_position_usd = 10.0
+max_order_usd = 5.0
+max_daily_loss_usd = 4.0
+# Daily pacing sub-cap for Claude spend. Subdivides llm.max_llm_cost_usd_total;
+# must be smaller than it.
+max_llm_cost_usd_per_day = 60.0
+min_tick_interval_secs = 900
+max_open_orders = 1
+stale_order_ticks = 2
+
+[llm]
+api_base_url = "https://api.anthropic.com"
+ledger_path = "llm_budget.json"
+# Whole experiment, all roles, retries and cache charges included. At most 200.
+# Persisted in the ledger: restarts, new days, and config edits cannot raise it.
+max_llm_cost_usd_total = 200.0
+# Provider credit expiry. Must carry an explicit offset and fall on or before
+# 2026-11-12 in that offset. No paid call starts at or after it. Set this to the
+# exact cutoff the provider states.
+credit_expiry = "2026-11-12T23:59:59-08:00"
+# Helper share of the totals (required only when helper_model is set).
+# helper_max_cost_usd_total = 5.0
+# helper_max_cost_usd_per_day = 2.0
+max_input_tokens = 20000
+decider_max_output_tokens = 8192
+helper_max_output_tokens = 1024
+request_timeout_secs = 90
+decision_deadline_secs = 180
+max_response_bytes = 524288
+max_retries = 1
+retry_backoff_ms = 1000
+
+# USD per million tokens, seeded with the 2026-11-09 rates. Cache rates assume
+# 0.1x (read) and 1.25x (write) of input; check them against current pricing.
+[llm.pricing."claude-sonnet-5-5"]
+input_usd_per_mtok = 2.0
+output_usd_per_mtok = 10.0
+cache_read_usd_per_mtok = 0.2
+cache_write_usd_per_mtok = 2.5
+
+[llm.pricing."claude-haiku-5-5"]
+input_usd_per_mtok = 0.10
+output_usd_per_mtok = 0.50
+cache_read_usd_per_mtok = 0.01
+cache_write_usd_per_mtok = 0.125

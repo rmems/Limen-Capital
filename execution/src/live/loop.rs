@@ -1,10 +1,16 @@
 //! The tick loop: fetch state → decide → risk → (paper ? simulate : place)
 //! → poll fills → journal → sleep.
 //!
-//! Live order submission is **not** wired yet (arrives in a later step behind
-//! `paper = false`); starting with `paper = false` is refused here.
+//! Live order submission is **not** wired yet (RM-2463 unlocks `paper = false`);
+//! starting with `paper = false` is refused here. Decider construction does
+//! not depend on paper mode.
+//!
+//! Fills, stale-order cancels, and the daily-loss halt run every tick before
+//! and independent of the decider, so a decider error, LLM budget halt, or
+//! credit expiry cannot block them. A decider error is journaled as a hold.
 
 use crate::live::config::{DeciderKind, LiveConfig, MarketSourceConfig, Secrets};
+use crate::live::decider::claude::ClaudeDecider;
 use crate::live::decider::rules::RulesDecider;
 use crate::live::decider::Decider;
 use crate::live::journal::{Journal, JournalHeader, JournalRow};
@@ -297,7 +303,6 @@ impl Runner<'_> {
     ) -> Result<(), LoopError> {
         let recent = self.parts.journal.tail(5)?;
         let decider = &mut self.parts.decider;
-        let llm_before = decider.llm_cost_today_usd();
         let decision = match decider.decide(state, &recent).await {
             Ok(decision) => decision,
             Err(e) => {
@@ -306,7 +311,16 @@ impl Runner<'_> {
                 crate::live::decider::Decision::hold(format!("decider_error: {e}"))
             }
         };
-        row.llm_cost_usd = decider.llm_cost_today_usd() - llm_before;
+        let reports = decider.take_llm_reports();
+        row.llm_cost_usd = reports.iter().map(|r| r.cost_usd).sum();
+        row.llm_calls = reports
+            .iter()
+            .map(|r| r.summary())
+            .collect::<Vec<_>>()
+            .join("; ");
+        for r in &reports {
+            info!("llm call: {}", r.summary());
+        }
         row.action = decision.action.to_string();
         row.size_usd = decision.size_usd;
         row.reason = decision.reason.clone();
