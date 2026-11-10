@@ -94,25 +94,9 @@ impl OrderState {
 
 impl fmt::Display for OrderState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Open => "new",
-            Self::Accepted => "accepted",
-            Self::PendingNew => "pending_new",
-            Self::AcceptedForBidding => "accepted_for_bidding",
-            Self::PartiallyFilled => "partially_filled",
-            Self::PendingCancel => "pending_cancel",
-            Self::PendingReplace => "pending_replace",
-            Self::DoneForDay => "done_for_day",
-            Self::Stopped => "stopped",
-            Self::Suspended => "suspended",
-            Self::Calculated => "calculated",
-            Self::Replaced => "replaced",
-            Self::Filled => "filled",
-            Self::Canceled => "canceled",
-            Self::Expired => "expired",
-            Self::Rejected => "rejected",
-            Self::Unknown => "unknown",
-        })
+        // serde rename attributes already encode the Alpaca wire names.
+        let name = serde_json::to_string(self).map_err(|_| fmt::Error)?;
+        f.write_str(name.trim_matches('"'))
     }
 }
 
