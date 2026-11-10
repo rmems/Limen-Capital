@@ -123,6 +123,39 @@ pub(super) fn events(events: &[PaperEvent], row: &mut JournalRow, summary: &mut 
     }
 }
 
+/// Journal the resting orders cancelled when the loop stops.
+pub(super) fn stop_cancels(
+    cfg: &LiveConfig,
+    parts: &mut LoopParts,
+    events: &[PaperEvent],
+    reason: &str,
+    summary: &mut RunSummary,
+) -> Result<(), LoopError> {
+    let mut orders = Vec::new();
+    for event in events {
+        if let PaperEvent::Cancelled { order, .. } = event {
+            summary.cancels += 1;
+            info!("CANCEL {} on stop ({reason})", order.id);
+            orders.push(format!("{}:{}", order.id, order.state));
+        }
+    }
+    parts.journal.append(&JournalRow {
+        ts_utc: iso(Utc::now().timestamp()),
+        tick: summary.ticks,
+        symbol: cfg.symbol.clone(),
+        position_qty: parts.book.position_qty,
+        cash_usd: parts.book.cash_usd,
+        realized_pnl_usd: parts.book.realized_pnl_usd,
+        decider: parts.decider.name().to_string(),
+        action: "none".into(),
+        reason: format!("stop:{reason}"),
+        risk: "cancel_resting".into(),
+        order: orders.join("; "),
+        ..Default::default()
+    })?;
+    Ok(())
+}
+
 pub(super) fn tick(row: &JournalRow) {
     info!(
         "tick {} {} bid={:.2} ask={:.2} spread={:.2}bps pos={:.8} (${:.4}) cash={:.4} realized={:+.4} | {} {} ${:.4} \"{}\" | {}",

@@ -19,8 +19,9 @@ brain/Manifest.toml
 .env
 *.log
 
-# RM-2436 live micro-capital experiment: journals are local artifacts, never committed
+# RM-2436 live micro-capital experiment: journals, durable state and locks are local artifacts, never committed
 journal*.md
+limen-state/
 
 # Editor / local agent tooling (not product source)
 .vscode/
