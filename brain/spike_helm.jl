@@ -77,29 +77,11 @@ function check_cuda_memory()
     return true
 end
 
-# ─── Input Validation ───────────────────────────────────────────────────────────
-
-function validate_market_pulse(data::Vector{UInt8})
-    if length(data) != 120
-        @warn "Invalid MarketPulse size: $(length(data)) bytes, expected 120"
-        return false
-    end
-    
-    # Timestamp is Unix nanoseconds (MarketPulse wire layout)
-    timestamp_ns = reinterpret(UInt64, data[1:8])[1]
-    current_ns = time_ns()
-    # Allow large skew (sim / research clocks); only flag absurd multi-day deltas
-    hour_ns = UInt64(3_600) * UInt64(1_000_000_000)
-    if timestamp_ns > 0 && abs(Int128(current_ns) - Int128(timestamp_ns)) > Int128(24) * Int128(hour_ns)
-        @warn "Suspicious timestamp_ns: $timestamp_ns (current=$(current_ns))"
-    end
-
-    return true
-end
-
 # ─── ZMQ Setup ────────────────────────────────────────────────────────────────
 
 function setup_zmq()
+    validate_binary_endpoint(IPC_ENDPOINT)
+    validate_binary_endpoint(IPC_PUB_ENDPOINT)
     ctx = ZMQ.Context()
     zap_state = nothing
 
@@ -145,19 +127,17 @@ end
 
 Publish the 16-element readout vector + 4 NERO relevance scores via ZMQ.
 
-Format: 88 bytes (little-endian)
-  [0..8]   tick_count : Int64       — Julia-side tick counter
-  [8..72]  output     : 16 × Float32 — aggregated lobe readout
-  [72..88] relevance  : 4 × Float32  — NERO scores [Scalper, Day, Swing, Macro]
-
-The buffer is pre-allocated in main() and reused every tick (zero allocation).
+Format: NW1R + version/reserved header (8 bytes), then 88-byte LE payload.
+The tick is the originating MarketPulse Unix timestamp in nanoseconds.
+Non-finite output/relevance is rejected before sending.
 """
 function publish_readout!(buf::Vector{UInt8}, pub::ZMQ.Socket,
                           output::Vector{Float32}, relevance::Vector{Float32},
                           tick::Int64)
     # NervousWire v1: reuse pack_readout (market_types.jl via naut_core)
-    packed = pack_readout(tick, output, relevance)
-    copyto!(buf, 1, packed, 1, 88)
+    packed = frame_payload("NW1R", pack_readout(tick, output, relevance))
+    resize!(buf, length(packed))
+    copyto!(buf, packed)
     ZMQ.send(pub, buf)
 end
 
@@ -225,6 +205,7 @@ function main()
 
     tick = 0
     mc_tick = 0
+    last_pulse_ns = UInt64(round(Int64, time() * 1e9))
 
     try
         while true
@@ -233,17 +214,19 @@ function main()
             raw = Vector{UInt8}(msg)
 
             # ── Input Validation ───────────────────────────────────────────────
-            if !validate_market_pulse(raw)
-                continue
-            end
-
             # ── 2. Decode first (fail-closed); only then advance experiment tick ─
             pulse = try
-                decode_market_pulse(raw)
+                decode_market_pulse(unframe_payload(raw, "NW1P", 120))
             catch e
                 @warn "Rejecting invalid MarketPulse frame" exception = e
                 continue
             end
+            now = UInt64(round(Int64, time() * 1e9))
+            if !(last_pulse_ns < pulse.timestamp_ns <= now)
+                @warn "Rejecting non-increasing, pre-start, or future market timestamp"
+                continue
+            end
+            last_pulse_ns = pulse.timestamp_ns
             tick += 1
 
             # ── 2.5 FeatureStream (Hawkes on DNX price) ───────────────────────
@@ -308,7 +291,11 @@ function main()
             # ── 7–8. NERO relevance (causal) → re-aggregate → publish ────────
             # route_and_aggregate!: relevance weights replace static LOBE_WEIGHTS
             output = route_and_aggregate!(nero, ensemble)
-            publish_readout!(readout_buf, pub, output, nero.relevance, reservoir_lobes(res)[1].tick_count)
+            if output === nothing
+                @warn "Non-finite neural state; reset NERO and skipped readout"
+                continue
+            end
+            publish_readout!(readout_buf, pub, output, nero.relevance, Int64(pulse.timestamp_ns))
 
             # ── 9. Diagnostics ───────────────────────────────────────────────
             if tick % 20 == 0

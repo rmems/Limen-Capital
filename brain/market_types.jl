@@ -3,6 +3,46 @@
 # Shared by market_encoder, naut_core, and unit tests.
 # Layout: docs/wire-protocol-v1.md
 
+using Sockets: IPAddr, IPv4, IPv6
+
+const WIRE_HEADER = UInt8[0x01, 0x00, 0x00, 0x00]
+
+function frame_payload(topic::String, payload::Vector{UInt8})
+    topic in ("NW1P", "NW1R") || error("Unknown wire topic")
+    return vcat(codeunits(topic), WIRE_HEADER, payload)
+end
+
+function unframe_payload(frame::Vector{UInt8}, topic::String, size::Int)
+    length(frame) == size + 8 || error("Invalid wire frame size")
+    frame[1:4] == collect(codeunits(topic)) || error("Invalid wire topic")
+    frame[5:8] == WIRE_HEADER || error("Invalid wire version or reserved bytes")
+    return frame[9:end]
+end
+
+function validate_binary_endpoint(ep::String; allow_remote=get(ENV, "LIMEN_ALLOW_REMOTE_WIRE", "") == "1")
+    if startswith(ep, "ipc://")
+        path = ep[7:end]
+        startswith(path, "/") && !(".." in split(path, "/")) || error("Invalid absolute IPC path")
+        return ep
+    end
+    m = match(r"^tcp://(\[[^\]]+\]|[^:]+):([0-9]+)$", ep)
+    m === nothing && error("Binary endpoint must use tcp://host:port or ipc:///absolute/path")
+    port = tryparse(UInt16, m[2])
+    port !== nothing && port > 0 || error("Invalid TCP port")
+    host = strip(m[1], ['[', ']'])
+    ip = try
+        parse(IPAddr, host)
+    catch e
+        e isa ArgumentError || rethrow()
+        nothing
+    end
+    loopback = ip !== nothing && (
+        (ip isa IPv4 && startswith(string(ip), "127.")) ||
+        (ip isa IPv6 && ip == parse(IPv6, "::1")))
+    allow_remote || loopback || error("Non-loopback endpoint requires LIMEN_ALLOW_REMOTE_WIRE=1")
+    return ep
+end
+
 # ── MarketPulse packed struct layout (120 bytes from Rust) ────────────────────
 # Canonical channel order: DNX(0), Quai(1), Qubic(2), Kaspa(3), Monero(4), Ocean(5), Verus(6)
 
@@ -63,7 +103,7 @@ end
     decode_market_pulse(buf::Vector{UInt8}) -> MarketPulse
 
 Decode the 120-byte little-endian MarketPulse packet.
-Bytes [108..120] are reserved (not decoded into fields today).
+Bytes [108..120) are reserved and must be zero.
 
 Rejects non-finite floats and non-positive prices; clamps asset vols to [0, 1].
 Hot path: one `Vector{Float32}` for the 25 field words (bulk reinterpret; no
@@ -71,6 +111,7 @@ per-field byte slices).
 """
 function decode_market_pulse(buf::Vector{UInt8})
     length(buf) == 120 || error("Expected 120 bytes, got $(length(buf))")
+    all(iszero, view(buf, 109:120)) || error("Nonzero MarketPulse reserved bytes")
 
     ts = reinterpret(UInt64, view(buf, 1:8))[1]
     # One allocation: collect 25 LE Float32 words from a view (no 25×4-byte temps).
@@ -136,6 +177,9 @@ end
 function pack_readout(tick::Int64, output::AbstractVector{Float32}, relevance::AbstractVector{Float32})
     length(output) == 16 || error("output must be length 16")
     length(relevance) == 4 || error("relevance must be length 4")
+    all(isfinite, output) || error("Non-finite readout")
+    all(x -> isfinite(x) && 0 <= x <= 1, relevance) || error("Invalid relevance")
+    0.95f0 <= sum(relevance) <= 1.05f0 || error("Relevance must sum to ~1")
     buf = Vector{UInt8}(undef, 88)
     copyto!(buf, 1, reinterpret(UInt8, [tick]), 1, 8)
     copyto!(buf, 9, reinterpret(UInt8, collect(output)), 1, 64)

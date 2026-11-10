@@ -4,7 +4,7 @@
 //!   cargo run --bin market_sim
 //!   LIMEN_SIM_HZ=10 cargo run --bin market_sim
 
-use spikenaut_execution_engine::wire::MarketPulse;
+use spikenaut_execution_engine::wire::{frame_payload, market_endpoint, MarketPulse, MARKET_TOPIC};
 use spikenaut_execution_engine::zmq_curve;
 use std::f32::consts::PI;
 use std::thread;
@@ -16,8 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    let endpoint =
-        std::env::var("LIMEN_IPC_SUB").unwrap_or_else(|_| "tcp://127.0.0.1:5555".to_string());
+    let endpoint = market_endpoint()?;
     let hz: f64 = std::env::var("LIMEN_SIM_HZ")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -54,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pulse.gpu_temp_c = 45.0;
         pulse.confidence_signal = 0.9;
 
-        let buf = pulse.pack();
+        let buf = frame_payload(MARKET_TOPIC, &pulse.pack());
         publisher.send(&buf[..], 0)?;
         if t.is_multiple_of(50) {
             info!("published tick={t} price0={:.4}", pulse.prices[0]);

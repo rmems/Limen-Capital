@@ -230,7 +230,7 @@ end
         @test ZmqCurve.load_curve_allowlist() === nothing
         @test ZmqCurve.curve_enabled() == false
     finally
-        for k in keys(ENV)
+        for k in Base.keys(ENV)
             haskey(old, k) ? (ENV[k] = old[k]) : delete!(ENV, k)
         end
     end
@@ -274,5 +274,7 @@ end
         @test true
     end
 end
+
+include("wire_hardening.jl")
 
 println("All Capital unit tests finished.")

@@ -23,6 +23,14 @@ exchange gateway. Default configuration assumes a **single-user, loopback-trust*
 
 Research default is **plain ZMQ** on loopback.
 
+Binary bind/connect endpoints are checked in the brain, muscle, and market
+simulator. Non-loopback addresses, hostnames, and wildcard binds require
+`LIMEN_ALLOW_REMOTE_WIRE=1`. This opt-in does not enable encryption or
+authentication: use CURVE and an allowlist on untrusted networks.
+The required topic/version envelope prevents accidental schema mismatches,
+not forgery. Timestamp watermarks reject duplicate, stale, future, and pre-start
+frames; they require synchronized clocks and are not cryptographic anti-replay.
+
 When `ZMQ_CURVE=1`, brain (`spike_helm.jl`), muscle (`execution`), and `market_sim` configure CURVE on the binary wire. The default without `ZMQ_CURVE=1` is unchanged plain TCP loopback.
 
 **CURVE roles (fixes one-sided mis-bindings — see issue #24):**

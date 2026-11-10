@@ -1,7 +1,7 @@
 //! Limen-Capital Execution Engine — binary NervousWire listener (v1).
 //!
-//! Subscribes to Julia brain **ReadoutPacket** (88 B) on `LIMEN_IPC_PUB`
-//! (default `tcp://127.0.0.1:5556`) and to the **MarketPulse** feed (120 B) on
+//! Subscribes to Julia brain **ReadoutPacket** (96 B framed) on `LIMEN_IPC_PUB`
+//! (default `tcp://127.0.0.1:5556`) and to the **MarketPulse** feed (128 B framed) on
 //! `LIMEN_IPC_SUB` (default `tcp://127.0.0.1:5555`, e.g. `market_sim`). Each
 //! readout is priced from the last pulse, mapped to `TradeSignal`, run through
 //! the confidence gates, and ghost-traded via metabolic-ledger. Readouts are
@@ -20,11 +20,11 @@
 
 use spikenaut_execution_engine::wire::{
     decode_readout, json_ipc_endpoint, market_endpoint, pulse_max_age_ns, readout_endpoint,
-    readout_to_trade_signal, resolve_fill_price, MarketPulse, MARKET_PULSE_BYTES,
-    READOUT_PACKET_BYTES,
+    readout_to_trade_signal, resolve_fill_price, unframe_payload, MarketPulse, TickGuard,
+    MARKET_PULSE_BYTES, MARKET_TOPIC, READOUT_PACKET_BYTES, READOUT_TOPIC,
 };
 use spikenaut_execution_engine::{zmq_curve, ExecutionEngine, TradeSignal};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
@@ -51,9 +51,13 @@ async fn supervise(
 ) -> Result<(), Box<dyn std::error::Error>> {
     tokio::pin!(listener);
     let result = tokio::select! {
-        r = &mut listener => match r {
-            Ok(()) => Err(format!("{name} listener exited; see log for the ZMQ error").into()),
-            Err(e) => Err(format!("{name} listener panicked: {e}").into()),
+        r = &mut listener => {
+            stop.store(true, Ordering::Relaxed);
+            // A completed JoinHandle must not be polled again below.
+            return match r {
+                Ok(()) => Err(format!("{name} listener exited; see log for the ZMQ error").into()),
+                Err(e) => Err(format!("{name} listener panicked: {e}").into()),
+            };
         },
         r = tokio::signal::ctrl_c() => {
             r?;
@@ -81,10 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0.15);
     let max_position_size = 10.0;
-    let engine = Arc::new(tokio::sync::Mutex::new(ExecutionEngine::new(
-        confidence_threshold,
-        max_position_size,
-    )));
+    let engine = ExecutionEngine::new(confidence_threshold, max_position_size);
 
     let mode = std::env::var("LIMEN_WIRE").unwrap_or_else(|_| "binary".to_string());
     if mode.eq_ignore_ascii_case("json") {
@@ -97,82 +98,78 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn dispatch_readout_frame(
-    bytes: &[u8],
-    eng: &Arc<tokio::sync::Mutex<ExecutionEngine>>,
-    pulse: &Arc<tokio::sync::Mutex<Option<MarketPulse>>>,
-    unpriced: &Arc<AtomicU64>,
+struct BinaryState {
+    engine: ExecutionEngine,
+    pulse: Option<MarketPulse>,
+    readout_ticks: TickGuard,
+    pulse_ticks: TickGuard,
+    unpriced: u64,
     max_age_ns: u64,
-) {
-    let packet = match decode_readout(bytes) {
-        Ok(p) => p,
-        Err(e) => {
-            error!("Readout decode failed: {e}");
-            return;
-        }
-    };
-    let mut sig = readout_to_trade_signal(&packet, 0.0, 1.0, None);
-    let engine_clone = eng.clone();
-    let pulse_clone = pulse.clone();
-    let unpriced = unpriced.clone();
-    tokio::spawn(async move {
-        let mut e = engine_clone.lock().await;
-        let priced = {
-            let p = pulse_clone.lock().await;
-            resolve_fill_price(p.as_ref(), &sig.ticker, now_ns(), max_age_ns)
-        };
-        match priced {
-            Ok(px) => sig.price = px,
-            Err(err) => {
-                let n = unpriced.fetch_add(1, Ordering::Relaxed) + 1;
-                if n == 1 || n.is_multiple_of(100) {
-                    warn!(
-                        "[{}] readout refused ({err}); {n} unpriced so far",
-                        sig.ticker
-                    );
-                }
-                return;
-            }
-        }
-        let decision = e.process_signal(sig);
-        tracing::debug!("Decision: {:?}", decision);
-    });
 }
 
-fn process_binary_frame(
-    bytes: &[u8],
-    eng: &Arc<tokio::sync::Mutex<ExecutionEngine>>,
-    pulse: &Arc<tokio::sync::Mutex<Option<MarketPulse>>>,
-    unpriced: &Arc<AtomicU64>,
-    max_age_ns: u64,
-) {
-    match bytes.len() {
-        READOUT_PACKET_BYTES => {
-            dispatch_readout_frame(bytes, eng, pulse, unpriced, max_age_ns);
+impl BinaryState {
+    fn process(&mut self, bytes: &[u8], now: u64) {
+        let result = self.process_checked(bytes, now);
+        if let Err(e) = result {
+            warn!("Binary frame refused: {e}");
         }
-        MARKET_PULSE_BYTES => match spikenaut_execution_engine::wire::decode_market_pulse(bytes) {
-            Ok(mp) => {
-                *pulse.blocking_lock() = Some(mp);
+    }
+
+    fn process_checked(&mut self, bytes: &[u8], now: u64) -> Result<(), String> {
+        if bytes.starts_with(MARKET_TOPIC) {
+            let payload = unframe_payload(bytes, MARKET_TOPIC, MARKET_PULSE_BYTES)?;
+            let mp = spikenaut_execution_engine::wire::decode_market_pulse(payload)?;
+            if !self
+                .pulse_ticks
+                .accept(mp.timestamp_ns, now, self.max_age_ns)
+            {
+                return Err("non-increasing, pre-start, stale, or future market timestamp".into());
             }
-            Err(e) => warn!("MarketPulse decode failed: {e}"),
-        },
-        _ => warn!("Unexpected binary frame {} bytes", bytes.len()),
+            self.pulse = Some(mp);
+            return Ok(());
+        }
+        let payload = unframe_payload(bytes, READOUT_TOPIC, READOUT_PACKET_BYTES)?;
+        let packet = decode_readout(payload)?;
+        let tick = u64::try_from(packet.tick).map_err(|_| "negative readout timestamp")?;
+        if !self.readout_ticks.accept(tick, now, self.max_age_ns) {
+            return Err("non-increasing, pre-start, stale, or future readout timestamp".into());
+        }
+        let mut sig = readout_to_trade_signal(&packet, 0.0, 1.0, None);
+        match resolve_fill_price(self.pulse.as_ref(), &sig.ticker, now, self.max_age_ns) {
+            Ok(px) => sig.price = px,
+            Err(err) => {
+                self.unpriced += 1;
+                if self.unpriced == 1 || self.unpriced.is_multiple_of(100) {
+                    warn!(
+                        "[{}] readout refused ({err}); {} unpriced so far",
+                        sig.ticker, self.unpriced
+                    );
+                }
+                return Ok(());
+            }
+        }
+        let decision = self.engine.process_signal(sig);
+        tracing::debug!("Decision: {:?}", decision);
+        Ok(())
     }
 }
 
-async fn start_binary_listener(
-    engine: Arc<tokio::sync::Mutex<ExecutionEngine>>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let readout_ep = readout_endpoint();
-    let market_ep = market_endpoint();
+async fn start_binary_listener(engine: ExecutionEngine) -> Result<(), Box<dyn std::error::Error>> {
+    let readout_ep = readout_endpoint()?;
+    let market_ep = market_endpoint()?;
     let max_age_ns = pulse_max_age_ns()?;
     // Last MarketPulse; `None` until the feed delivers one. Fills are refused
     // without a fresh pulse rather than priced at a placeholder.
-    let last_pulse: Arc<tokio::sync::Mutex<Option<MarketPulse>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
     let stop = Arc::new(AtomicBool::new(false));
-    // Pre-pulse readouts arrive at tick rate; count refusals to throttle the log.
-    let unpriced = Arc::new(AtomicU64::new(0));
+    let start_ns = now_ns();
+    let mut state = BinaryState {
+        engine,
+        pulse: None,
+        readout_ticks: TickGuard::new(start_ns),
+        pulse_ticks: TickGuard::new(start_ns),
+        unpriced: 0,
+        max_age_ns,
+    };
 
     let context = zmq::Context::new();
     let _zap = zmq_curve::maybe_start_zap(&context).map_err(|e| format!("ZAP setup: {e}"))?;
@@ -180,11 +177,7 @@ async fn start_binary_listener(
     let timeout_ms = RECV_TIMEOUT.as_millis() as i32;
     let curve_on = zmq_curve::curve_enabled();
 
-    let eng = engine.clone();
-    let pulse = last_pulse.clone();
     let stop_flag = stop.clone();
-    let unpriced_c = unpriced.clone();
-    let max_age = max_age_ns;
 
     let listener = if curve_on {
         let client_sec = zmq_curve::client_secret_key_z85()?;
@@ -221,8 +214,14 @@ async fn start_binary_listener(
                     sub_readout.as_poll_item(zmq::POLLIN),
                     sub_market.as_poll_item(zmq::POLLIN),
                 ];
-                if zmq::poll(&mut items, i64::from(timeout_ms)).unwrap_or(0) == 0 {
-                    continue;
+                match zmq::poll(&mut items, i64::from(timeout_ms)) {
+                    Ok(0) => continue,
+                    Ok(_) => (),
+                    Err(zmq::Error::EINTR) => continue,
+                    Err(e) => {
+                        error!("ZMQ poll: {e}");
+                        return;
+                    }
                 }
                 let sock = if items[0].is_readable() {
                     &sub_readout
@@ -231,10 +230,15 @@ async fn start_binary_listener(
                 } else {
                     continue;
                 };
-                let Ok(bytes) = sock.recv_bytes(0) else {
-                    continue;
+                let bytes = match sock.recv_bytes(0) {
+                    Ok(bytes) => bytes,
+                    Err(zmq::Error::EAGAIN) => continue,
+                    Err(e) => {
+                        error!("ZMQ receive: {e}");
+                        return;
+                    }
                 };
-                process_binary_frame(&bytes, &eng, &pulse, &unpriced_c, max_age);
+                state.process(&bytes, now_ns());
             }
         })
     } else {
@@ -258,7 +262,7 @@ async fn start_binary_listener(
                         return;
                     }
                 };
-                process_binary_frame(&bytes, &eng, &pulse, &unpriced_c, max_age);
+                state.process(&bytes, now_ns());
             }
         })
     };
@@ -267,7 +271,7 @@ async fn start_binary_listener(
 }
 
 async fn start_json_listener(
-    engine: Arc<tokio::sync::Mutex<ExecutionEngine>>,
+    mut engine: ExecutionEngine,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let context = zmq::Context::new();
     let subscriber = context.socket(zmq::SUB)?;
@@ -284,11 +288,7 @@ async fn start_json_listener(
             match subscriber.recv_string(0) {
                 Ok(Ok(msg)) => match serde_json::from_str::<TradeSignal>(&msg) {
                     Ok(signal) => {
-                        let engine_clone = engine.clone();
-                        tokio::spawn(async move {
-                            let mut eng = engine_clone.lock().await;
-                            let _ = eng.process_signal(signal);
-                        });
+                        let _ = engine.process_signal(signal);
                     }
                     Err(e) => error!("JSON parse: {e}"),
                 },
@@ -304,4 +304,86 @@ async fn start_json_listener(
     });
 
     supervise("json", stop, listener).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spikenaut_execution_engine::wire::{frame_payload, ReadoutPacket};
+
+    fn state() -> BinaryState {
+        BinaryState {
+            engine: ExecutionEngine::default(),
+            pulse: None,
+            readout_ticks: TickGuard::new(100),
+            pulse_ticks: TickGuard::new(100),
+            unpriced: 0,
+            max_age_ns: 100,
+        }
+    }
+
+    fn readout(tick: i64) -> Vec<u8> {
+        frame_payload(
+            READOUT_TOPIC,
+            &ReadoutPacket {
+                tick,
+                ..ReadoutPacket::default()
+            }
+            .pack(),
+        )
+    }
+
+    fn market(timestamp_ns: u64, price: f32) -> Vec<u8> {
+        frame_payload(
+            MARKET_TOPIC,
+            &MarketPulse {
+                timestamp_ns,
+                prices: [price; 7],
+                ..MarketPulse::default()
+            }
+            .pack(),
+        )
+    }
+
+    #[test]
+    fn inline_listener_refuses_replays_even_when_original_was_unpriced() {
+        let mut state = state();
+        state.process_checked(&readout(101), 101).unwrap();
+        assert_eq!(state.unpriced, 1);
+        state.process_checked(&market(102, 10.0), 102).unwrap();
+        assert!(state.process_checked(&readout(101), 102).is_err());
+        assert!(state.process_checked(&market(102, 20.0), 102).is_err());
+        assert!(state.process_checked(&market(101, 20.0), 102).is_err());
+        assert_eq!(state.pulse.as_ref().unwrap().prices[0], 10.0);
+        state.process_checked(&readout(103), 103).unwrap();
+        assert_eq!(state.unpriced, 1);
+        assert!(state.process_checked(&readout(102), 103).is_err());
+        assert!(state.process_checked(&readout(104), 205).is_err());
+        state.process_checked(&readout(205), 205).unwrap();
+        assert_eq!(state.unpriced, 2); // last pulse is now stale
+    }
+
+    #[test]
+    fn invalid_frame_does_not_poison_later_valid_frames() {
+        let mut state = state();
+        for tick in [-1, 99, 100, 202] {
+            assert!(state.process_checked(&readout(tick), 201).is_err());
+        }
+        let mut bad = readout(201);
+        bad[16..20].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert!(state.process_checked(&bad, 201).is_err());
+        bad = readout(201);
+        bad[4] = 2;
+        assert!(state.process_checked(&bad, 201).is_err());
+        state.process_checked(&market(201, 10.0), 201).unwrap();
+        state.process_checked(&readout(201), 201).unwrap();
+    }
+
+    #[tokio::test]
+    async fn exited_listener_is_reported_without_repolling_completed_handle() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = tokio::task::spawn_blocking(|| ());
+        assert!(supervise("test", stop.clone(), handle).await.is_err());
+        assert!(stop.load(Ordering::Relaxed));
+    }
 }

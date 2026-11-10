@@ -19,6 +19,35 @@ pub const N_RELEVANCE: usize = 4;
 pub const N_PAIRS: usize = 8;
 pub const SIDE_EPS: f32 = 1e-4;
 
+/// Network envelope: four-byte topic, version, three reserved zero bytes.
+/// Payload codecs below remain usable for offline v1 fixtures only.
+pub const WIRE_VERSION: u8 = 1;
+pub const WIRE_HEADER_BYTES: usize = 8;
+pub const READOUT_TOPIC: &[u8; 4] = b"NW1R";
+pub const MARKET_TOPIC: &[u8; 4] = b"NW1P";
+
+pub fn frame_payload(topic: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(WIRE_HEADER_BYTES + payload.len());
+    frame.extend_from_slice(topic);
+    frame.extend_from_slice(&[WIRE_VERSION, 0, 0, 0]);
+    frame.extend_from_slice(payload);
+    frame
+}
+
+pub fn unframe_payload<'a>(
+    frame: &'a [u8],
+    topic: &[u8; 4],
+    size: usize,
+) -> Result<&'a [u8], String> {
+    if frame.len() != WIRE_HEADER_BYTES + size
+        || &frame[..4] != topic
+        || frame[4..8] != [WIRE_VERSION, 0, 0, 0]
+    {
+        return Err("invalid wire topic, version, reserved bytes, or size".into());
+    }
+    Ok(&frame[WIRE_HEADER_BYTES..])
+}
+
 /// 120-byte market tick packet (Rust/feed → Julia brain).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MarketPulse {
@@ -94,6 +123,9 @@ impl MarketPulse {
                 "MarketPulse: expected {MARKET_PULSE_BYTES} bytes, got {}",
                 buf.len()
             ));
+        }
+        if buf[108..].iter().any(|b| *b != 0) {
+            return Err("MarketPulse reserved bytes must be zero".into());
         }
         let mut c = Cursor::new(buf);
         let mut ts = [0u8; 8];

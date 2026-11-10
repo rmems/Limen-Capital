@@ -104,12 +104,32 @@ end
 
 # ── Core Update ───────────────────────────────────────────────────────────────
 
+"""Clear poisoned NERO history; never turn a bad lobe into a tradable readout."""
+function reset_nero!(nero::NeroOrchestrator)
+    for i in 1:N_LOBES, j in 1:N_LOBES
+        nero.adjacency_matrix[i, j] = i == j ? 0.0f0 : 1.0f0
+    end
+    fill!(nero.relevance, 0.25f0)
+    fill!(nero.prev_relevance, 0.25f0)
+    for buffer in (nero.readout_ema, nero.spike_density, nero.temp_buffer, nero.surprise)
+        fill!(buffer, 0.0f0)
+    end
+    nero.tick_count = 0
+    return nothing
+end
+
+function nero_finite(nero::NeroOrchestrator)
+    return all(buffer -> all(isfinite, buffer),
+        (nero.relevance, nero.prev_relevance, nero.readout_ema,
+         nero.spike_density, nero.temp_buffer, nero.surprise, nero.adjacency_matrix))
+end
+
 """
-    update_relevance!(nero, ensemble) -> nothing
+    update_relevance!(nero, ensemble) -> Bool
 
 Compute NERO relevance scores for all 4 lobes from the current ensemble state.
 The result is stored in `nero.relevance` (4 × Float32) and can be appended
-to the ZMQ readout packet with zero additional allocation.
+to the ZMQ readout packet. Returns false and resets history on non-finite state.
 
 Algorithm per lobe i:
   1. spike_density[i]  = lobe.last_spike_rate (already maintained by step!)
@@ -124,6 +144,9 @@ Cross-lobe inhibition via graph edges:
 Softmax normalisation → sum(relevance) = 1.0, each ≥ NERO_MIN_SCORE.
 """
 function update_relevance!(nero::NeroOrchestrator, ensemble)
+    if !nero_finite(nero)
+        reset_nero!(nero)
+    end
     nero.tick_count += 1
 
     # ── Save previous relevance for momentum computation ───────────────────
@@ -141,6 +164,10 @@ function update_relevance!(nero::NeroOrchestrator, ensemble)
 
         # 2. Readout EMA update (in-place; no new array)
         copyto!(nero.temp_buffer, Array(lobe.output))
+        if !isfinite(spike_density) || !all(isfinite, nero.temp_buffer)
+            reset_nero!(nero)
+            return false
+        end
 
         @views ema_row = nero.readout_ema[i, :]
         ema_row .= (1.0f0 - NERO_EMA_DECAY) .* ema_row .+
@@ -159,6 +186,10 @@ function update_relevance!(nero::NeroOrchestrator, ensemble)
         raw[i] = NERO_ALPHA * spike_density +
                  NERO_BETA  * nero.surprise[i] +
                  NERO_GAMMA * momentum
+        if !isfinite(raw[i]) || !all(isfinite, ema_row)
+            reset_nero!(nero)
+            return false
+        end
     end
 
     # ── Stage 4: cross-lobe graph inhibition ──────────────────────────────
@@ -173,6 +204,10 @@ function update_relevance!(nero::NeroOrchestrator, ensemble)
             end
         end
         inhibited[dst] = max(raw[dst] - inh_sum, NERO_MIN_SCORE)
+    end
+    if !all(isfinite, inhibited)
+        reset_nero!(nero)
+        return false
     end
 
     # ── Stage 5: softmax normalisation ──────────────────────────────────
@@ -194,7 +229,11 @@ function update_relevance!(nero::NeroOrchestrator, ensemble)
     reinorm = sum(inhibited)
     inhibited ./= (reinorm + NERO_EPSILON)
 
-    return nothing
+    if !nero_finite(nero)
+        reset_nero!(nero)
+        return false
+    end
+    return true
 end
 
 # ── Causal aggregation ────────────────────────────────────────────────────────
@@ -274,9 +313,14 @@ end
 Update NERO from ensemble state, re-aggregate with relevance, return CPU readout.
 """
 function route_and_aggregate!(nero::NeroOrchestrator, ensemble)
-    update_relevance!(nero, ensemble)
+    update_relevance!(nero, ensemble) || return nothing
     aggregate_with_relevance!(ensemble, nero.relevance)
-    return Array(ensemble.agg_output)
+    output = Array(ensemble.agg_output)
+    if !all(isfinite, output)
+        reset_nero!(nero)
+        return nothing
+    end
+    return output
 end
 
 # ── Diagnostics ───────────────────────────────────────────────────────────────

@@ -2,6 +2,13 @@
 
 Canonical binary layouts for experimental SNN-HFT between Julia brain and Rust muscle.
 
+Network messages require the 8-byte topic/version envelope documented in
+`docs/wire-protocol-v1.md`: `NW1P`/`NW1R`, version `1`, three zero bytes.
+Network frame sizes are 128/96 bytes. Tables below describe only the inner payload.
+`.frame` fixtures are the raw `.bin` fixtures with that exact header prepended.
+Readout `tick` is now the source market Unix timestamp (nanoseconds), not a counter.
+Non-loopback TCP endpoints require `LIMEN_ALLOW_REMOTE_WIRE=1`.
+
 **Source of truth (docs):** [docs/wire-protocol-v1.md](../docs/wire-protocol-v1.md)  
 **Rust types:** `execution/src/binary_wire.rs` (`MarketPulse`, `ReadoutPacket`) — in-tree until corpus-ipc publishes them  
 **Golden fixtures:** `fixtures/marketpulse.bin` (120 B), `fixtures/readout.bin` (88 B)
