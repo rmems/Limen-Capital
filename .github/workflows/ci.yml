@@ -14,6 +14,7 @@ concurrency:
 
 permissions:
   contents: read
+  id-token: write # Qlty coverage upload (OIDC)
 
 env:
   CARGO_TERM_COLOR: always
@@ -40,7 +41,10 @@ jobs:
           # Pin exact version so CI verifies declared rust-version = "1.99"
           # rather than a floating `stable` channel.
           toolchain: 1.99.0
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Cache Cargo + target
         uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
@@ -59,7 +63,16 @@ jobs:
         run: cargo build --locked
 
       - name: Test
-        run: cargo test --locked -- --nocapture
+        run: cargo llvm-cov --locked --lcov --output-path lcov.info -- --nocapture
+
+      - name: Upload coverage to Qlty
+        if: github.event.pull_request.head.repo.fork != true
+        uses: qltysh/qlty-action/coverage@v2
+        with:
+          oidc: true
+          files: execution/lcov.info
+          strip-prefix: ${{ github.workspace }}/
+          incomplete: true
 
       - name: Build and test each optional library feature
         run: |
@@ -107,14 +120,27 @@ jobs:
       # and optional for the CPU wire/encoder suite).
       - name: Run Capital unit tests
         run: |
-          julia --color=yes --project=. test/runtests.jl
+          julia --color=yes --code-coverage=user --project=. test/runtests.jl
         working-directory: brain
 
       - name: Test pinned CPU forecast adapter and comparison
         env:
           JULIA_NUM_PRECOMPILE_TASKS: '2'
           OPENBLAS_NUM_THREADS: '1'
-        run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.test(coverage=true)'
+
+      - name: Process Julia coverage
+        uses: julia-actions/julia-processcoverage@v1
+        with:
+          directories: src,brain
+
+      - name: Upload coverage to Qlty
+        if: github.event.pull_request.head.repo.fork != true
+        uses: qltysh/qlty-action/coverage@v2
+        with:
+          oidc: true
+          files: lcov.info
+          incomplete: true
 
   # Structure + validated dependency sources (no full GPU instantiate).
   integration:
@@ -142,3 +168,10 @@ jobs:
 
       - name: Run test_integration.sh
         run: ./test_integration.sh
+
+      - name: Complete Qlty coverage
+        if: github.event.pull_request.head.repo.fork != true
+        uses: qltysh/qlty-action/coverage@v2
+        with:
+          oidc: true
+          command: complete
