@@ -320,8 +320,7 @@ async fn account_asset_and_iex_quotes_use_alpaca_shapes() {
     assert_eq!(server.requests().await.len(), 3);
 }
 
-#[test]
-fn risk_approval_preserves_uuid_and_rounded_wire_values() {
+fn approved_order() -> crate::live::risk::ApprovedOrder {
     use crate::live::{decider::Decision, market_state::MarketState, risk::*};
     let state = MarketState::new(
         1,
@@ -359,6 +358,12 @@ fn risk_approval_preserves_uuid_and_rounded_wire_values() {
     ) else {
         panic!("expected approval")
     };
+    approved
+}
+
+#[test]
+fn risk_approval_preserves_uuid_and_rounded_wire_values() {
+    let approved = approved_order();
     let req = PlaceLimitOrderRequest::from(&approved);
     assert_eq!(req.client_order_id, approved.client_order_id);
     assert!(uuid::Uuid::parse_str(&req.client_order_id).is_ok());
