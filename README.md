@@ -115,9 +115,13 @@ cd execution/
 cargo run --release --bin market_sim
 
 # Terminal B: muscle — SUBs to readouts on :5556 and pulses on :5555
-cargo run --release
+# Set LIMEN_KELLY_B to the experiment's expected gain / expected loss first.
+# Example ONLY for synthetic smoke testing, NOT a calibrated market estimate:
+LIMEN_KELLY_B=5 cargo run --release --bin limen-execution
 # LIMEN_WIRE=json for legacy IPC
-# LIMEN_CONFIDENCE_THRESHOLD=0.15  (research default in main)
+# LIMEN_CONFIDENCE_THRESHOLD=0.15
+# LIMEN_KELLY_SCALAR=0.25
+# LIMEN_MAX_ORDER_NOTIONAL=10     (quote units per order, NOT asset units)
 # LIMEN_PULSE_MAX_AGE_MS=2000      (readouts are refused when the last pulse is older)
 ```
 
@@ -125,8 +129,36 @@ Fills are priced from the last `MarketPulse`. A readout that arrives before the
 first pulse, after the pulse goes stale, or whose primary pair is RESIDUAL is
 refused and logged — never filled at a placeholder price.
 
-`ExecutionEngine::process_signal`: confidence gate → Neutral → **0.25× Kelly size**
-(from ATP bankroll, b=0.05) → max-qty gate → ghost fill. Zero Kelly → `RejectedNoEdge`.
+`ExecutionEngine::process_signal`: confidence gate → Neutral → fractional Kelly
+from ATP bankroll → **cap order notional** → ghost fill. Oversized proposals are
+capped, not rejected. The decision quantity, wallet mutation, and JSONL describe
+the actual fill (buy ATP friction reduces units; sells cannot exceed inventory).
+This is a per-order limit, not a cap on accumulated holdings.
+
+`LIMEN_KELLY_B` is **required** and means expected gain / expected loss, not
+percentage price movement (e.g. +2% versus −1% means `b=2`, not `0.02`).
+No payoff estimate can be recovered from confidence alone or the current pulse
+schema. All four sizing env values above fail startup on malformed, non-finite,
+or out-of-range values. Threshold must be in `[0,1]`, scalar in `(0,1]`, and
+payoff ratio and notional must be positive (notional must fit `f32`).
+
+The **effective gate** is `p >= LIMEN_CONFIDENCE_THRESHOLD` **and**
+`p > 1/(1+b)`, with non-neutral direction, valid price, sufficient ATP/inventory,
+and a non-dust size. Zero Kelly gives `RejectedNoEdge`. Thus `b=0.05` still
+requires `p > 0.952381`; the synthetic `b=5` example requires `p > 0.166667`
+despite the 0.15 confidence threshold. Changing the fractional scalar does not
+change the Kelly breakeven. SNN confidence is **not a calibrated win probability**.
+Library-only `ExecutionEngine::new` uses symmetric `b=1`; the listener never
+silently adopts that assumption.
+
+The listener logs `Confidence summary:` JSON every 100 priced signals and on
+graceful shutdown, including rejected/neutral signals: count, invalid count,
+min/max/mean, ten confidence bins, and decision counts. Unpriced readouts and
+invalid wire frames are excluded. Capture stdout over a sim run, then Ctrl+C to
+include its final partial interval. The former “typical 0.2–0.4” claim was not
+measured. See [the reproducible synthetic sim check](docs/results/rm-2440/README.md):
+60/100 executions versus 0/100 at the old odds, **not** evidence about the real
+brain's distribution or profitability.
 
 ### 5. Julia live helm (binary wire v1)
 

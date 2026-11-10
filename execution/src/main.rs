@@ -84,13 +84,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Limen-Capital execution engine starting...");
 
-    // Research default 0.15 (NERO*mag often ~0.2–0.4); override with LIMEN_CONFIDENCE_THRESHOLD
-    let confidence_threshold: f32 = std::env::var("LIMEN_CONFIDENCE_THRESHOLD")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0.15);
-    let max_position_size = 10.0;
-    let engine = ExecutionEngine::new(confidence_threshold, max_position_size);
+    let config = limen_execution::config::ExecutionConfig::from_env()?;
+    info!(
+        "Research sizing: threshold={} b={} scalar={} max_order_notional={}; effective gate: p >= threshold AND p > {} (uncalibrated score, not a win probability)",
+        config.confidence_threshold, config.kelly_b, config.kelly_scalar,
+        config.max_order_notional, 1.0 / (1.0 + config.kelly_b)
+    );
+    let engine = config.engine();
 
     let mode = std::env::var("LIMEN_WIRE").unwrap_or_else(|_| "binary".to_string());
     if mode.eq_ignore_ascii_case("json") {

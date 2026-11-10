@@ -4,15 +4,16 @@
 //! ```text
 //! TradeSignal → confidence gate → Neutral filter
 //!   → fractional Kelly size (PositionSizer)
-//!   → max-position gate → metabolic-ledger ATP ghost trade → JSONL
+//!   → per-order notional cap → quantity-aware ATP ghost trade → JSONL
 //! ```
 //!
-//! Note: `metabolic-ledger` sizes spend from wallet ATP × ledger Kelly;
-//! this module's PositionSizer is the **policy surface** for confidence→size
-//! and soft limits, logged on every fill.
+//! The policy size is capped once, then applied to the legacy GhostWallet.
 
 pub mod binary_wire;
+pub mod confidence;
+pub mod config;
 pub mod dydx;
+mod ghost;
 pub mod kelly;
 /// Live micro-capital experiment (RM-2436): Robinhood Crypto adapter + decision loop.
 /// Feature-gated; **not** part of the research path and not a research result.
@@ -61,20 +62,24 @@ impl TradeSignal {
     }
 
     pub fn passes_gate(&self, threshold: f32) -> bool {
-        self.confidence >= threshold
+        self.confidence.is_finite()
+            && (0.0..=1.0).contains(&self.confidence)
+            && self.confidence >= threshold
     }
 }
 
 /// Execution engine: gates + Kelly + metabolic-ledger (one Decision module).
 pub struct ExecutionEngine {
     pub confidence_threshold: f32,
-    pub max_position_size: f64,
+    /// Per-order quote notional, not units or total held exposure.
+    pub max_order_notional: f64,
     pub ghost_wallet: GhostWallet,
     pub sizer: PositionSizer,
     /// When true, size from Kelly+ATP; signal.quantity only used if false.
     pub use_kelly_sizing: bool,
     pub log_path: String,
     pub step_counter: u64,
+    pub confidence_stats: confidence::ConfidenceStats,
 }
 
 impl Default for ExecutionEngine {
@@ -84,18 +89,20 @@ impl Default for ExecutionEngine {
 }
 
 impl ExecutionEngine {
-    /// Default research-friendly thresholds; Kelly uses b=0.05, 0.25× fractional.
-    pub fn new(confidence_threshold: f32, max_position_size: f64) -> Self {
+    /// Library convenience defaults: symmetric gain/loss (b=1), quarter Kelly.
+    /// The listener requires an explicit LIMEN_KELLY_B via ExecutionConfig.
+    pub fn new(confidence_threshold: f32, max_order_notional: f64) -> Self {
         let wallet = GhostWallet::new();
         let account = wallet.balance_atp as f64;
         Self {
             confidence_threshold,
-            max_position_size,
+            max_order_notional,
             ghost_wallet: wallet,
-            sizer: PositionSizer::new(account, 0.05, 0.25),
+            sizer: PositionSizer::new(account, 1.0, 0.25),
             use_kelly_sizing: true,
             log_path: "ghost_trades.jsonl".to_string(),
             step_counter: 0,
+            confidence_stats: confidence::ConfidenceStats::default(),
         }
     }
 
@@ -121,6 +128,16 @@ impl ExecutionEngine {
 
     /// Full decision path: gates → size → ghost execute.
     pub fn process_signal(&mut self, signal: TradeSignal) -> ExecutionDecision {
+        let confidence = signal.confidence;
+        let decision = self.decide(signal);
+        self.confidence_stats.record(confidence, &decision);
+        if self.confidence_stats.count.is_multiple_of(100) {
+            self.confidence_stats.log();
+        }
+        decision
+    }
+
+    fn decide(&mut self, signal: TradeSignal) -> ExecutionDecision {
         let latency = signal.latency_ns();
 
         // Gate 1: Confidence
@@ -149,9 +166,22 @@ impl ExecutionEngine {
             };
         }
 
+        if !signal.price.is_finite()
+            || signal.price <= 0.0
+            || !(signal.price as f32).is_finite()
+            || (signal.price as f32) <= 0.0
+            || !self.max_order_notional.is_finite()
+            || self.max_order_notional <= 0.0
+        {
+            return ExecutionDecision::RejectedPositionLimit {
+                reason: "invalid price or notional limit".into(),
+                latency_ns: latency,
+            };
+        }
+
         // Size: fractional Kelly from ATP bankroll (policy)
         self.sync_sizer_balance();
-        let sizing = self
+        let mut sizing = self
             .sizer
             .size_position(signal.confidence, signal.price, &signal.ticker);
 
@@ -178,7 +208,7 @@ impl ExecutionEngine {
             };
         }
 
-        if quantity <= 0.0 {
+        if !quantity.is_finite() || quantity <= 0.0 {
             return ExecutionDecision::RejectedNoEdge {
                 reason: "position size is zero".into(),
                 latency_ns: latency,
@@ -186,51 +216,36 @@ impl ExecutionEngine {
             };
         }
 
-        // Gate 3: Soft max position (on policy size)
-        if quantity > self.max_position_size {
-            warn!(
-                "Signal rejected: size {} > max {}",
-                quantity, self.max_position_size
-            );
-            return ExecutionDecision::RejectedPositionLimit {
-                reason: format!(
-                    "Quantity {} exceeds max {}",
-                    quantity, self.max_position_size
-                ),
-                latency_ns: latency,
-            };
-        }
+        // Cap in quote units, then convert back to asset units. High edge must
+        // not turn a valid signal into a rejection.
+        let quantity = quantity.min(self.max_order_notional / signal.price);
 
-        // Execute via metabolic-ledger (ATP energy commitment inside ledger)
+        // Apply this size to GhostWallet, without the ledger helper re-sizing it.
         self.step_counter += 1;
         let reason = format!(
             "snn_conf={:.3};kelly_frac={:.4};policy_qty={:.6};tier={:?}",
             signal.confidence, sizing.kelly_fraction, quantity, sizing.risk_tier
         );
 
-        match signal.side {
-            TradeSide::Buy => {
-                execute_buy(
-                    &mut self.ghost_wallet,
-                    &signal.ticker,
-                    signal.price as f32,
-                    self.step_counter,
-                    &reason,
-                    Some(&self.log_path),
-                );
-            }
-            TradeSide::Sell => {
-                execute_sell(
-                    &mut self.ghost_wallet,
-                    &signal.ticker,
-                    signal.price as f32,
-                    self.step_counter,
-                    &reason,
-                    Some(&self.log_path),
-                );
-            }
-            TradeSide::Neutral => {}
-        }
+        let Some(quantity) = ghost::execute_sized(
+            &mut self.ghost_wallet,
+            &signal,
+            quantity,
+            self.step_counter,
+            &reason,
+            &self.log_path,
+        ) else {
+            return ExecutionDecision::RejectedPositionLimit {
+                reason: "insufficient ATP, inventory, or below ghost minimum".into(),
+                latency_ns: latency,
+            };
+        };
+        sizing.position_units = quantity;
+        sizing.account_risk_percent = if self.sizer.account_balance() > 0.0 {
+            quantity * signal.price / self.sizer.account_balance() * 100.0
+        } else {
+            0.0
+        };
 
         info!(
             "[{}] EXECUTE {:?} @ ${:.4} qty≈{:.6} kelly={:.3} conf={:.2} lat={}ns ATP={:.2}",
@@ -254,6 +269,13 @@ impl ExecutionEngine {
             latency_ns: latency,
             sizing,
         }
+    }
+}
+
+impl Drop for ExecutionEngine {
+    fn drop(&mut self) {
+        // Includes short runs (<100 signals) and the final partial interval.
+        self.confidence_stats.log();
     }
 }
 
@@ -318,7 +340,8 @@ mod tests {
     #[test]
     fn test_kelly_no_edge() {
         // conf too low for b=0.05 → Kelly 0
-        let mut engine = ExecutionEngine::new(0.10, 10.0);
+        let mut engine =
+            ExecutionEngine::new(0.10, 10.0).with_sizer(PositionSizer::new(500.0, 0.05, 0.25));
         let signal = TradeSignal {
             ticker: "TESTSYM".into(),
             side: TradeSide::Buy,
@@ -335,7 +358,15 @@ mod tests {
 
     #[test]
     fn test_position_limit_without_kelly() {
-        let mut engine = ExecutionEngine::new(0.80, 5.0).with_kelly_sizing(false);
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = ExecutionEngine::new(0.80, 5.0)
+            .with_kelly_sizing(false)
+            .with_log_path(
+                dir.path()
+                    .join("trades.jsonl")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         let signal = TradeSignal {
             ticker: "ETH".into(),
             side: TradeSide::Buy,
@@ -344,10 +375,20 @@ mod tests {
             confidence: 0.95,
             timestamp_ns: ts_now(),
         };
-        assert!(matches!(
-            engine.process_signal(signal),
-            ExecutionDecision::RejectedPositionLimit { .. }
-        ));
+        match engine.process_signal(signal) {
+            ExecutionDecision::Executed {
+                quantity,
+                price,
+                sizing,
+                ..
+            } => {
+                assert!(quantity * price <= 5.0);
+                assert!(quantity * price > 4.9);
+                assert_eq!(quantity, sizing.position_units);
+                assert_eq!(quantity, engine.ghost_wallet.balance("ETH") as f64);
+            }
+            other => panic!("expected capped execution, got {other:?}"),
+        }
     }
 
     #[test]
@@ -387,6 +428,100 @@ mod tests {
         let json = r#"{"ticker":"TESTSYM","side":"buy","price":1.0,"quantity":1.0,"confidence":0.9,"timestamp_ns":0}"#;
         let sig: TradeSignal = serde_json::from_str(json).unwrap();
         assert_eq!(sig.side, TradeSide::Buy);
+    }
+
+    fn signal(price: f64, side: TradeSide, confidence: f32) -> TradeSignal {
+        TradeSignal {
+            ticker: "TESTSYM".into(),
+            side,
+            price,
+            quantity: 100_000.0,
+            confidence,
+            timestamp_ns: ts_now(),
+        }
+    }
+
+    #[test]
+    fn cap_applies_to_wallet_audit_and_decision_at_different_prices_and_edges() {
+        for price in [0.01, 1.0, 3500.0] {
+            for confidence in [0.2, 0.4, 0.98, 1.0] {
+                let dir = tempfile::tempdir().unwrap();
+                let log = dir.path().join("fills.jsonl");
+                let mut engine = ExecutionEngine::new(0.15, 5.0)
+                    .with_sizer(PositionSizer::new(500.0, 5.0, 0.25))
+                    .with_log_path(log.to_string_lossy().into_owned());
+                for side in [
+                    TradeSide::Buy,
+                    TradeSide::Sell,
+                    TradeSide::Buy,
+                    TradeSide::Sell,
+                ] {
+                    let before_qty = engine.ghost_wallet.balance("TESTSYM") as f64;
+                    let before_atp = engine.ghost_wallet.balance_atp as f64;
+                    match engine.process_signal(signal(price, side, confidence)) {
+                        ExecutionDecision::Executed {
+                            quantity, sizing, ..
+                        } => {
+                            assert!(quantity > 0.0 && quantity * price <= 5.0);
+                            assert_eq!(quantity, sizing.position_units);
+                            let delta =
+                                (engine.ghost_wallet.balance("TESTSYM") as f64 - before_qty).abs();
+                            assert!((delta - quantity).abs() < quantity * 1e-6);
+                            if side == TradeSide::Buy {
+                                assert!(before_atp - engine.ghost_wallet.balance_atp as f64 <= 5.0);
+                            }
+                        }
+                        other => panic!("expected capped execution, got {other:?}"),
+                    }
+                }
+                let fills = std::fs::read_to_string(log).unwrap();
+                assert_eq!(fills.lines().count(), 4);
+                for line in fills.lines() {
+                    let fill: serde_json::Value = serde_json::from_str(line).unwrap();
+                    assert!(fill["trade_value_usdt"].as_f64().unwrap() <= 5.0);
+                    assert!(fill["quantity"].as_f64().unwrap() * price <= 5.0);
+                }
+                assert_eq!(engine.ghost_wallet.trade_count, 4);
+                assert_eq!(engine.ghost_wallet.closed_trade_count, 2);
+                let realized: f32 = engine.ghost_wallet.realized_pnls.values().sum();
+                assert!((realized - engine.ghost_wallet.cumulative_pnl).abs() < 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_sizes_prices_and_unfillable_orders_never_report_executed() {
+        let mut engine = ExecutionEngine::default();
+        for price in [
+            0.0,
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+        ] {
+            assert!(matches!(
+                engine.process_signal(signal(price, TradeSide::Buy, 1.0)),
+                ExecutionDecision::RejectedPositionLimit { .. }
+            ));
+        }
+        for confidence in [f32::NAN, f32::INFINITY, -0.1, 1.1] {
+            assert!(matches!(
+                engine.process_signal(signal(1.0, TradeSide::Buy, confidence)),
+                ExecutionDecision::RejectedLowConfidence { .. }
+            ));
+        }
+        assert!(matches!(
+            engine.process_signal(signal(1.0, TradeSide::Sell, 1.0)),
+            ExecutionDecision::RejectedPositionLimit { .. }
+        ));
+        engine.ghost_wallet.balance_atp = 0.0;
+        assert!(matches!(
+            engine.process_signal(signal(1.0, TradeSide::Buy, 1.0)),
+            ExecutionDecision::RejectedNoEdge { .. }
+        ));
+        assert_eq!(engine.ghost_wallet.trade_count, 0);
+        assert_eq!(engine.confidence_stats.executed, 0);
     }
 
     #[test]
