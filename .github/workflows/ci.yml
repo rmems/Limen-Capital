@@ -34,12 +34,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust 1.98.1 (MSRV / latest stable pin)
+      - name: Install Rust 1.99.0 (MSRV)
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
         with:
-          # Pin exact version so CI verifies declared rust-version = "1.98"
+          # Pin exact version so CI verifies declared rust-version = "1.99"
           # rather than a floating `stable` channel.
-          toolchain: 1.98.1
+          toolchain: 1.99.0
           components: rustfmt, clippy
 
       - name: Cache Cargo + target
@@ -60,6 +60,13 @@ jobs:
 
       - name: Test
         run: cargo test --locked -- --nocapture
+
+      - name: Build and test each optional library feature
+        run: |
+          for feature in kinetic snn corpus-ipc axon-encoder plasticity-lab; do
+            cargo build --locked --no-default-features --features "$feature"
+            cargo test --locked --no-default-features --features "$feature"
+          done
 
   julia:
     name: Julia ${{ matrix.julia-version }} (brain CPU)
@@ -109,7 +116,7 @@ jobs:
           OPENBLAS_NUM_THREADS: '1'
         run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
 
-  # Structure + git-only dep pins (no full GPU instantiate).
+  # Structure + validated dependency sources (no full GPU instantiate).
   integration:
     name: Integration structure gate
     runs-on: ubuntu-latest
@@ -121,10 +128,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust 1.98.1
+      - name: Install Rust 1.99.0
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
         with:
-          toolchain: 1.98.1
+          toolchain: 1.99.0
 
       - name: Cache Cargo + target
         uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2

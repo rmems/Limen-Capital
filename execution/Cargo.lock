@@ -18,6 +18,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "axon-encoder"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9a7cc719717f712b69baf57edb06c056b390a5a23c3fdca39d6e35f9ff59733"
+dependencies = [
+ "rand 0.10.3",
+]
+
+[[package]]
 name = "base64"
 version = "0.21.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -158,6 +167,17 @@ name = "core_detect"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
+
+[[package]]
+name = "corpus-ipc"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6acf2ecca63743f455b77fb1fef96afd39af0cf621277c5bad56c78d6aff28bf"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "cpufeatures"
@@ -715,8 +735,9 @@ dependencies = [
 
 [[package]]
 name = "kinetic-signals"
-version = "0.4.0"
-source = "git+https://github.com/rmems/kinetic-signals?rev=ccc883107e6763969179f036ac33ae22dffdc865#ccc883107e6763969179f036ac33ae22dffdc865"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee861c5b89d21b02f96fc60dced9583f5393cb86f579d5e61298a900c66d0bf2"
 
 [[package]]
 name = "lazy_static"
@@ -815,8 +836,19 @@ dependencies = [
 
 [[package]]
 name = "neuromod"
-version = "0.5.0"
-source = "git+https://github.com/Limen-Neural/neuromod?rev=2a548da6006fedb732b07491b69023476b0cc339#2a548da6006fedb732b07491b69023476b0cc339"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e0a02908726636a6c0ce971df297923914a67766d497c5436facf743c68c329"
+dependencies = [
+ "rand 0.10.3",
+ "serde",
+]
+
+[[package]]
+name = "neuromod"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24e8c6418345bd055f33bfb45d90cdb98f3caad2fd16c62b43fca6d91c1182d0"
 dependencies = [
  "rand 0.10.3",
  "serde",
@@ -939,6 +971,18 @@ name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+
+[[package]]
+name = "plasticity-lab"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "557c71ef72a6101f63ba7c1b845cc6b6ccdb5c2b8e1bc66149192d0eb4f6130d"
+dependencies = [
+ "neuromod 0.6.0",
+ "rand 0.10.3",
+ "serde",
+ "thiserror",
+]
 
 [[package]]
 name = "potential_utf"
@@ -1350,13 +1394,16 @@ dependencies = [
 name = "spikenaut-execution-engine"
 version = "0.1.0"
 dependencies = [
+ "axon-encoder",
  "base64 0.22.1",
  "bytes",
  "chrono",
+ "corpus-ipc",
  "ed25519-dalek",
  "kinetic-signals",
  "metabolic-ledger",
- "neuromod",
+ "neuromod 0.7.0",
+ "plasticity-lab",
  "rand 0.8.8",
  "reqwest",
  "serde",
@@ -1483,6 +1530,26 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "thiserror"
+version = "2.0.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
+dependencies = [
+ "thiserror-impl",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "2.0.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
 ]
 
 [[package]]

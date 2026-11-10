@@ -5,20 +5,23 @@ Built for experimental spiking / liquid-state market research — **not live cap
 
 This repo is a **standalone application** (your personal/org remote). It is **not**
 published under the Limen-Neural GitHub organization. It *depends on* validated
-git+rev library pins (most now under `rmems/`; `neuromod` remains on Limen-Neural);
+crates.io releases and git+rev library pins (see `docs/deps.md`);
 in-tree `naut_core` works without them.
 
-## Dependencies (git pins only)
+## Dependencies
 
-Validated packages are pulled by **`git` + `rev`** (Cargo / Julia
-`[sources]`). No sibling `Limen-Neural/` checkout is required.
+Validated Rust packages use **crates.io releases** with `Cargo.lock`, except
+`metabolic-ledger`, which retains its **`git` + `rev`** pin. Julia packages retain
+`[sources]` pins. No sibling `Limen-Neural/` checkout is required.
 
 | Package | Role |
 |---------|------|
 | **metabolic-ledger** | Ghost wallet, ATP gates, JSONL (git pin) |
 | **LiquidCortex.jl** | Preferred CUDA LSM (optional; else `naut_core`) |
 | **TemporalFocus** (NeuroPulse.jl) | Optional relevance package |
-| **binary_wire** (in-tree) | MarketPulse 120B / ReadoutPacket 88B until corpus-ipc publishes them |
+| **binary_wire** (in-tree) | MarketPulse 120B / ReadoutPacket 88B; corpus-ipc migration deferred |
+| **kinetic-signals / neuromod** | Optional published libraries (`kinetic` / `snn`) |
+| **corpus-ipc / axon-encoder / plasticity-lab** | Optional published libraries (same-named features); runtime wiring deferred |
 
 See **[docs/deps.md](docs/deps.md)**, **[docs/wire-protocol-v1.md](docs/wire-protocol-v1.md)**,
 **[docs/SECURITY.md](docs/SECURITY.md)**, the ownership contract in
@@ -69,7 +72,7 @@ Limen-Capital/
 
 ### Prerequisites
 
-- Julia **1.13** (Pkg `[sources]` pins; CI uses latest stable 1.13), Rust **1.98+** (CI pins 1.98.1), network for first-time git deps
+- Julia **1.13** (Pkg `[sources]` pins; CI uses latest stable 1.13), Rust **1.99+** (CI pins 1.99.0), network for first-time dependencies
 - Optional: NVIDIA GPU for full EnsembleBrain / research runs
 
 ### 1. Structure + unit tests
