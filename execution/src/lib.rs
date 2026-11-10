@@ -4,12 +4,11 @@
 //! ```text
 //! TradeSignal → confidence gate → Neutral filter
 //!   → fractional Kelly size (PositionSizer)
-//!   → max-position gate → metabolic-ledger ATP ghost trade → JSONL
+//!   → max-position gate → metabolic-ledger caller-sized ghost fill → JSONL
 //! ```
 //!
-//! Note: `metabolic-ledger` sizes spend from wallet ATP × ledger Kelly;
-//! this module's PositionSizer is the **policy surface** for confidence→size
-//! and soft limits, logged on every fill.
+//! PositionSizer owns confidence→quantity. The ledger applies that quantity
+//! (rounded to its legacy f32 units) and explicit simulated friction once.
 
 pub mod binary_wire;
 pub mod dydx;
@@ -22,6 +21,7 @@ pub mod universe;
 pub mod wire;
 pub mod zmq_curve;
 
+use metabolic_ledger::{apply_ghost_fill, GhostFill, Side, METABOLIC_COST};
 pub use metabolic_ledger::{execute_buy, execute_sell, GhostWallet, MarketPrices};
 
 use crate::kelly::{PositionSizer, PositionSizingDecision};
@@ -68,6 +68,7 @@ impl TradeSignal {
 /// Execution engine: gates + Kelly + metabolic-ledger (one Decision module).
 pub struct ExecutionEngine {
     pub confidence_threshold: f32,
+    /// Maximum fill quantity and total long holdings per asset.
     pub max_position_size: f64,
     pub ghost_wallet: GhostWallet,
     pub sizer: PositionSizer,
@@ -149,6 +150,19 @@ impl ExecutionEngine {
             };
         }
 
+        if !signal.price.is_finite()
+            || signal.price <= 0.0
+            || !signal.confidence.is_finite()
+            || !(0.0..=1.0).contains(&signal.confidence)
+            || !self.max_position_size.is_finite()
+            || self.max_position_size <= 0.0
+        {
+            return ExecutionDecision::RejectedFill {
+                reason: "invalid price, confidence, or position limit".into(),
+                latency_ns: latency,
+            };
+        }
+
         // Size: fractional Kelly from ATP bankroll (policy)
         self.sync_sizer_balance();
         let sizing = self
@@ -178,7 +192,7 @@ impl ExecutionEngine {
             };
         }
 
-        if quantity <= 0.0 {
+        if !quantity.is_finite() || quantity <= 0.0 {
             return ExecutionDecision::RejectedNoEdge {
                 reason: "position size is zero".into(),
                 latency_ns: latency,
@@ -186,57 +200,93 @@ impl ExecutionEngine {
             };
         }
 
-        // Gate 3: Soft max position (on policy size)
-        if quantity > self.max_position_size {
+        // The legacy ghost ledger uses f32. Gate the actual fill as well as
+        // policy size so rounding cannot bypass the limit.
+        let fill_quantity = quantity as f32;
+        let fill_price = signal.price as f32;
+        if !fill_quantity.is_finite()
+            || fill_quantity <= 0.0
+            || !fill_price.is_finite()
+            || fill_price <= 0.0
+        {
+            return ExecutionDecision::RejectedFill {
+                reason: "price or quantity is outside ghost ledger precision".into(),
+                latency_ns: latency,
+            };
+        }
+        let projected_holdings = if signal.side == TradeSide::Buy {
+            // Match the ledger's f32 inventory addition.
+            (self.ghost_wallet.balance(&signal.ticker) + fill_quantity) as f64
+        } else {
+            0.0
+        };
+        if quantity > self.max_position_size
+            || fill_quantity as f64 > self.max_position_size
+            || projected_holdings > self.max_position_size
+        {
             warn!(
                 "Signal rejected: size {} > max {}",
                 quantity, self.max_position_size
             );
             return ExecutionDecision::RejectedPositionLimit {
                 reason: format!(
-                    "Quantity {} exceeds max {}",
-                    quantity, self.max_position_size
+                    "Quantity {} or resulting holdings {} exceeds max {}",
+                    quantity, projected_holdings, self.max_position_size
                 ),
                 latency_ns: latency,
             };
         }
 
-        // Execute via metabolic-ledger (ATP energy commitment inside ledger)
-        self.step_counter += 1;
+        let Some(step) = self.step_counter.checked_add(1) else {
+            return ExecutionDecision::RejectedFill {
+                reason: "execution step counter exhausted".into(),
+                latency_ns: latency,
+            };
+        };
+        self.step_counter = step;
         let reason = format!(
             "snn_conf={:.3};kelly_frac={:.4};policy_qty={:.6};tier={:?}",
             signal.confidence, sizing.kelly_fraction, quantity, sizing.risk_tier
         );
 
-        match signal.side {
-            TradeSide::Buy => {
-                execute_buy(
-                    &mut self.ghost_wallet,
-                    &signal.ticker,
-                    signal.price as f32,
-                    self.step_counter,
-                    &reason,
-                    Some(&self.log_path),
-                );
+        let trades_before = self.ghost_wallet.trade_count;
+        let fill = GhostFill {
+            asset: &signal.ticker,
+            side: match signal.side {
+                TradeSide::Buy => Side::Buy,
+                TradeSide::Sell => Side::Sell,
+                TradeSide::Neutral => unreachable!("neutral signals return before sizing"),
+            },
+            price: fill_price,
+            quantity: fill_quantity,
+            fee: fill_price * fill_quantity * METABOLIC_COST,
+            step,
+            reason: &reason,
+        };
+        let record = match apply_ghost_fill(&mut self.ghost_wallet, fill, Some(&self.log_path)) {
+            Ok(record) if self.ghost_wallet.trade_count > trades_before => record,
+            Ok(_) => {
+                return ExecutionDecision::RejectedFill {
+                    reason: "ledger did not commit a fill".into(),
+                    latency_ns: latency,
+                }
             }
-            TradeSide::Sell => {
-                execute_sell(
-                    &mut self.ghost_wallet,
-                    &signal.ticker,
-                    signal.price as f32,
-                    self.step_counter,
-                    &reason,
-                    Some(&self.log_path),
-                );
+            Err(err) => {
+                warn!("[{}] Fill rejected: {}", signal.ticker, err);
+                return ExecutionDecision::RejectedFill {
+                    reason: err.to_string(),
+                    latency_ns: latency,
+                };
             }
-            TradeSide::Neutral => {}
-        }
+        };
+        let quantity = record.quantity as f64;
+        let price = record.price_usd as f64;
 
         info!(
             "[{}] EXECUTE {:?} @ ${:.4} qty≈{:.6} kelly={:.3} conf={:.2} lat={}ns ATP={:.2}",
             signal.ticker,
             signal.side,
-            signal.price,
+            price,
             quantity,
             sizing.kelly_fraction,
             signal.confidence,
@@ -248,7 +298,7 @@ impl ExecutionEngine {
             ticker: signal.ticker,
             side: signal.side,
             quantity,
-            price: signal.price,
+            price,
             confidence: signal.confidence,
             kelly_fraction: sizing.kelly_fraction,
             latency_ns: latency,
@@ -284,6 +334,11 @@ pub enum ExecutionDecision {
         reason: String,
         latency_ns: i64,
         kelly_fraction: f64,
+    },
+    /// No fill committed, including insufficient holdings/funds or log I/O failure.
+    RejectedFill {
+        reason: String,
+        latency_ns: i64,
     },
 }
 
