@@ -61,6 +61,9 @@ jobs:
       - name: Test
         run: cargo test --locked -- --nocapture
 
+      - name: Test Alpaca client and paper-only loop
+        run: cargo test --locked --features live-alpaca
+
       - name: Build and test each optional library feature
         run: |
           for feature in kinetic snn corpus-ipc axon-encoder plasticity-lab; do

@@ -7,8 +7,8 @@
 //! Fills happen at the limit price and pay `fee_ratio` of notional.
 //! Unfilled orders are cancelled after `stale_ticks` ticks.
 
+use crate::live::alpaca::types::{OrderSide, OrderState};
 use crate::live::risk::ApprovedOrder;
-use crate::live::robinhood::types::{OrderSide, OrderState};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

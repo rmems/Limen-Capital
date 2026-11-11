@@ -45,13 +45,10 @@ bytes = "1.5"
 # Runtime tradeable universe (`config/universe.toml`)
 toml = "0.8"
 
-# --- live-robinhood (feature-gated; off by default; RM-2436) ---
-# Ed25519 request signing for the Robinhood Crypto Trading API
-ed25519-dalek = { version = "2.1", optional = true }
-base64 = { version = "0.22", optional = true }
+# --- live-alpaca (feature-gated; off by default; RM-2436) ---
 # client_order_id idempotency keys
 uuid = { version = "1", features = ["v4", "serde"], optional = true }
-# Backoff jitter + synthetic paper quotes
+# Synthetic paper quotes
 rand = { version = "0.8", optional = true }
 [features]
 default = []
@@ -63,9 +60,9 @@ snn = ["dep:neuromod"]
 corpus-ipc = ["dep:corpus-ipc"]
 axon-encoder = ["dep:axon-encoder"]
 plasticity-lab = ["dep:plasticity-lab"]
-# Live micro-capital experiment: Robinhood Crypto adapter + decision loop (RM-2436).
+# Live micro-capital experiment: Alpaca equity adapter + decision loop (RM-2436).
 # Off by default so `cargo build` compiles no new dependencies.
-live-robinhood = ["dep:ed25519-dalek", "dep:base64", "dep:uuid", "dep:rand"]
+live-alpaca = ["dep:uuid", "dep:rand"]
 
 [[bin]]
 name = "train_ghost"
@@ -79,7 +76,7 @@ path = "src/bin/market_sim.rs"
 [[bin]]
 name = "limen-live"
 path = "src/bin/limen_live.rs"
-required-features = ["live-robinhood"]
+required-features = ["live-alpaca"]
 
 [dev-dependencies]
 tempfile = "3"

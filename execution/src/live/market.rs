@@ -1,8 +1,8 @@
 //! Quote sources: the venue, or a seeded synthetic walk for offline paper runs.
 
+use crate::live::alpaca::types::BestBidAsk;
+use crate::live::alpaca::{AlpacaClient, ClientError};
 use crate::live::risk::PairRules;
-use crate::live::robinhood::types::BestBidAsk;
-use crate::live::robinhood::{ClientError, RobinhoodClient};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::future::Future;
@@ -16,14 +16,14 @@ pub trait MarketSource: Send {
     fn quote<'a>(&'a mut self, symbol: &'a str) -> QuoteFuture<'a>;
 }
 
-/// Live quotes from Robinhood.
-pub struct RobinhoodMarket {
-    pub client: RobinhoodClient,
+/// Live quotes from Alpaca.
+pub struct AlpacaMarket {
+    pub client: AlpacaClient,
 }
 
-impl MarketSource for RobinhoodMarket {
+impl MarketSource for AlpacaMarket {
     fn label(&self) -> String {
-        format!("robinhood ({})", self.client.base_url())
+        format!("alpaca ({})", self.client.base_url())
     }
 
     fn quote<'a>(&'a mut self, symbol: &'a str) -> QuoteFuture<'a> {
