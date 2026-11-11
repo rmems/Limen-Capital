@@ -815,8 +815,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "metabolic-ledger"
-version = "0.1.0"
-source = "git+https://github.com/rmems/metabolic-ledger?rev=825d6a9a8683356104e856dd22d31d8cb22dae1b#825d6a9a8683356104e856dd22d31d8cb22dae1b"
+version = "0.2.0"
+source = "git+https://github.com/rmems/metabolic-ledger?rev=d7529616cf1f03077c635877053a75a326d91574#d7529616cf1f03077c635877053a75a326d91574"
 dependencies = [
  "chrono",
  "serde",

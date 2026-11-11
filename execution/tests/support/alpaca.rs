@@ -136,6 +136,15 @@ impl MockAlpaca {
     }
 }
 
+fn header<'a>(request: &'a RecordedRequest, name: &str) -> Option<&'a str> {
+    request.headers.get(name).and_then(|v| v.to_str().ok())
+}
+
+fn authorized(request: &RecordedRequest) -> bool {
+    header(request, "APCA-API-KEY-ID") == Some(KEY_ID)
+        && header(request, "APCA-API-SECRET-KEY") == Some(SECRET_KEY)
+}
+
 async fn handle(
     req: Request<Body>,
     state: Arc<Mutex<State>>,
@@ -150,57 +159,58 @@ async fn handle(
     };
     let mut state = state.lock().unwrap();
     state.requests.push(request.clone());
-    if request
-        .headers
-        .get("APCA-API-KEY-ID")
-        .and_then(|v| v.to_str().ok())
-        != Some(KEY_ID)
-        || request
-            .headers
-            .get("APCA-API-SECRET-KEY")
-            .and_then(|v| v.to_str().ok())
-            != Some(SECRET_KEY)
-    {
+    if !authorized(&request) {
         return Ok(error(401, "unauthorized"));
     }
+    route(&mut state, &request)
+}
+
+fn route(state: &mut State, request: &RecordedRequest) -> Result<Response<Body>, std::io::Error> {
     let url = reqwest::Url::parse(&format!("http://localhost{}", request.path)).unwrap();
     let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
-    let response = match (request.method.as_str(), url.path()) {
+    let (method, path) = (request.method.as_str(), url.path());
+    let response = match (method, path) {
         ("GET", "/v2/account") => response(200, state.account.clone()),
         ("GET", "/v2/positions") => response(200, json!(state.positions)),
-        ("GET", "/v2/orders") => list_orders(&state, &query),
-        ("POST", "/v2/orders") => return place(&mut state, &request),
-        ("GET", "/v2/orders:by_client_order_id") => {
-            let index = query.get("client_order_id").and_then(|id| {
-                state
-                    .orders
-                    .iter()
-                    .position(|o| o["client_order_id"] == *id)
-            });
-            lookup(&mut state, index)
-        }
-        (method, path) if path.starts_with("/v2/orders/") => {
-            let id = &path["/v2/orders/".len()..];
-            let index = state.orders.iter().position(|o| o["id"] == id);
-            match (method, index) {
-                ("GET", _) => lookup(&mut state, index),
-                ("DELETE", Some(i)) => {
-                    if closed(&state.orders[i]) {
-                        error(422, "order is not cancelable")
-                    } else {
-                        state.polls.remove(id);
-                        state.orders[i]["status"] = json!("canceled");
-                        state.orders[i]["canceled_at"] = json!(TIME);
-                        Response::builder().status(204).body(Body::empty()).unwrap()
-                    }
-                }
-                ("DELETE", None) => error(404, "order not found"),
-                _ => error(404, "unsupported mock route"),
-            }
+        ("GET", "/v2/orders") => list_orders(state, &query),
+        ("POST", "/v2/orders") => return place(state, request),
+        ("GET", "/v2/orders:by_client_order_id") => by_client_id(state, &query),
+        _ if path.starts_with("/v2/orders/") => {
+            order_by_id(state, method, &path["/v2/orders/".len()..])
         }
         _ => error(404, "unsupported mock route"),
     };
     Ok(response)
+}
+
+fn by_client_id(state: &mut State, query: &HashMap<String, String>) -> Response<Body> {
+    let index = query.get("client_order_id").and_then(|id| {
+        state
+            .orders
+            .iter()
+            .position(|o| o["client_order_id"] == *id)
+    });
+    lookup(state, index)
+}
+
+fn order_by_id(state: &mut State, method: &str, id: &str) -> Response<Body> {
+    let index = state.orders.iter().position(|o| o["id"] == id);
+    match (method, index) {
+        ("GET", _) => lookup(state, index),
+        ("DELETE", Some(i)) => cancel_order(state, id, i),
+        ("DELETE", None) => error(404, "order not found"),
+        _ => error(404, "unsupported mock route"),
+    }
+}
+
+fn cancel_order(state: &mut State, id: &str, i: usize) -> Response<Body> {
+    if closed(&state.orders[i]) {
+        return error(422, "order is not cancelable");
+    }
+    state.polls.remove(id);
+    state.orders[i]["status"] = json!("canceled");
+    state.orders[i]["canceled_at"] = json!(TIME);
+    Response::builder().status(204).body(Body::empty()).unwrap()
 }
 
 fn response(status: u16, body: Value) -> Response<Body> {
@@ -283,45 +293,40 @@ fn positive(value: &Value) -> bool {
         .is_some_and(|n| n.is_finite() && n > 0.0)
 }
 
-fn place(state: &mut State, request: &RecordedRequest) -> Result<Response<Body>, std::io::Error> {
-    let Ok(mut order) = serde_json::from_slice::<Value>(&request.body) else {
-        return Ok(error(422, "invalid JSON"));
-    };
-    let valid = order.is_object()
-        && order["type"] == "limit"
+fn valid_shape(order: &Value) -> bool {
+    order["type"] == "limit"
         && order["time_in_force"] == "day"
         && matches!(order["side"].as_str(), Some("buy" | "sell"))
         && order["symbol"].as_str().is_some_and(|s| !s.is_empty())
         && order["client_order_id"]
             .as_str()
             .is_some_and(|s| !s.is_empty() && s.len() <= 128)
-        && order.get("qty").is_some() != order.get("notional").is_some()
+}
+
+fn size_field(order: &Value) -> Option<&Value> {
+    order.get("qty").or_else(|| order.get("notional"))
+}
+
+fn valid_size(order: &Value) -> bool {
+    order.get("qty").is_some() != order.get("notional").is_some()
+        && size_field(order).is_some_and(positive)
         && positive(&order["limit_price"])
-        && positive(
-            order
-                .get("qty")
-                .or_else(|| order.get("notional"))
-                .unwrap_or(&Value::Null),
-        )
-        && order.get("extended_hours").is_none_or(|v| v == false);
-    if !valid {
-        return Ok(error(
-            422,
-            "expected day limit order with client_order_id and exactly one size",
-        ));
-    }
-    if state
+        && order.get("extended_hours").is_none_or(|v| v == false)
+}
+
+fn valid_order(order: &Value) -> bool {
+    order.is_object() && valid_shape(order) && valid_size(order)
+}
+
+fn client_id_taken(state: &State, order: &Value) -> bool {
+    state
         .orders
         .iter()
         .any(|o| o["client_order_id"] == order["client_order_id"])
-    {
-        return Ok(error(422, "client_order_id must be unique"));
-    }
-    let reply = std::mem::take(&mut state.next_place);
-    if let PlaceReply::Status(status) = reply {
-        return Ok(error(status, "injected place failure"));
-    }
-    // Preserve decimal strings; responses always include both nullable size fields.
+}
+
+// Preserve decimal strings; responses always include both nullable size fields.
+fn normalize_sizes(order: &mut Value) {
     for key in ["qty", "notional", "limit_price"] {
         order[key] = match order.get(key) {
             Some(Value::Number(n)) => json!(n.to_string()),
@@ -329,6 +334,9 @@ fn place(state: &mut State, request: &RecordedRequest) -> Result<Response<Body>,
             None => Value::Null,
         };
     }
+}
+
+fn assign_order(state: &State, order: &mut Value) {
     let mut sequence = state.orders.len() + 100;
     loop {
         let id = format!("00000000-0000-4000-8000-{sequence:012}");
@@ -351,6 +359,27 @@ fn place(state: &mut State, request: &RecordedRequest) -> Result<Response<Body>,
     for key in ["filled_at", "canceled_at", "expired_at", "failed_at"] {
         order[key] = Value::Null;
     }
+}
+
+fn place(state: &mut State, request: &RecordedRequest) -> Result<Response<Body>, std::io::Error> {
+    let Ok(mut order) = serde_json::from_slice::<Value>(&request.body) else {
+        return Ok(error(422, "invalid JSON"));
+    };
+    if !valid_order(&order) {
+        return Ok(error(
+            422,
+            "expected day limit order with client_order_id and exactly one size",
+        ));
+    }
+    if client_id_taken(state, &order) {
+        return Ok(error(422, "client_order_id must be unique"));
+    }
+    let reply = std::mem::take(&mut state.next_place);
+    if let PlaceReply::Status(status) = reply {
+        return Ok(error(status, "injected place failure"));
+    }
+    normalize_sizes(&mut order);
+    assign_order(state, &mut order);
     state.orders.push(order.clone());
     if matches!(reply, PlaceReply::Disconnect) {
         return Err(std::io::Error::other("injected lost POST response"));

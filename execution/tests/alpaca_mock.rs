@@ -99,6 +99,33 @@ async fn key_pair_required_on_every_route_before_mutating_state() {
     );
 }
 
+async fn assert_scripted_polls(client: &Client, server: &MockAlpaca, id: &str) {
+    server.script_order(id, vec![
+        json!({"status": "partially_filled", "filled_qty": "0.004", "filled_avg_price": "599.90"}),
+        json!({"status": "future_venue_status", "filled_qty": "0.004"}),
+        json!({"status": "filled", "filled_qty": "0.01"}),
+    ]);
+    let path = format!("/v2/orders/{id}");
+    assert_eq!(get(client, server, &path).await["filled_qty"], "0.004");
+    assert_eq!(
+        get(
+            client,
+            server,
+            "/v2/orders:by_client_order_id?client_order_id=order-1"
+        )
+        .await["status"],
+        "future_venue_status"
+    );
+    assert_eq!(
+        get(client, server, "/v2/orders")
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 #[tokio::test]
 async fn place_poll_cancel_and_record_real_wire_shapes() {
     let server = MockAlpaca::start().await;
@@ -108,30 +135,8 @@ async fn place_poll_cancel_and_record_real_wire_shapes() {
     assert_eq!(placed["qty"], "0.01");
     assert!(placed["notional"].is_null());
     let id = placed["id"].as_str().unwrap();
-    server.script_order(id, vec![
-        json!({"status": "partially_filled", "filled_qty": "0.004", "filled_avg_price": "599.90"}),
-        json!({"status": "future_venue_status", "filled_qty": "0.004"}),
-        json!({"status": "filled", "filled_qty": "0.01"}),
-    ]);
+    assert_scripted_polls(&client, &server, id).await;
     let path = format!("/v2/orders/{id}");
-    assert_eq!(get(&client, &server, &path).await["filled_qty"], "0.004");
-    assert_eq!(
-        get(
-            &client,
-            &server,
-            "/v2/orders:by_client_order_id?client_order_id=order-1"
-        )
-        .await["status"],
-        "future_venue_status"
-    );
-    assert_eq!(
-        get(&client, &server, "/v2/orders")
-            .await
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
     let canceled = request(&client, &server, Method::DELETE, &path)
         .send()
         .await
@@ -153,20 +158,42 @@ async fn place_poll_cancel_and_record_real_wire_shapes() {
     );
 }
 
+async fn post_status(client: &Client, server: &MockAlpaca, id: &str) -> u16 {
+    request(client, server, Method::POST, "/v2/orders")
+        .json(&order(id))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+// A fresh HTTP client represents reconnect/restart; the venue retains the order.
+async fn recover_lost_order(server: &MockAlpaca) -> Value {
+    let client = http();
+    request(
+        &client,
+        server,
+        Method::GET,
+        "/v2/orders:by_client_order_id",
+    )
+    .query(&[("client_order_id", "lost /+?")])
+    .send()
+    .await
+    .unwrap()
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap()
+}
+
 #[tokio::test]
 async fn place_failure_and_lost_response_are_one_shot_and_recoverable() {
     let server = MockAlpaca::start().await;
     let client = http();
     server.next_place_reply(PlaceReply::Status(500));
-    assert_eq!(
-        request(&client, &server, Method::POST, "/v2/orders")
-            .json(&order("failure"))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        500
-    );
+    assert_eq!(post_status(&client, &server, "failure").await, 500);
     assert_eq!(
         get(&client, &server, "/v2/orders?status=all").await,
         json!([])
@@ -177,37 +204,13 @@ async fn place_failure_and_lost_response_are_one_shot_and_recoverable() {
         .send()
         .await
         .is_err());
-    // A fresh HTTP client represents reconnect/restart; the venue retains the order.
-    let client = http();
-    let recovered = request(
-        &client,
-        &server,
-        Method::GET,
-        "/v2/orders:by_client_order_id",
-    )
-    .query(&[("client_order_id", "lost /+?")])
-    .send()
-    .await
-    .unwrap()
-    .error_for_status()
-    .unwrap()
-    .json::<Value>()
-    .await
-    .unwrap();
+    let recovered = recover_lost_order(&server).await;
     assert_eq!(recovered["client_order_id"], "lost /+?");
     assert_eq!(
         get(&client, &server, "/v2/orders?status=all").await,
         json!([recovered])
     );
-    assert_eq!(
-        request(&client, &server, Method::POST, "/v2/orders")
-            .json(&order("lost /+?"))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        422
-    );
+    assert_eq!(post_status(&client, &server, "lost /+?").await, 422);
     assert_eq!(
         server
             .requests()
@@ -301,10 +304,7 @@ async fn fills_expiry_rejection_and_unknown_status_are_explicit_scripts() {
     }
 }
 
-#[tokio::test]
-async fn rejects_wrong_order_shapes_and_unknown_routes_without_creating_orders() {
-    let server = MockAlpaca::start().await;
-    let client = http();
+fn invalid_order_bodies() -> Vec<Value> {
     let mut invalid = vec![json!(null), json!({}), json!({"type": "market"})];
     for (field, value) in [
         ("type", json!("market")),
@@ -327,7 +327,32 @@ async fn rejects_wrong_order_shapes_and_unknown_routes_without_creating_orders()
     let mut missing_size = order("bad");
     missing_size.as_object_mut().unwrap().remove("qty");
     invalid.push(missing_size);
-    for body in invalid {
+    invalid
+}
+
+async fn assert_status(
+    client: &Client,
+    server: &MockAlpaca,
+    method: Method,
+    path: &str,
+    status: u16,
+) {
+    assert_eq!(
+        request(client, server, method, path)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        status,
+        "{path}"
+    );
+}
+
+#[tokio::test]
+async fn rejects_wrong_order_shapes_and_unknown_routes_without_creating_orders() {
+    let server = MockAlpaca::start().await;
+    let client = http();
+    for body in invalid_order_bodies() {
         assert_eq!(
             request(&client, &server, Method::POST, "/v2/orders")
                 .json(&body)
@@ -339,6 +364,8 @@ async fn rejects_wrong_order_shapes_and_unknown_routes_without_creating_orders()
             "{body}"
         );
     }
+    assert_status(&client, &server, Method::POST, "/v2/orders", 422).await;
+    // Raw malformed JSON body is still rejected.
     assert_eq!(
         request(&client, &server, Method::POST, "/v2/orders")
             .body("{")
@@ -354,14 +381,7 @@ async fn rejects_wrong_order_shapes_and_unknown_routes_without_creating_orders()
         "/v2/orders:by_client_order_id",
         "/api/v2/crypto/trading/accounts/",
     ] {
-        assert_eq!(
-            request(&client, &server, Method::GET, path)
-                .send()
-                .await
-                .unwrap()
-                .status(),
-            404
-        );
+        assert_status(&client, &server, Method::GET, path, 404).await;
     }
     assert_eq!(
         get(&client, &server, "/v2/orders?status=all").await,
