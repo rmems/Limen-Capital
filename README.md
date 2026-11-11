@@ -144,6 +144,30 @@ cd brain/
 julia --project=. spike_helm.jl
 ```
 
+## Local notifications for `limen-live`
+
+With `--features live-robinhood`, the paper loop sends one local desktop
+notification per fill, stale-order cancel, decider error, or halt (daily-loss
+cap or Ctrl-C). Normal holds and reaching `--max-ticks` do not notify.
+Notifications identify paper mode, symbol, tick, event details, and journal path.
+`journal.md` (or `--journal PATH`) remains the record; no hosted service is used.
+
+On Linux, install `notify-send` (for example, the `libnotify-bin` package on
+Debian/Ubuntu) and run in the operator's desktop session with its session D-Bus
+environment (`DBUS_SESSION_BUS_ADDRESS`). An unattended user service must inherit
+that environment and have a running desktop notification daemon. Verify delivery
+from the same user/service environment with:
+
+```bash
+notify-send --app-name=limen-live -- "limen-live test" "Local notifications ready"
+```
+
+Missing helpers, unavailable desktop sessions, nonzero exits, or delivery taking
+over five seconds produce a warning without interrupting trading or journaling.
+There is no stderr-only fallback notification and no automatic retry. Headless
+machines without a notification daemon (and non-Linux systems) need a compatible
+local `notify-send` implementation before relying on these alerts.
+
 ## Signal Pipeline
 
 ### Input: 120-byte MarketPulse (from Rust → Julia)
