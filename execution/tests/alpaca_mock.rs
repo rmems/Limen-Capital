@@ -6,7 +6,7 @@ mod support;
 use reqwest::{Client, Method, RequestBuilder};
 use serde_json::{json, Value};
 use std::time::Duration;
-use support::alpaca::{MockAlpaca, PlaceReply, KEY_ID, SECRET_KEY};
+use support::alpaca::{MockAlpaca, PlaceReply, RecordedRequest, KEY_ID, SECRET_KEY};
 
 fn http() -> Client {
     Client::builder()
@@ -16,11 +16,84 @@ fn http() -> Client {
         .unwrap()
 }
 
-fn request(client: &Client, server: &MockAlpaca, method: Method, path: &str) -> RequestBuilder {
-    client
-        .request(method, format!("{}{path}", server.base_url()))
-        .header("APCA-API-KEY-ID", KEY_ID)
-        .header("APCA-API-SECRET-KEY", SECRET_KEY)
+/// One mock venue plus an authenticated HTTP client bound to it.
+struct Session {
+    server: MockAlpaca,
+    client: Client,
+}
+
+impl Session {
+    async fn start() -> Self {
+        Self {
+            server: MockAlpaca::start().await,
+            client: http(),
+        }
+    }
+
+    fn request(&self, method: Method, path: &str) -> RequestBuilder {
+        self.client
+            .request(method, format!("{}{path}", self.server.base_url()))
+            .header("APCA-API-KEY-ID", KEY_ID)
+            .header("APCA-API-SECRET-KEY", SECRET_KEY)
+    }
+
+    fn raw(&self, method: Method, path: &str) -> RequestBuilder {
+        self.client
+            .request(method, format!("{}{path}", self.server.base_url()))
+    }
+
+    async fn get(&self, path: &str) -> Value {
+        self.request(Method::GET, path)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
+
+    async fn status(&self, method: Method, path: &str) -> u16 {
+        self.request(method, path)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16()
+    }
+
+    async fn place(&self, id: &str) -> Value {
+        self.request(Method::POST, "/v2/orders")
+            .json(&order(id))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
+
+    async fn post_status(&self, id: &str) -> u16 {
+        self.request(Method::POST, "/v2/orders")
+            .json(&order(id))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16()
+    }
+
+    fn requests(&self) -> Vec<RecordedRequest> {
+        self.server.requests()
+    }
+
+    /// A fresh HTTP client represents reconnect/restart; the venue retains state.
+    fn reconnect(&mut self) {
+        self.client = http();
+    }
 }
 
 fn order(client_id: &str) -> Value {
@@ -30,35 +103,9 @@ fn order(client_id: &str) -> Value {
     })
 }
 
-async fn get(client: &Client, server: &MockAlpaca, path: &str) -> Value {
-    request(client, server, Method::GET, path)
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap()
-}
-
-async fn place(client: &Client, server: &MockAlpaca, id: &str) -> Value {
-    request(client, server, Method::POST, "/v2/orders")
-        .json(&order(id))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap()
-}
-
 #[tokio::test]
 async fn key_pair_required_on_every_route_before_mutating_state() {
-    let server = MockAlpaca::start().await;
-    let client = http();
+    let session = Session::start().await;
     let routes = [
         (Method::GET, "/v2/account"),
         (Method::GET, "/v2/positions"),
@@ -79,7 +126,7 @@ async fn key_pair_required_on_every_route_before_mutating_state() {
             (Some("wrong"), Some(SECRET_KEY)),
             (Some(KEY_ID), Some("wrong")),
         ] {
-            let mut req = client.request(method.clone(), format!("{}{path}", server.base_url()));
+            let mut req = session.raw(method.clone(), path);
             if let Some(key) = key {
                 req = req.header("APCA-API-KEY-ID", key);
             }
@@ -89,64 +136,57 @@ async fn key_pair_required_on_every_route_before_mutating_state() {
             assert_eq!(req.json(&order("test")).send().await.unwrap().status(), 401);
         }
     }
-    assert_eq!(
-        get(&client, &server, "/v2/orders?status=all").await,
-        json!([])
-    );
-    assert_eq!(
-        get(&client, &server, "/v2/account").await["equity"],
-        "10.00"
-    );
+    assert_eq!(session.get("/v2/orders?status=all").await, json!([]));
+    assert_eq!(session.get("/v2/account").await["equity"], "10.00");
 }
 
-async fn assert_scripted_polls(client: &Client, server: &MockAlpaca, id: &str) {
-    server.script_order(id, vec![
+async fn assert_scripted_polls(session: &Session, client_id: &str) {
+    let placed = session.place(client_id).await;
+    assert_eq!(placed["filled_qty"], "0");
+    assert_eq!(placed["qty"], "0.01");
+    assert!(placed["notional"].is_null());
+    let id = placed["id"].as_str().unwrap();
+    session.server.script_order(id, vec![
         json!({"status": "partially_filled", "filled_qty": "0.004", "filled_avg_price": "599.90"}),
         json!({"status": "future_venue_status", "filled_qty": "0.004"}),
         json!({"status": "filled", "filled_qty": "0.01"}),
     ]);
     let path = format!("/v2/orders/{id}");
-    assert_eq!(get(client, server, &path).await["filled_qty"], "0.004");
+    assert_eq!(session.get(&path).await["filled_qty"], "0.004");
     assert_eq!(
-        get(
-            client,
-            server,
-            "/v2/orders:by_client_order_id?client_order_id=order-1"
-        )
-        .await["status"],
+        session
+            .get(&format!(
+                "/v2/orders:by_client_order_id?client_order_id={client_id}"
+            ))
+            .await["status"],
         "future_venue_status"
     );
-    assert_eq!(
-        get(client, server, "/v2/orders")
-            .await
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(session.get("/v2/orders").await.as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn place_poll_cancel_and_record_real_wire_shapes() {
-    let server = MockAlpaca::start().await;
-    let client = http();
-    let placed = place(&client, &server, "order-1").await;
-    assert_eq!(placed["filled_qty"], "0");
-    assert_eq!(placed["qty"], "0.01");
-    assert!(placed["notional"].is_null());
-    let id = placed["id"].as_str().unwrap();
-    assert_scripted_polls(&client, &server, id).await;
-    let path = format!("/v2/orders/{id}");
-    let canceled = request(&client, &server, Method::DELETE, &path)
-        .send()
-        .await
-        .unwrap();
+async fn place_and_scripted_polls_report_wire_shapes() {
+    let session = Session::start().await;
+    assert_scripted_polls(&session, "order-1").await;
+}
+
+#[tokio::test]
+async fn cancel_clears_script_and_records_real_wire_shapes() {
+    let session = Session::start().await;
+    let placed = session.place("order-1").await;
+    let path = format!("/v2/orders/{}", placed["id"].as_str().unwrap());
+    session.server.script_order(
+        placed["id"].as_str().unwrap(),
+        vec![json!({"status": "partially_filled", "filled_qty": "0.004"})],
+    );
+    assert_eq!(session.get(&path).await["filled_qty"], "0.004");
+    let canceled = session.request(Method::DELETE, &path).send().await.unwrap();
     assert_eq!(canceled.status(), 204);
     assert!(canceled.bytes().await.unwrap().is_empty());
-    assert_eq!(get(&client, &server, &path).await["status"], "canceled");
-    assert_eq!(get(&client, &server, &path).await["filled_qty"], "0.004");
-    assert_eq!(get(&client, &server, "/v2/orders").await, json!([]));
-    let requests = server.requests();
+    assert_eq!(session.get(&path).await["status"], "canceled");
+    assert_eq!(session.get(&path).await["filled_qty"], "0.004");
+    assert_eq!(session.get("/v2/orders").await, json!([]));
+    let requests = session.requests();
     assert_eq!(requests.iter().filter(|r| r.method == "POST").count(), 1);
     assert_eq!(requests.iter().filter(|r| r.method == "DELETE").count(), 1);
     assert_eq!(requests[0].path, "/v2/orders");
@@ -158,61 +198,39 @@ async fn place_poll_cancel_and_record_real_wire_shapes() {
     );
 }
 
-async fn post_status(client: &Client, server: &MockAlpaca, id: &str) -> u16 {
-    request(client, server, Method::POST, "/v2/orders")
-        .json(&order(id))
-        .send()
-        .await
-        .unwrap()
-        .status()
-        .as_u16()
-}
-
-// A fresh HTTP client represents reconnect/restart; the venue retains the order.
-async fn recover_lost_order(server: &MockAlpaca) -> Value {
-    let client = http();
-    request(
-        &client,
-        server,
-        Method::GET,
-        "/v2/orders:by_client_order_id",
-    )
-    .query(&[("client_order_id", "lost /+?")])
-    .send()
-    .await
-    .unwrap()
-    .error_for_status()
-    .unwrap()
-    .json()
-    .await
-    .unwrap()
-}
-
 #[tokio::test]
 async fn place_failure_and_lost_response_are_one_shot_and_recoverable() {
-    let server = MockAlpaca::start().await;
-    let client = http();
-    server.next_place_reply(PlaceReply::Status(500));
-    assert_eq!(post_status(&client, &server, "failure").await, 500);
-    assert_eq!(
-        get(&client, &server, "/v2/orders?status=all").await,
-        json!([])
-    );
-    server.next_place_reply(PlaceReply::Disconnect);
-    assert!(request(&client, &server, Method::POST, "/v2/orders")
+    let mut session = Session::start().await;
+    session.server.next_place_reply(PlaceReply::Status(500));
+    assert_eq!(session.post_status("failure").await, 500);
+    assert_eq!(session.get("/v2/orders?status=all").await, json!([]));
+    session.server.next_place_reply(PlaceReply::Disconnect);
+    assert!(session
+        .request(Method::POST, "/v2/orders")
         .json(&order("lost /+?"))
         .send()
         .await
         .is_err());
-    let recovered = recover_lost_order(&server).await;
+    session.reconnect();
+    let recovered = session
+        .request(Method::GET, "/v2/orders:by_client_order_id")
+        .query(&[("client_order_id", "lost /+?")])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
     assert_eq!(recovered["client_order_id"], "lost /+?");
     assert_eq!(
-        get(&client, &server, "/v2/orders?status=all").await,
+        session.get("/v2/orders?status=all").await,
         json!([recovered])
     );
-    assert_eq!(post_status(&client, &server, "lost /+?").await, 422);
+    assert_eq!(session.post_status("lost /+?").await, 422);
     assert_eq!(
-        server
+        session
             .requests()
             .iter()
             .filter(|r| r.method == "POST")
@@ -220,19 +238,18 @@ async fn place_failure_and_lost_response_are_one_shot_and_recoverable() {
         3
     );
     // The injection was consumed, rather than repeated for later requests.
-    assert_eq!(place(&client, &server, "later").await["status"], "new");
+    assert_eq!(session.place("later").await["status"], "new");
 }
 
 #[tokio::test]
 async fn snapshots_and_seeded_orders_survive_client_restart() {
-    let server = MockAlpaca::start().await;
-    server.set_account(
+    let mut session = Session::start().await;
+    session.server.set_account(
         json!({"id": "account-1", "equity": "9.20", "cash": "3.20", "buying_power": "3.20"}),
     );
-    server.set_positions(vec![json!({"symbol": "SPY", "qty": "0.01", "avg_entry_price": "600.00",
+    session.server.set_positions(vec![json!({"symbol": "SPY", "qty": "0.01", "avg_entry_price": "600.00",
         "market_value": "6.00", "unrealized_pl": "0.00", "side": "long", "asset_class": "us_equity"})]);
-    let client = http();
-    let mut seeded = place(&client, &server, "previous-process").await;
+    let mut seeded = session.place("previous-process").await;
     // A separate venue order, already present when a new process connects.
     // Deliberately occupy the next generated venue ID.
     seeded["id"] = json!("00000000-0000-4000-8000-000000000102");
@@ -240,66 +257,45 @@ async fn snapshots_and_seeded_orders_survive_client_restart() {
     seeded["status"] = json!("filled");
     seeded["filled_qty"] = json!("0.01");
     seeded["filled_avg_price"] = json!("600.00");
-    server.seed_order(seeded.clone());
-    drop(client);
-    let client = http();
-    assert_eq!(get(&client, &server, "/v2/account").await["equity"], "9.20");
+    session.server.seed_order(seeded.clone());
+    session.reconnect();
+    assert_eq!(session.get("/v2/account").await["equity"], "9.20");
+    assert_eq!(session.get("/v2/positions").await[0]["qty"], "0.01");
     assert_eq!(
-        get(&client, &server, "/v2/positions").await[0]["qty"],
-        "0.01"
-    );
-    assert_eq!(
-        get(
-            &client,
-            &server,
-            "/v2/orders?symbols=SPY&status=closed&side=buy"
-        )
-        .await,
+        session
+            .get("/v2/orders?symbols=SPY&status=closed&side=buy")
+            .await,
         json!([seeded])
     );
     assert_eq!(
-        get(
-            &client,
-            &server,
-            "/v2/orders?status=all&direction=asc&limit=1"
-        )
-        .await[0]["client_order_id"],
+        session
+            .get("/v2/orders?status=all&direction=asc&limit=1")
+            .await[0]["client_order_id"],
         "previous-process"
     );
-    assert_eq!(
-        get(&client, &server, "/v2/orders?symbols=QQQ").await,
-        json!([])
-    );
-    let next = place(&client, &server, "after-restart").await;
+    assert_eq!(session.get("/v2/orders?symbols=QQQ").await, json!([]));
+    let next = session.place("after-restart").await;
     assert_ne!(next["id"], "00000000-0000-4000-8000-000000000102");
 }
 
 #[tokio::test]
 async fn fills_expiry_rejection_and_unknown_status_are_explicit_scripts() {
-    let server = MockAlpaca::start().await;
-    let client = http();
+    let session = Session::start().await;
     for status in ["filled", "expired", "rejected", "future_status"] {
-        let placed = place(&client, &server, status).await;
+        let placed = session.place(status).await;
         let id = placed["id"].as_str().unwrap();
-        server.script_order(
+        session.server.script_order(
             id,
             vec![json!({"status": status, "filled_qty": "0.01", "filled_avg_price": "599.95"})],
         );
         let path = format!("/v2/orders/{id}");
         for _ in 0..2 {
-            let snapshot = get(&client, &server, &path).await;
+            let snapshot = session.get(&path).await;
             assert_eq!(snapshot["status"], status);
             assert_eq!(snapshot["filled_qty"], "0.01");
         }
         if status != "future_status" {
-            assert_eq!(
-                request(&client, &server, Method::DELETE, &path)
-                    .send()
-                    .await
-                    .unwrap()
-                    .status(),
-                422
-            );
+            assert_eq!(session.status(Method::DELETE, &path).await, 422);
         }
     }
 }
@@ -330,28 +326,11 @@ fn invalid_order_bodies() -> Vec<Value> {
     invalid
 }
 
-async fn assert_status(
-    client: &Client,
-    server: &MockAlpaca,
-    method: Method,
-    path: &str,
-    status: u16,
-) {
-    assert_eq!(
-        request(client, server, method, path)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        status,
-        "{path}"
-    );
-}
-
-async fn assert_bodies_rejected(client: &Client, server: &MockAlpaca) {
+async fn assert_bodies_rejected(session: &Session) {
     for body in invalid_order_bodies() {
         assert_eq!(
-            request(client, server, Method::POST, "/v2/orders")
+            session
+                .request(Method::POST, "/v2/orders")
                 .json(&body)
                 .send()
                 .await
@@ -363,7 +342,8 @@ async fn assert_bodies_rejected(client: &Client, server: &MockAlpaca) {
     }
     // Raw malformed JSON body is still rejected.
     assert_eq!(
-        request(client, server, Method::POST, "/v2/orders")
+        session
+            .request(Method::POST, "/v2/orders")
             .body("{")
             .send()
             .await
@@ -373,23 +353,24 @@ async fn assert_bodies_rejected(client: &Client, server: &MockAlpaca) {
     );
 }
 
-async fn assert_unknown_routes_404(client: &Client, server: &MockAlpaca) {
+async fn assert_unknown_routes_404(session: &Session) {
     for path in [
         "/v2/orders/absent",
         "/v2/orders:by_client_order_id?client_order_id=absent",
         "/v2/orders:by_client_order_id",
         "/api/v2/crypto/trading/accounts/",
     ] {
-        assert_status(client, server, Method::GET, path, 404).await;
+        assert_eq!(session.status(Method::GET, path).await, 404, "{path}");
     }
 }
 
 // The ticket's notional-sized limit variant is deliberately supported.
-async fn assert_notional_accepted(client: &Client, server: &MockAlpaca) {
+async fn assert_notional_accepted(session: &Session) {
     let mut notional = order("notional");
     notional.as_object_mut().unwrap().remove("qty");
     notional["notional"] = json!("1.00");
-    let placed: Value = request(client, server, Method::POST, "/v2/orders")
+    let placed: Value = session
+        .request(Method::POST, "/v2/orders")
         .json(&notional)
         .send()
         .await
@@ -405,26 +386,22 @@ async fn assert_notional_accepted(client: &Client, server: &MockAlpaca) {
 
 #[tokio::test]
 async fn rejects_wrong_order_shapes_and_unknown_routes_without_creating_orders() {
-    let server = MockAlpaca::start().await;
-    let client = http();
-    assert_bodies_rejected(&client, &server).await;
-    assert_unknown_routes_404(&client, &server).await;
-    assert_eq!(
-        get(&client, &server, "/v2/orders?status=all").await,
-        json!([])
-    );
-    assert_notional_accepted(&client, &server).await;
+    let session = Session::start().await;
+    assert_bodies_rejected(&session).await;
+    assert_unknown_routes_404(&session).await;
+    assert_eq!(session.get("/v2/orders?status=all").await, json!([]));
+    assert_notional_accepted(&session).await;
 }
 
 #[tokio::test]
 async fn parallel_servers_are_isolated_and_drop_stops_connections() {
-    let first = MockAlpaca::start().await;
-    let second = MockAlpaca::start().await;
-    assert_ne!(first.base_url(), second.base_url());
+    let first = Session::start().await;
+    let second = Session::start().await;
+    assert_ne!(first.server.base_url(), second.server.base_url());
+    first.place("same-id").await;
+    second.place("same-id").await;
+    let url = first.server.base_url().to_owned();
     let client = http();
-    place(&client, &first, "same-id").await;
-    place(&client, &second, "same-id").await;
-    let url = first.base_url().to_owned();
     drop(first);
     tokio::task::yield_now().await;
     assert!(client
@@ -432,12 +409,5 @@ async fn parallel_servers_are_isolated_and_drop_stops_connections() {
         .send()
         .await
         .is_err());
-    assert_eq!(
-        get(&client, &second, "/v2/orders")
-            .await
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(second.get("/v2/orders").await.as_array().unwrap().len(), 1);
 }
