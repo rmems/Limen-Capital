@@ -170,16 +170,26 @@ async fn place_and_scripted_polls_report_wire_shapes() {
     assert_scripted_polls(&session, "order-1").await;
 }
 
-fn assert_recorded_wire_shape(requests: &[RecordedRequest]) {
-    assert_eq!(requests.iter().filter(|r| r.method == "POST").count(), 1);
-    assert_eq!(requests.iter().filter(|r| r.method == "DELETE").count(), 1);
-    assert_eq!(requests[0].path, "/v2/orders");
-    assert_eq!(requests[0].headers["apca-api-key-id"], KEY_ID);
-    assert_eq!(requests[0].headers["apca-api-secret-key"], SECRET_KEY);
+fn assert_request_counts(requests: &[RecordedRequest]) {
+    let posts = requests.iter().filter(|r| r.method == "POST").count();
+    let deletes = requests.iter().filter(|r| r.method == "DELETE").count();
+    assert_eq!((posts, deletes), (1, 1));
+}
+
+fn assert_first_request_shape(requests: &[RecordedRequest]) {
+    let first = &requests[0];
+    assert_eq!(first.path, "/v2/orders");
+    assert_eq!(first.headers["apca-api-key-id"], KEY_ID);
+    assert_eq!(first.headers["apca-api-secret-key"], SECRET_KEY);
     assert_eq!(
-        serde_json::from_slice::<Value>(&requests[0].body).unwrap(),
+        serde_json::from_slice::<Value>(&first.body).unwrap(),
         order("order-1")
     );
+}
+
+fn assert_recorded_wire_shape(requests: &[RecordedRequest]) {
+    assert_request_counts(requests);
+    assert_first_request_shape(requests);
 }
 
 #[tokio::test]
@@ -231,16 +241,18 @@ async fn place_failure_and_lost_response_are_one_shot_and_recoverable() {
         session.get("/v2/orders?status=all").await,
         json!([recovered])
     );
+    assert_injection_consumed(&session).await;
+}
+
+// The injection was consumed, rather than repeated for later requests.
+async fn assert_injection_consumed(session: &Session) {
     assert_eq!(session.post_status("lost /+?").await, 422);
-    assert_eq!(
-        session
-            .requests()
-            .iter()
-            .filter(|r| r.method == "POST")
-            .count(),
-        3
-    );
-    // The injection was consumed, rather than repeated for later requests.
+    let posts = session
+        .requests()
+        .iter()
+        .filter(|r| r.method == "POST")
+        .count();
+    assert_eq!(posts, 3);
     assert_eq!(session.place("later").await["status"], "new");
 }
 
@@ -264,11 +276,17 @@ async fn snapshots_and_seeded_orders_survive_client_restart() {
     session.reconnect();
     assert_eq!(session.get("/v2/account").await["equity"], "9.20");
     assert_eq!(session.get("/v2/positions").await[0]["qty"], "0.01");
+    assert_seeded_order_visible(&session, &seeded).await;
+    let next = session.place("after-restart").await;
+    assert_ne!(next["id"], "00000000-0000-4000-8000-000000000102");
+}
+
+async fn assert_seeded_order_visible(session: &Session, seeded: &Value) {
     assert_eq!(
         session
             .get("/v2/orders?symbols=SPY&status=closed&side=buy")
             .await,
-        json!([seeded])
+        json!([seeded.clone()])
     );
     assert_eq!(
         session
@@ -277,8 +295,6 @@ async fn snapshots_and_seeded_orders_survive_client_restart() {
         "previous-process"
     );
     assert_eq!(session.get("/v2/orders?symbols=QQQ").await, json!([]));
-    let next = session.place("after-restart").await;
-    assert_ne!(next["id"], "00000000-0000-4000-8000-000000000102");
 }
 
 #[tokio::test]
