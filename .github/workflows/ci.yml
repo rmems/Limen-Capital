@@ -44,7 +44,7 @@ jobs:
           components: rustfmt, clippy, llvm-tools-preview
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@3f7c3597aa4e6da3f315e128de702ce61e7b2877 # cargo-llvm-cov
 
       - name: Cache Cargo + target
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -67,7 +67,7 @@ jobs:
 
       - name: Upload coverage to Qlty
         if: github.event.pull_request.head.repo.fork != true
-        uses: qltysh/qlty-action/coverage@v2
+        uses: qltysh/qlty-action/coverage@ebcd284bf32e36a030afe15f1e136c7be08b9506 # v2.5.0
         with:
           oidc: true
           files: execution/lcov.info
@@ -130,13 +130,13 @@ jobs:
         run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.test(coverage=true)'
 
       - name: Process Julia coverage
-        uses: julia-actions/julia-processcoverage@v1
+        uses: julia-actions/julia-processcoverage@03114f09f119417c3242a9fb6e0b722676aedf38 # v1
         with:
           directories: src,brain
 
       - name: Upload coverage to Qlty
         if: github.event.pull_request.head.repo.fork != true
-        uses: qltysh/qlty-action/coverage@v2
+        uses: qltysh/qlty-action/coverage@ebcd284bf32e36a030afe15f1e136c7be08b9506 # v2.5.0
         with:
           oidc: true
           files: lcov.info
@@ -171,7 +171,7 @@ jobs:
 
       - name: Complete Qlty coverage
         if: github.event.pull_request.head.repo.fork != true
-        uses: qltysh/qlty-action/coverage@v2
+        uses: qltysh/qlty-action/coverage@ebcd284bf32e36a030afe15f1e136c7be08b9506 # v2.5.0
         with:
           oidc: true
           command: complete
