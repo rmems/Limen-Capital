@@ -348,13 +348,10 @@ async fn assert_status(
     );
 }
 
-#[tokio::test]
-async fn rejects_wrong_order_shapes_and_unknown_routes_without_creating_orders() {
-    let server = MockAlpaca::start().await;
-    let client = http();
+async fn assert_bodies_rejected(client: &Client, server: &MockAlpaca) {
     for body in invalid_order_bodies() {
         assert_eq!(
-            request(&client, &server, Method::POST, "/v2/orders")
+            request(client, server, Method::POST, "/v2/orders")
                 .json(&body)
                 .send()
                 .await
@@ -364,10 +361,9 @@ async fn rejects_wrong_order_shapes_and_unknown_routes_without_creating_orders()
             "{body}"
         );
     }
-    assert_status(&client, &server, Method::POST, "/v2/orders", 422).await;
     // Raw malformed JSON body is still rejected.
     assert_eq!(
-        request(&client, &server, Method::POST, "/v2/orders")
+        request(client, server, Method::POST, "/v2/orders")
             .body("{")
             .send()
             .await
@@ -375,23 +371,25 @@ async fn rejects_wrong_order_shapes_and_unknown_routes_without_creating_orders()
             .status(),
         422
     );
+}
+
+async fn assert_unknown_routes_404(client: &Client, server: &MockAlpaca) {
     for path in [
         "/v2/orders/absent",
         "/v2/orders:by_client_order_id?client_order_id=absent",
         "/v2/orders:by_client_order_id",
         "/api/v2/crypto/trading/accounts/",
     ] {
-        assert_status(&client, &server, Method::GET, path, 404).await;
+        assert_status(client, server, Method::GET, path, 404).await;
     }
-    assert_eq!(
-        get(&client, &server, "/v2/orders?status=all").await,
-        json!([])
-    );
-    // The ticket's notional-sized limit variant is deliberately supported.
+}
+
+// The ticket's notional-sized limit variant is deliberately supported.
+async fn assert_notional_accepted(client: &Client, server: &MockAlpaca) {
     let mut notional = order("notional");
     notional.as_object_mut().unwrap().remove("qty");
     notional["notional"] = json!("1.00");
-    let placed: Value = request(&client, &server, Method::POST, "/v2/orders")
+    let placed: Value = request(client, server, Method::POST, "/v2/orders")
         .json(&notional)
         .send()
         .await
@@ -403,6 +401,19 @@ async fn rejects_wrong_order_shapes_and_unknown_routes_without_creating_orders()
         .unwrap();
     assert_eq!(placed["notional"], "1.00");
     assert!(placed["qty"].is_null());
+}
+
+#[tokio::test]
+async fn rejects_wrong_order_shapes_and_unknown_routes_without_creating_orders() {
+    let server = MockAlpaca::start().await;
+    let client = http();
+    assert_bodies_rejected(&client, &server).await;
+    assert_unknown_routes_404(&client, &server).await;
+    assert_eq!(
+        get(&client, &server, "/v2/orders?status=all").await,
+        json!([])
+    );
+    assert_notional_accepted(&client, &server).await;
 }
 
 #[tokio::test]
