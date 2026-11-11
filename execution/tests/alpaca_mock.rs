@@ -170,6 +170,18 @@ async fn place_and_scripted_polls_report_wire_shapes() {
     assert_scripted_polls(&session, "order-1").await;
 }
 
+fn assert_recorded_wire_shape(requests: &[RecordedRequest]) {
+    assert_eq!(requests.iter().filter(|r| r.method == "POST").count(), 1);
+    assert_eq!(requests.iter().filter(|r| r.method == "DELETE").count(), 1);
+    assert_eq!(requests[0].path, "/v2/orders");
+    assert_eq!(requests[0].headers["apca-api-key-id"], KEY_ID);
+    assert_eq!(requests[0].headers["apca-api-secret-key"], SECRET_KEY);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&requests[0].body).unwrap(),
+        order("order-1")
+    );
+}
+
 #[tokio::test]
 async fn cancel_clears_script_and_records_real_wire_shapes() {
     let session = Session::start().await;
@@ -186,16 +198,7 @@ async fn cancel_clears_script_and_records_real_wire_shapes() {
     assert_eq!(session.get(&path).await["status"], "canceled");
     assert_eq!(session.get(&path).await["filled_qty"], "0.004");
     assert_eq!(session.get("/v2/orders").await, json!([]));
-    let requests = session.requests();
-    assert_eq!(requests.iter().filter(|r| r.method == "POST").count(), 1);
-    assert_eq!(requests.iter().filter(|r| r.method == "DELETE").count(), 1);
-    assert_eq!(requests[0].path, "/v2/orders");
-    assert_eq!(requests[0].headers["apca-api-key-id"], KEY_ID);
-    assert_eq!(requests[0].headers["apca-api-secret-key"], SECRET_KEY);
-    assert_eq!(
-        serde_json::from_slice::<Value>(&requests[0].body).unwrap(),
-        order("order-1")
-    );
+    assert_recorded_wire_shape(&session.requests());
 }
 
 #[tokio::test]
