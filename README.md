@@ -83,6 +83,7 @@ Limen-Capital/
 cd execution && cargo test          # fetches metabolic-ledger (+ optional feature deps)
 cd ../brain && julia --project=. -e 'using Pkg; Pkg.instantiate()'
 julia --project=. test/runtests.jl
+julia --project=. test/backend_runtime.jl  # pinned imports + vault; 100-tick auto test on CUDA
 # or: ./scripts/smoke_wire_local.sh
 ```
 
@@ -104,6 +105,8 @@ julia --project=. research_helm.jl --duration 200 --seed 42 --horizon 5
 
 `ExperimentRunner` (`experiment_runner.jl` + `metrics.jl`) records walk-forward **hit_rate**, **PnL proxy**, and **latency p50/p99**.  
 Reservoir façade picks **LiquidCortex** when loadable (`LIMEN_RESERVOIR` / `--backend`).  
+LiquidCortex is imported at file load time without exporting its names into the helm.
+The backend runtime test reports GPU acceptance as skipped on CPU-only hosts.
 MC fan-out stays **off** in research mode (`LIMEN_MC_PATHS` only for live helm).
 
 ### 4. Rust Decision path (gates + fractional Kelly + metabolic-ledger)

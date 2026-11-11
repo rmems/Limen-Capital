@@ -147,4 +147,13 @@ end
 
 include(joinpath(@__DIR__, "wire_hardening.jl"))
 
+@testset "Fresh-process backend loading" begin
+    fixture_path = joinpath(@__DIR__, "fixtures")
+    script = joinpath(@__DIR__, "backend_loading.jl")
+    withenv("JULIA_LOAD_PATH" => fixture_path * ":@stdlib") do
+        @test success(pipeline(`$(Base.julia_cmd()) --startup-file=no --project=@stdlib $script`;
+            stdout=stdout, stderr=stderr))
+    end
+end
+
 println("All Capital unit tests finished.")
