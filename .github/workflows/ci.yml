@@ -76,6 +76,9 @@ jobs:
           strip-prefix: ${{ github.workspace }}/
           incomplete: true
 
+      - name: Test shared Alpaca harness
+        run: cargo test --locked --features live-alpaca
+
       - name: Build and test each optional library feature
         run: |
           for feature in kinetic snn corpus-ipc axon-encoder plasticity-lab; do

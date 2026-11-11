@@ -9,7 +9,7 @@ license = "MIT"
 
 [dependencies]
 # Validated git+rev library pins — no sibling path clones
-metabolic-ledger = { git = "https://github.com/rmems/metabolic-ledger", rev = "825d6a9a8683356104e856dd22d31d8cb22dae1b" }
+metabolic-ledger = { git = "https://github.com/rmems/metabolic-ledger", rev = "d7529616cf1f03077c635877053a75a326d91574" }
 # Wire contracts remain in-tree at `src/binary_wire.rs`; IPC migration is separate.
 
 # Optional published packages (enable via features; resolved versions in Cargo.lock)
@@ -55,6 +55,8 @@ uuid = { version = "1", features = ["v4", "serde"], optional = true }
 rand = { version = "0.8", optional = true }
 [features]
 default = []
+# Shared Alpaca contract-test harness. RM-2460 adds the production adapter.
+live-alpaca = []
 # Streaming Hawkes / surprise features from kinetic-signals
 kinetic = ["dep:kinetic-signals"]
 # Reference LIF primitives (research helpers)
@@ -82,6 +84,7 @@ path = "src/bin/limen_live.rs"
 required-features = ["live-robinhood"]
 
 [dev-dependencies]
+hyper = { version = "0.14", features = ["server", "http1", "tcp"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 serial_test = "3"
