@@ -25,6 +25,9 @@ jobs:
     name: Rust (execution)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # Qlty coverage upload (OIDC)
     defaults:
       run:
         working-directory: execution
@@ -40,10 +43,13 @@ jobs:
           # Pin exact version so CI verifies declared rust-version = "1.99"
           # rather than a floating `stable` channel.
           toolchain: 1.99.0
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@3f7c3597aa4e6da3f315e128de702ce61e7b2877 # cargo-llvm-cov
 
       - name: Cache Cargo + target
-        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: execution -> target
           shared-key: limen-capital-execution-cache
@@ -59,7 +65,16 @@ jobs:
         run: cargo build --locked
 
       - name: Test
-        run: cargo test --locked -- --nocapture
+        run: cargo llvm-cov --locked --lcov --output-path lcov.info -- --nocapture
+
+      - name: Upload coverage to Qlty
+        if: github.event.pull_request.head.repo.fork != true
+        uses: qltysh/qlty-action/coverage@ebcd284bf32e36a030afe15f1e136c7be08b9506 # v2.5.0
+        with:
+          oidc: true
+          files: execution/lcov.info
+          strip-prefix: ${{ github.workspace }}/
+          incomplete: true
 
       - name: Test shared Alpaca harness
         run: cargo test --locked --features live-alpaca
@@ -79,6 +94,9 @@ jobs:
       fail-fast: false
       matrix:
         julia-version: ['1.13']
+    permissions:
+      contents: read
+      id-token: write # Qlty coverage upload (OIDC)
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -110,14 +128,27 @@ jobs:
       # and optional for the CPU wire/encoder suite).
       - name: Run Capital unit tests
         run: |
-          julia --color=yes --project=. test/runtests.jl
+          julia --color=yes --code-coverage=user --project=. test/runtests.jl
         working-directory: brain
 
       - name: Test pinned CPU forecast adapter and comparison
         env:
           JULIA_NUM_PRECOMPILE_TASKS: '2'
           OPENBLAS_NUM_THREADS: '1'
-        run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.test(coverage=true)'
+
+      - name: Process Julia coverage
+        uses: julia-actions/julia-processcoverage@03114f09f119417c3242a9fb6e0b722676aedf38 # v1
+        with:
+          directories: src,brain
+
+      - name: Upload coverage to Qlty
+        if: github.event.pull_request.head.repo.fork != true
+        uses: qltysh/qlty-action/coverage@ebcd284bf32e36a030afe15f1e136c7be08b9506 # v2.5.0
+        with:
+          oidc: true
+          files: lcov.info
+          incomplete: true
 
   # Structure + validated dependency sources (no full GPU instantiate).
   integration:
@@ -125,6 +156,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: [rust, julia]
+    permissions:
+      contents: read
+      id-token: write # Qlty coverage upload (OIDC)
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -137,7 +171,7 @@ jobs:
           toolchain: 1.99.0
 
       - name: Cache Cargo + target
-        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: execution -> target
           shared-key: limen-capital-execution-cache
@@ -145,3 +179,32 @@ jobs:
 
       - name: Run test_integration.sh
         run: ./test_integration.sh
+
+      - name: Complete Qlty coverage
+        if: github.event.pull_request.head.repo.fork != true
+        uses: qltysh/qlty-action/coverage@ebcd284bf32e36a030afe15f1e136c7be08b9506 # v2.5.0
+        with:
+          oidc: true
+          command: complete
+
+  secrets:
+    name: Secret scan (Gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan commits for secrets
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: '8.30.1'
+          GITLEAKS_ENABLE_COMMENTS: 'false'
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: 'false'

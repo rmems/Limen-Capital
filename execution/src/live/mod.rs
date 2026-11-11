@@ -19,6 +19,7 @@ pub mod journal;
 pub mod r#loop;
 pub mod market;
 pub mod market_state;
+pub mod notify;
 pub mod paper;
 pub mod risk;
 pub mod robinhood;

@@ -1,6 +1,8 @@
 use super::*;
 use crate::live::config::MarketSourceConfig;
 
+mod notifications;
+
 fn cfg(journal: &std::path::Path, seed: u64) -> LiveConfig {
     LiveConfig {
         tick_interval_secs: 1,

@@ -89,6 +89,7 @@ pub struct LoopParts {
     pub decider: Box<dyn Decider>,
     pub book: PaperBook,
     pub journal: Journal,
+    pub notifier: Box<dyn crate::live::notify::Notifier>,
     pub account_line: Option<String>,
     /// Realized PnL baseline for today's loss counter. `None` = the book's
     /// realized PnL at start (a restart therefore resets the daily counter;
@@ -143,6 +144,7 @@ pub async fn run_with_parts(
         summary: RunSummary::default(),
         recent_mids: Vec::new(),
         last_order_secs: None,
+        notifications: Vec::new(),
     };
     report::start(cfg, &mut runner.parts, started, max_ticks)?;
     loop {
@@ -166,6 +168,7 @@ struct Runner<'a> {
     last_order_secs: Option<i64>,
     day: i32,
     day_start_realized: f64,
+    notifications: Vec<(&'static str, String)>,
 }
 
 impl Runner<'_> {
@@ -220,6 +223,19 @@ impl Runner<'_> {
         };
         let mut row = report::row(&state, &self.parts);
         report::events(&events, &mut row, &mut self.summary);
+        for event in &events {
+            self.notifications.push(match event {
+                PaperEvent::Filled { order, price, qty, fee_usd, realized_usd } => (
+                    "fill",
+                    format!("{} {} {qty:.8} @ {price:.2}; fee ${fee_usd:.4}; realized ${realized_usd:+.4}",
+                        order.id, order.side),
+                ),
+                PaperEvent::Cancelled { order, age_ticks } => (
+                    "cancel",
+                    format!("{} {} stale after {age_ticks} ticks", order.id, order.side),
+                ),
+            });
+        }
         if let Some(reason) = risk::pre_tick_check(&self.cfg.risk, &inputs) {
             self.pre_tick_rejection(reason, &mut row);
         } else {
@@ -227,6 +243,9 @@ impl Runner<'_> {
         }
         report::tick(&row);
         self.parts.journal.append(&row)?;
+        for (event, detail) in std::mem::take(&mut self.notifications) {
+            self.notify(event, &detail).await;
+        }
         if self.opts.once {
             println!("{}", row.to_markdown());
         }
@@ -265,6 +284,7 @@ impl Runner<'_> {
         row.risk = format!("rejected:{}", reason.tag());
         if reason.halts_day() {
             self.summary.halted_reason = Some(reason.tag().to_string());
+            self.notifications.push(("halt", reason.to_string()));
         }
         warn!("pre-tick: {reason}");
     }
@@ -282,6 +302,7 @@ impl Runner<'_> {
             Ok(decision) => decision,
             Err(e) => {
                 warn!("decider error, holding: {e}");
+                self.notifications.push(("decider error", e.to_string()));
                 crate::live::decider::Decision::hold(format!("decider_error: {e}"))
             }
         };
@@ -335,6 +356,20 @@ impl Runner<'_> {
         self.summary.fees_paid_usd = self.parts.book.fees_paid_usd;
     }
 
+    async fn notify(&self, event: &str, detail: &str) {
+        let mode = if self.cfg.paper { "paper" } else { "LIVE" };
+        let title = format!("limen-live {mode}: {event}");
+        let body = format!(
+            "{} tick {}: {detail}\nJournal: {}",
+            self.cfg.symbol,
+            self.summary.ticks,
+            self.parts.journal.path().display()
+        );
+        if let Err(e) = self.parts.notifier.notify(&title, &body).await {
+            warn!("local notification failed ({event}): {e}; see journal");
+        }
+    }
+
     async fn finished(&mut self, max_ticks: u64) -> bool {
         if self.summary.halted_reason.is_some() {
             warn!("daily loss cap reached; stopping for the UTC day");
@@ -346,6 +381,7 @@ impl Runner<'_> {
         if !sleep_or_ctrl_c(self.cfg.tick_interval_secs).await {
             info!("ctrl-c: stopping");
             self.summary.halted_reason = Some("ctrl_c".into());
+            self.notify("halt", "ctrl_c: stopping").await;
             return true;
         }
         false

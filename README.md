@@ -126,7 +126,16 @@ first pulse, after the pulse goes stale, or whose primary pair is RESIDUAL is
 refused and logged — never filled at a placeholder price.
 
 `ExecutionEngine::process_signal`: confidence gate → Neutral → **0.25× Kelly size**
-(from ATP bankroll, b=0.05) → max-qty gate → ghost fill. Zero Kelly → `RejectedNoEdge`.
+(from ATP bankroll, b=0.05) → max-quantity/holdings gate → quantity-taking ghost
+fill. The ledger applies the accepted quantity once, without its adaptive Kelly
+resizing it. `with_kelly_sizing(false)` uses `signal.quantity` instead.
+The limit bounds each fill and total long holdings per asset. Prices and
+quantities are rounded to the legacy ledger's `f32` units; `Executed` reports
+those actual fill values. Zero Kelly → `RejectedNoEdge`. Insufficient holdings
+(including selling while flat), insufficient ATP for quantity plus friction,
+invalid fills, or JSONL write failures → `RejectedFill`, with no wallet mutation.
+Buy friction enters cost basis and is realized on sale, so round-trip PnL and
+win-rate statistics include both sides' friction exactly once.
 
 ### 5. Julia live helm (binary wire v1)
 
@@ -134,6 +143,30 @@ refused and logged — never filled at a placeholder price.
 cd brain/
 julia --project=. spike_helm.jl
 ```
+
+## Local notifications for `limen-live`
+
+With `--features live-robinhood`, the paper loop sends one local desktop
+notification per fill, stale-order cancel, decider error, or halt (daily-loss
+cap or Ctrl-C). Normal holds and reaching `--max-ticks` do not notify.
+Notifications identify paper mode, symbol, tick, event details, and journal path.
+`journal.md` (or `--journal PATH`) remains the record; no hosted service is used.
+
+On Linux, install `notify-send` (for example, the `libnotify-bin` package on
+Debian/Ubuntu) and run in the operator's desktop session with its session D-Bus
+environment (`DBUS_SESSION_BUS_ADDRESS`). An unattended user service must inherit
+that environment and have a running desktop notification daemon. Verify delivery
+from the same user/service environment with:
+
+```bash
+notify-send --app-name=limen-live -- "limen-live test" "Local notifications ready"
+```
+
+Missing helpers, unavailable desktop sessions, nonzero exits, or delivery taking
+over five seconds produce a warning without interrupting trading or journaling.
+There is no stderr-only fallback notification and no automatic retry. Headless
+machines without a notification daemon (and non-Linux systems) need a compatible
+local `notify-send` implementation before relying on these alerts.
 
 ## Signal Pipeline
 
