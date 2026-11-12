@@ -96,6 +96,9 @@ pub enum DeciderError {
         raw: String,
         detail: String,
     },
+    /// The model refused the request (`stop_reason: "refusal"`). Never
+    /// corrected or retried through a fallback model.
+    Refusal(String),
     /// The decision would act on a quote older than the freshness deadline.
     Stale {
         detail: String,
@@ -124,6 +127,7 @@ impl DeciderError {
             DeciderError::Http(_) => "http",
             DeciderError::Timeout { .. } => "timeout",
             DeciderError::Parse { .. } => "parse",
+            DeciderError::Refusal(_) => "refusal",
             DeciderError::Stale { .. } => "stale",
             DeciderError::Context(_) => "context_error",
             DeciderError::MissingUsage(_) => "missing_usage",
@@ -149,6 +153,7 @@ impl fmt::Display for DeciderError {
             DeciderError::Http(e) => write!(f, "decider http: {e}"),
             DeciderError::Timeout { after_ms } => write!(f, "decider timeout after {after_ms} ms"),
             DeciderError::Parse { detail, .. } => write!(f, "decider parse_error: {detail}"),
+            DeciderError::Refusal(m) => write!(f, "decider refusal: {m}"),
             DeciderError::Stale { detail } => write!(f, "decision stale: {detail}"),
             DeciderError::Context(m) => write!(f, "decision context: {m}"),
             DeciderError::MissingUsage(m) => write!(f, "missing usage: {m}"),

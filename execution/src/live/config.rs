@@ -242,14 +242,25 @@ impl LiveConfig {
     /// (pricing, pacing, bounds) live in [`LlmConfig::validate`].
     fn validate_models(&self) -> Result<(), ConfigError> {
         self.llm.role_profile(&self.model, ROLE_DECISION)?;
-        if let Some(helper) = &self.helper_model {
-            self.llm.role_profile(helper, ROLE_HELPER)?;
-            if self.decider != DeciderKind::Claude {
-                return Err(ConfigError::Invalid(
-                    "helper_model requires decider = \"claude\"".into(),
-                ));
-            }
+        self.validate_helper_model()?;
+        self.validate_fallback_models()?;
+        Ok(())
+    }
+
+    fn validate_helper_model(&self) -> Result<(), ConfigError> {
+        let Some(helper) = &self.helper_model else {
+            return Ok(());
+        };
+        self.llm.role_profile(helper, ROLE_HELPER)?;
+        if self.decider != DeciderKind::Claude {
+            return Err(ConfigError::Invalid(
+                "helper_model requires decider = \"claude\"".into(),
+            ));
         }
+        Ok(())
+    }
+
+    fn validate_fallback_models(&self) -> Result<(), ConfigError> {
         for fb in &self.llm.decision_fallback_models {
             if fb == &self.model || self.helper_model.as_ref() == Some(fb) {
                 return Err(ConfigError::Invalid(format!(

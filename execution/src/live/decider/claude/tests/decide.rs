@@ -48,6 +48,12 @@ async fn buy_sell_hold_through_the_strict_decision_tool() {
 }
 
 fn assert_decision_request(r: &RecordedRequest) {
+    assert_decision_envelope(r);
+    assert_decision_tool_shape(r);
+    assert_request_body_is_clean(r, &body(r));
+}
+
+fn assert_decision_envelope(r: &RecordedRequest) {
     assert_eq!(r.method, "POST");
     assert_eq!(r.path, "/v1/messages");
     assert_eq!(r.header("x-api-key"), Some(TEST_KEY));
@@ -57,12 +63,14 @@ fn assert_decision_request(r: &RecordedRequest) {
     assert_eq!(b["max_tokens"], 8192);
     assert_eq!(b["output_config"], json!({"effort": "high"}));
     assert_eq!(b["tool_choice"], json!({"type": "auto"}));
-    let tools = b["tools"].as_array().unwrap();
+}
+
+fn assert_decision_tool_shape(r: &RecordedRequest) {
+    let tools = body(r)["tools"].as_array().unwrap().clone();
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0]["name"], DECISION_TOOL);
     assert_eq!(tools[0]["strict"], true);
     assert_eq!(tools[0]["input_schema"]["additionalProperties"], false);
-    assert_request_body_is_clean(r, &b);
 }
 
 fn assert_request_body_is_clean(r: &RecordedRequest, b: &Value) {
@@ -278,16 +286,19 @@ async fn configured_fallback_takes_over_after_transport_failure() {
         vec![SONNET.to_string(), FALLBACK.to_string()]
     );
     // Both attempts are separately reserved, audited, and settled.
-    let reports = h.decider.take_llm_reports();
+    assert_fallback_reports(&h.decider.take_llm_reports());
+    let snap = h.decider.ledger().snapshot();
+    assert!(snap.reservations.is_empty());
+    // The 500 released its reservation unbilled; only the 200 settled.
+    assert_eq!(snap.settled_calls.decider, 1);
+}
+
+fn assert_fallback_reports(reports: &[LlmCallReport]) {
     assert_eq!(reports.len(), 2);
     assert_eq!(reports[0].outcome, "error:http");
     assert_eq!(reports[0].model, SONNET);
     assert_eq!(reports[1].outcome, "ok");
     assert_eq!(reports[1].model, FALLBACK);
-    let snap = h.decider.ledger().snapshot();
-    assert!(snap.reservations.is_empty());
-    // The 500 released its reservation unbilled; only the 200 settled.
-    assert_eq!(snap.settled_calls.decider, 1);
 }
 
 #[tokio::test]
@@ -366,4 +377,61 @@ async fn configured_effort_reaches_the_request() {
     h.decider.decide(&fresh_state(), &[]).await.unwrap();
     let b = body(&h.server.requests().await[0]);
     assert_eq!(b["output_config"], json!({"effort": "low"}));
+}
+
+#[tokio::test]
+async fn refusal_is_never_corrected_or_fallen_back() {
+    let refusal = message(SONNET, "refusal", vec![], Some(usage(10, 10)));
+    let mut h = harness(vec![(200, refusal)], with_fallback).await;
+    let err = h.decider.decide(&fresh_state(), &[]).await.unwrap_err();
+    assert!(matches!(err, DeciderError::Refusal(_)), "{err}");
+    assert_eq!(
+        h.server.requests().await.len(),
+        1,
+        "no correction attempt, no fallback model"
+    );
+}
+
+/// A 21-cell journal row; only tick (1), action (12), reason (14) and one
+/// marker column matter to the context assembler.
+fn journal_row(tick: i64, action: &str, marker: &str) -> String {
+    let cells: Vec<String> = (0..21)
+        .map(|i| match i {
+            0 => "2026-11-10T00:00:00Z".into(),
+            1 => tick.to_string(),
+            2 => "BTC-USD".into(),
+            12 => action.into(),
+            14 => format!("reason-{tick}"),
+            15 => marker.into(),
+            _ => "-".into(),
+        })
+        .collect();
+    format!("| {} |", cells.join(" | "))
+}
+
+#[tokio::test]
+async fn older_significant_rows_are_pulled_into_history() {
+    let mut h = harness(vec![(200, decision("hold", 0.0, "x"))], |_| {}).await;
+    // Tick 3 was a real buy; ticks 1-12 minus the last-8 window would drop it.
+    let mut rows: Vec<String> = (1..=12).map(|i| journal_row(i, "hold", "-")).collect();
+    rows[2] = journal_row(3, "buy", "MARKER_T3");
+    h.decider.decide(&fresh_state(), &rows).await.unwrap();
+    let content = body(&h.server.requests().await[0])["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // The significant row is embedded (its marker cell only exists in the row,
+    // not in the active_thesis summary).
+    assert!(content.contains("MARKER_T3"), "{content}");
+    // Rows 1-2 are neither recent nor significant: excluded. ("reason-1 |"
+    // cannot match "reason-10 |" etc. because of the cell delimiter.)
+    assert!(
+        !content.contains("reason-1 |") && !content.contains("reason-2 |"),
+        "{content}"
+    );
+    assert!(
+        content.contains("\"significant_rows_pulled\":1"),
+        "{content}"
+    );
+    assert!(content.contains("\"evidence_coverage\""), "{content}");
 }

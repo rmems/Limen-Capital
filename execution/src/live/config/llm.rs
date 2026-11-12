@@ -85,6 +85,11 @@ fn one_of(value: &str, allowed: &[&str]) -> bool {
 impl ModelProfile {
     /// Structural checks every profile must pass, whatever its role.
     pub fn validate(&self, model: &str) -> Result<(), ConfigError> {
+        self.validate_roles_and_window(model)?;
+        self.validate_capabilities(model)
+    }
+
+    fn validate_roles_and_window(&self, model: &str) -> Result<(), ConfigError> {
         if self.roles.is_empty()
             || !self
                 .roles
@@ -101,6 +106,17 @@ impl ModelProfile {
                 self.context_tokens
             )));
         }
+        Ok(())
+    }
+
+    fn validate_capabilities(&self, model: &str) -> Result<(), ConfigError> {
+        self.validate_efforts(model)?;
+        self.validate_contracts(model)?;
+        self.validate_tool_choice(model)?;
+        self.validate_thinking(model)
+    }
+
+    fn validate_efforts(&self, model: &str) -> Result<(), ConfigError> {
         if self.efforts.is_empty() || self.efforts.iter().any(|e| e.is_empty()) {
             return Err(invalid(format!(
                 "profile for {model:?}: efforts must be a non-empty list of effort levels"
@@ -112,6 +128,10 @@ impl ModelProfile {
                 self.default_effort, self.efforts
             )));
         }
+        Ok(())
+    }
+
+    fn validate_contracts(&self, model: &str) -> Result<(), ConfigError> {
         if self.response_contracts.is_empty()
             || !self
                 .response_contracts
@@ -122,6 +142,10 @@ impl ModelProfile {
                 "profile for {model:?}: response_contracts must be a non-empty subset of [\"json_schema\", \"strict_tool\"]"
             )));
         }
+        Ok(())
+    }
+
+    fn validate_tool_choice(&self, model: &str) -> Result<(), ConfigError> {
         if self.tool_choice.is_empty()
             || !self.tool_choice.iter().all(|t| {
                 one_of(
@@ -139,6 +163,10 @@ impl ModelProfile {
                 "profile for {model:?}: tool_choice must be a non-empty subset of [\"auto\", \"none\", \"any\", \"tool\"]"
             )));
         }
+        Ok(())
+    }
+
+    fn validate_thinking(&self, model: &str) -> Result<(), ConfigError> {
         if !one_of(&self.thinking, &[THINKING_ADAPTIVE, THINKING_DISABLED]) {
             return Err(invalid(format!(
                 "profile for {model:?}: thinking must be \"adaptive\" or \"disabled\", got {:?}",
@@ -541,10 +569,23 @@ impl LlmConfig {
                 "{model:?} capability profile does not allow the {role} role"
             )));
         }
-        if role == ROLE_DECISION && !p.tool_choice.iter().any(|t| t == TOOL_CHOICE_AUTO) {
-            return Err(invalid(format!(
-                "{model:?} capability profile must allow tool_choice \"auto\" for the decision role"
-            )));
+        if role == ROLE_DECISION {
+            if !p.tool_choice.iter().any(|t| t == TOOL_CHOICE_AUTO) {
+                return Err(invalid(format!(
+                    "{model:?} capability profile must allow tool_choice \"auto\" for the decision role"
+                )));
+            }
+            // The decision request always uses the strict decision tool, so a
+            // profile that cannot honor that contract is incompatible.
+            if !p
+                .response_contracts
+                .iter()
+                .any(|c| c == CONTRACT_STRICT_TOOL)
+            {
+                return Err(invalid(format!(
+                    "{model:?} capability profile must declare the \"strict_tool\" response contract for the decision role"
+                )));
+            }
         }
         Ok(p)
     }
@@ -602,13 +643,7 @@ impl LlmConfig {
         helper_model: Option<&str>,
         fallbacks: &[String],
     ) -> Result<(), ConfigError> {
-        let total = self.budget_total_usd()?;
-        let day = self.pacing_per_day_usd()?;
-        if day >= total {
-            return Err(invalid(format!(
-                "llm.max_llm_cost_usd_per_day ({day}) is a pacing sub-cap and must be smaller than llm.max_llm_cost_usd_total ({total})"
-            )));
-        }
+        let (total, day) = self.validate_budget_shape()?;
         if fallbacks.len() > MAX_FALLBACK_MODELS {
             return Err(invalid(format!(
                 "llm.decision_fallback_models allows at most {MAX_FALLBACK_MODELS} candidates, got {}",
@@ -619,22 +654,47 @@ impl LlmConfig {
         for fb in fallbacks {
             self.check_decision_candidate(fb)?;
         }
-        // One configured effort must be supported by every decision-role
-        // model that could serve the tick.
+        self.validate_decision_efforts(model, fallbacks)?;
+        if let Some(helper) = helper_model {
+            self.validate_helper(helper, total, day)?;
+        }
+        Ok(())
+    }
+
+    /// The cumulative cap and its explicit pacing sub-cap.
+    fn validate_budget_shape(&self) -> Result<(f64, f64), ConfigError> {
+        let total = self.budget_total_usd()?;
+        let day = self.pacing_per_day_usd()?;
+        if day >= total {
+            return Err(invalid(format!(
+                "llm.max_llm_cost_usd_per_day ({day}) is a pacing sub-cap and must be smaller than llm.max_llm_cost_usd_total ({total})"
+            )));
+        }
+        Ok((total, day))
+    }
+
+    /// One configured effort must be supported by every decision-role model
+    /// that could serve the tick.
+    fn validate_decision_efforts(
+        &self,
+        model: &str,
+        fallbacks: &[String],
+    ) -> Result<(), ConfigError> {
         if let Some(effort) = self.decider_effort.as_deref() {
             for m in std::iter::once(model).chain(fallbacks.iter().map(String::as_str)) {
                 self.role_effort(Some(effort), m)?;
             }
         }
-        if let Some(helper) = helper_model {
-            self.role_profile(helper, ROLE_HELPER)?;
-            self.price(helper)?;
-            if let Some(effort) = self.helper_effort.as_deref() {
-                self.role_effort(Some(effort), helper)?;
-            }
-            self.validate_helper_share(total, day)?;
-        }
         Ok(())
+    }
+
+    fn validate_helper(&self, helper: &str, total: f64, day: f64) -> Result<(), ConfigError> {
+        self.role_profile(helper, ROLE_HELPER)?;
+        self.price(helper)?;
+        if let Some(effort) = self.helper_effort.as_deref() {
+            self.role_effort(Some(effort), helper)?;
+        }
+        self.validate_helper_share(total, day)
     }
 
     /// A decision-role candidate needs a decision-capable profile, a complete

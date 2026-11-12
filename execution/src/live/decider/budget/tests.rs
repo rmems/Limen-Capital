@@ -45,26 +45,19 @@ fn open(p: BudgetPolicy, store: &MemStore) -> BudgetLedger {
     BudgetLedger::open(p, Box::new(store.clone())).unwrap()
 }
 
-/// Test shorthand for `BudgetLedger::reserve` with the five-field request.
-fn reserve(
-    l: &BudgetLedger,
-    role: Role,
-    model: &str,
-    amount_usd: f64,
-    now: DateTime<Utc>,
-    call_end: DateTime<Utc>,
-) -> Result<u64, BudgetError> {
+/// Test shorthand for `BudgetLedger::reserve` where `now == call_end`.
+fn reserve(l: &BudgetLedger, role: Role, usd: f64, t: DateTime<Utc>) -> Result<u64, BudgetError> {
     l.reserve(&ReserveRequest {
         role,
-        model,
-        amount_usd,
-        now,
-        call_end,
+        model: "m",
+        amount_usd: usd,
+        now: t,
+        call_end: t,
     })
 }
 
 fn spend(l: &BudgetLedger, role: Role, usd: f64, now: DateTime<Utc>) -> Result<(), BudgetError> {
-    let id = reserve(l, role, "m", usd, now, now)?;
+    let id = reserve(l, role, usd, now)?;
     l.settle(id, usd)
 }
 
@@ -76,12 +69,12 @@ fn exact_cumulative_boundary_then_reject_before_dispatch() {
     spend(&l, Role::Decider, 0.25, t(10, 2)).unwrap();
     // Day cap hit exactly; tomorrow brings the total exactly to 1.0.
     assert!(matches!(
-        reserve(&l, Role::Decider, "m", 0.01, t(10, 3), t(10, 3)),
+        reserve(&l, Role::Decider, 0.01, t(10, 3)),
         Err(BudgetError::Exhausted { .. })
     ));
     spend(&l, Role::Decider, 0.25, t(11, 1)).unwrap();
     assert!(l.remaining_usd().abs() < 1e-12);
-    let err = reserve(&l, Role::Decider, "m", 0.000001, t(11, 2), t(11, 2)).unwrap_err();
+    let err = reserve(&l, Role::Decider, 0.000001, t(11, 2)).unwrap_err();
     match err {
         BudgetError::Exhausted { scope, .. } => assert_eq!(scope, "cumulative"),
         e => panic!("{e:?}"),
@@ -96,13 +89,13 @@ fn exact_cumulative_boundary_then_reject_before_dispatch() {
 #[test]
 fn outstanding_reservations_count_against_remaining() {
     let l = open(policy(1.0, 0.9), &MemStore::default());
-    let a = reserve(&l, Role::Decider, "m", 0.6, t(10, 1), t(10, 1)).unwrap();
+    let a = reserve(&l, Role::Decider, 0.6, t(10, 1)).unwrap();
     assert!((l.remaining_usd() - 0.4).abs() < 1e-12);
-    assert!(reserve(&l, Role::Decider, "m", 0.5, t(10, 1), t(10, 1)).is_err());
+    assert!(reserve(&l, Role::Decider, 0.5, t(10, 1)).is_err());
     // Settling below the reservation frees the difference.
     l.settle(a, 0.1).unwrap();
     assert!((l.remaining_usd() - 0.9).abs() < 1e-12);
-    reserve(&l, Role::Decider, "m", 0.5, t(10, 1), t(10, 1)).unwrap();
+    reserve(&l, Role::Decider, 0.5, t(10, 1)).unwrap();
 }
 
 #[test]
@@ -111,9 +104,7 @@ fn simultaneous_reservations_never_overbook() {
     let handles: Vec<_> = (0..64)
         .map(|_| {
             let l = l.clone();
-            std::thread::spawn(move || {
-                reserve(&l, Role::Decider, "m", 0.1, t(10, 1), t(10, 1)).is_ok()
-            })
+            std::thread::spawn(move || reserve(&l, Role::Decider, 0.1, t(10, 1)).is_ok())
         })
         .collect();
     let granted = handles
@@ -130,10 +121,10 @@ fn day_rollover_resets_only_pacing_never_the_cumulative_total() {
     let l = open(policy(2.5, 1.0), &MemStore::default());
     for day in [10, 11] {
         spend(&l, Role::Decider, 1.0, t(day, 1)).unwrap();
-        assert!(reserve(&l, Role::Decider, "m", 0.01, t(day, 2), t(day, 2)).is_err());
+        assert!(reserve(&l, Role::Decider, 0.01, t(day, 2)).is_err());
     }
     // Day 12 gets a fresh pacing window but only $0.50 of cumulative room.
-    let err = reserve(&l, Role::Decider, "m", 1.0, t(12, 1), t(12, 1)).unwrap_err();
+    let err = reserve(&l, Role::Decider, 1.0, t(12, 1)).unwrap_err();
     assert!(
         matches!(&err, BudgetError::Exhausted { scope, .. } if scope == "cumulative"),
         "{err}"
@@ -150,14 +141,14 @@ fn helper_share_is_carved_out_of_the_decider_allocation() {
     let l = open(p, &MemStore::default());
     spend(&l, Role::Helper, 0.1, t(10, 1)).unwrap();
     assert!(
-        reserve(&l, Role::Helper, "h", 0.01, t(10, 1), t(10, 1)).is_err(),
+        reserve(&l, Role::Helper, 0.01, t(10, 1)).is_err(),
         "helper daily share"
     );
     // The decider still has its full daily share (1.0 - 0.1).
     spend(&l, Role::Decider, 0.9, t(10, 2)).unwrap();
     spend(&l, Role::Helper, 0.1, t(11, 1)).unwrap();
     spend(&l, Role::Helper, 0.1, t(12, 1)).unwrap();
-    let err = reserve(&l, Role::Helper, "h", 0.01, t(13, 1), t(13, 1)).unwrap_err();
+    let err = reserve(&l, Role::Helper, 0.01, t(13, 1)).unwrap_err();
     assert!(
         matches!(&err, BudgetError::Exhausted { scope, .. } if scope == "helper cumulative"),
         "{err}"
@@ -173,32 +164,26 @@ fn no_paid_calls_at_or_after_expiry_or_running_past_it() {
     let l = open(policy(10.0, 5.0), &MemStore::default());
     let e = expiry();
     assert!(matches!(
-        reserve(&l, Role::Decider, "m", 0.1, e, e),
+        reserve(&l, Role::Decider, 0.1, e),
         Err(BudgetError::Expired { .. })
     ));
     let before = e - chrono::Duration::seconds(5);
+    // Full-precision expiry: a call that could still run at the cutoff is
+    // refused even though `now` is before it; one ending well inside is fine.
+    let req = |end_offset: i64| ReserveRequest {
+        role: Role::Decider,
+        model: "m",
+        amount_usd: 0.1,
+        now: before,
+        call_end: before + chrono::Duration::seconds(end_offset),
+    };
     assert!(matches!(
-        reserve(
-            &l,
-            Role::Decider,
-            "m",
-            0.1,
-            before,
-            before + chrono::Duration::seconds(30)
-        ),
+        l.reserve(&req(30)),
         Err(BudgetError::Expired { .. })
     ));
-    reserve(
-        &l,
-        Role::Decider,
-        "m",
-        0.1,
-        before,
-        before + chrono::Duration::seconds(2),
-    )
-    .unwrap();
+    l.reserve(&req(2)).unwrap();
     assert!(matches!(
-        reserve(&l, Role::Decider, "m", 0.1, t(14, 0), t(14, 0)),
+        reserve(&l, Role::Decider, 0.1, t(14, 0)),
         Err(BudgetError::Expired { .. })
     ));
 }
@@ -212,7 +197,7 @@ fn restart_keeps_spend_reservations_and_expiry() {
         let l = BudgetLedger::open(policy(1.0, 0.9), Box::new(FileStore::open(&path).unwrap()))
             .unwrap();
         spend(&l, Role::Decider, 0.3, t(10, 1)).unwrap();
-        pending = reserve(&l, Role::Decider, "m", 0.2, t(10, 2), t(10, 2)).unwrap();
+        pending = reserve(&l, Role::Decider, 0.2, t(10, 2)).unwrap();
         // Process "crashes" here with the reservation in flight.
     }
     let l =
@@ -224,13 +209,13 @@ fn restart_keeps_spend_reservations_and_expiry() {
     assert_eq!(s.reservations[0].state, ReservationState::Ambiguous);
     assert!((l.remaining_usd() - 0.5).abs() < 1e-12);
     // A new day after restart still sees the cumulative spend.
-    assert!(reserve(&l, Role::Decider, "m", 0.6, t(11, 1), t(11, 1)).is_err());
+    assert!(reserve(&l, Role::Decider, 0.6, t(11, 1)).is_err());
     drop(l);
     // Restart after expiry with credits remaining: still no paid calls.
     let l =
         BudgetLedger::open(policy(1.0, 0.9), Box::new(FileStore::open(&path).unwrap())).unwrap();
     assert!(matches!(
-        reserve(&l, Role::Decider, "m", 0.01, t(13, 9), t(13, 9)),
+        reserve(&l, Role::Decider, 0.01, t(13, 9)),
         Err(BudgetError::Expired { .. })
     ));
 }
@@ -293,12 +278,12 @@ fn persistence_failure_halts_and_never_grants() {
     let store = MemStore::default();
     let l = open(policy(1.0, 0.9), &store);
     store.fail.store(true, Ordering::SeqCst);
-    let err = reserve(&l, Role::Decider, "m", 0.1, t(10, 1), t(10, 1)).unwrap_err();
+    let err = reserve(&l, Role::Decider, 0.1, t(10, 1)).unwrap_err();
     assert!(matches!(err, BudgetError::Persistence(_)), "{err}");
     assert!(l.snapshot().reservations.is_empty());
     store.fail.store(false, Ordering::SeqCst);
     assert!(matches!(
-        reserve(&l, Role::Decider, "m", 0.1, t(10, 1), t(10, 1)),
+        reserve(&l, Role::Decider, 0.1, t(10, 1)),
         Err(BudgetError::Halted(r)) if r == "persistence_failed"
     ));
 }
@@ -306,15 +291,15 @@ fn persistence_failure_halts_and_never_grants() {
 #[test]
 fn ambiguous_outcomes_stay_reserved_and_overcharges_halt() {
     let l = open(policy(1.0, 0.9), &MemStore::default());
-    let a = reserve(&l, Role::Decider, "m", 0.3, t(10, 1), t(10, 1)).unwrap();
+    let a = reserve(&l, Role::Decider, 0.3, t(10, 1)).unwrap();
     l.mark_ambiguous(a, "timeout", None).unwrap();
     assert!((l.remaining_usd() - 0.7).abs() < 1e-12);
     assert!(l.halted().is_none());
-    let b = reserve(&l, Role::Decider, "m", 0.1, t(10, 1), t(10, 1)).unwrap();
+    let b = reserve(&l, Role::Decider, 0.1, t(10, 1)).unwrap();
     l.settle(b, 0.2).unwrap();
     assert_eq!(l.halted().as_deref(), Some("charge_exceeded_reservation"));
     assert!(matches!(
-        reserve(&l, Role::Decider, "m", 0.01, t(10, 2), t(10, 2)),
+        reserve(&l, Role::Decider, 0.01, t(10, 2)),
         Err(BudgetError::Halted(_))
     ));
     // The actual (higher) charge was recorded, not the reservation.
