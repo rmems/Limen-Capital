@@ -48,7 +48,7 @@ Fill every blank; no session begins with an unspecified kill criterion.
 | Release commit / config checksum | |
 | Supervisor and backup contact | |
 | One symbol / venue asset validation | |
-| UTC start, planned end, maximum ticks | |
+| UTC start, planned end, maximum ticks | planned tick count must be a positive integer (zero is unbounded) |
 | Venue open/close, including early close | |
 | Separately funded micro account confirmed (no keys/account IDs here) | |
 | Position cap, including resting exposure | at most $10 |
@@ -96,7 +96,9 @@ adapter is not an Alpaca preflight; `--paper --once` uses a simulated book.
 Only after sections 1–3 pass, run the released executable with
 `--config <approved-config> --max-ticks <planned-count> --journal <private-session-journal>`,
 without `--once` or `--paper`, and supervise it continuously.
-The approved config must explicitly set `paper = false`.
+The approved config must explicitly set `paper = false`. `<planned-count>`
+must be a positive integer: a value of `0` is the unbounded default and a
+missing flag leaves the session with no tick limit, so neither is acceptable.
 
 - Confirm the journal header says **LIVE**, Alpaca, the chosen symbol and
   approved models/caps. Watch the first real order through acceptance and

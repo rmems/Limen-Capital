@@ -66,9 +66,10 @@ binary before the first real session; RM-2464 is not complete until then.
   lock to restart trading. Cancellation is not liquidation. A stopped process
   can leave exposure, and an order can fill while cancellation is pending.
   Verify orders and holdings directly in Alpaca before considering a halt safe.
-- If a key leaks, stop the session, cancel/verify outstanding orders through
-  the venue, revoke and rotate the affected keys, and inspect fills/billing.
-  Do not paste credentials or raw account responses into an incident issue.
+- If a key leaks, stop the session, revoke and rotate the affected keys
+  immediately, then cancel/verify outstanding orders through the venue and
+  inspect fills/billing. Do not paste credentials or raw account responses
+  into an incident issue.
 
 ## What is trusted by default
 
