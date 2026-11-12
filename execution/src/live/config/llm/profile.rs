@@ -53,9 +53,15 @@ pub struct ModelProfile {
     pub thinking: String,
 }
 
-fn one_of(value: &str, allowed: &[&str]) -> bool {
-    allowed.contains(&value)
-}
+const KNOWN_ROLES: &[&str] = &[ROLE_DECISION, ROLE_HELPER];
+const KNOWN_CONTRACTS: &[&str] = &[CONTRACT_JSON_SCHEMA, CONTRACT_STRICT_TOOL];
+const KNOWN_TOOL_CHOICES: &[&str] = &[
+    TOOL_CHOICE_AUTO,
+    TOOL_CHOICE_NONE,
+    TOOL_CHOICE_ANY,
+    TOOL_CHOICE_TOOL,
+];
+const KNOWN_THINKING: &[&str] = &[THINKING_ADAPTIVE, THINKING_DISABLED];
 
 /// Prefix a sub-check failure with the model it describes.
 fn for_model(model: &str, e: ConfigError) -> ConfigError {
@@ -74,12 +80,7 @@ impl ModelProfile {
     }
 
     fn validate_roles_and_window(&self) -> Result<(), ConfigError> {
-        if self.roles.is_empty()
-            || !self
-                .roles
-                .iter()
-                .all(|r| one_of(r, &[ROLE_DECISION, ROLE_HELPER]))
-        {
+        if self.roles.is_empty() || !self.roles.iter().all(|r| KNOWN_ROLES.contains(&r.as_str())) {
             return Err(invalid(
                 "roles must be a non-empty subset of [\"decision\", \"helper\"]",
             ));
@@ -118,7 +119,7 @@ impl ModelProfile {
             || !self
                 .response_contracts
                 .iter()
-                .all(|c| one_of(c, &[CONTRACT_JSON_SCHEMA, CONTRACT_STRICT_TOOL]))
+                .all(|c| KNOWN_CONTRACTS.contains(&c.as_str()))
         {
             return Err(invalid(
                 "response_contracts must be a non-empty subset of [\"json_schema\", \"strict_tool\"]"
@@ -129,17 +130,10 @@ impl ModelProfile {
 
     fn validate_tool_choice(&self) -> Result<(), ConfigError> {
         if self.tool_choice.is_empty()
-            || !self.tool_choice.iter().all(|t| {
-                one_of(
-                    t,
-                    &[
-                        TOOL_CHOICE_AUTO,
-                        TOOL_CHOICE_NONE,
-                        TOOL_CHOICE_ANY,
-                        TOOL_CHOICE_TOOL,
-                    ],
-                )
-            })
+            || !self
+                .tool_choice
+                .iter()
+                .all(|t| KNOWN_TOOL_CHOICES.contains(&t.as_str()))
         {
             return Err(invalid(
                 "tool_choice must be a non-empty subset of [\"auto\", \"none\", \"any\", \"tool\"]",
@@ -149,7 +143,7 @@ impl ModelProfile {
     }
 
     fn validate_thinking(&self) -> Result<(), ConfigError> {
-        if !one_of(&self.thinking, &[THINKING_ADAPTIVE, THINKING_DISABLED]) {
+        if !KNOWN_THINKING.contains(&self.thinking.as_str()) {
             return Err(invalid(format!(
                 "thinking must be \"adaptive\" or \"disabled\", got {:?}",
                 self.thinking
