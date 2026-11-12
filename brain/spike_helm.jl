@@ -9,7 +9,7 @@
 #   Varying biological time constants: τ_m ∈ {10ms, 25ms, 50ms, 100ms}
 #   Xavier/Glorot W_out initialization (breaks zero-readout deadlock)
 #   Sparse connectivity (1% connection probability, Float16 weights)
-#   STDP covariance learning with biological reinforcement
+#   Balanced pair STDP readout learning (local naut_core backend)
 #   Rolling 1,000-tick spike history for deep temporal memory
 #   Global inhibition from hardware proprioception (pain receptors)
 #
@@ -174,6 +174,7 @@ end
 # ═══════════════════════════════════════════════════════════════════════════════
 
 function main()
+    seed = seed_live_rng!()
     println("╔══════════════════════════════════════════════════════════════╗")
     println("║  Spikenaut V3 Enhanced Brain — 4-Lobe Ensemble × 65,536 Neurons ║")
     println("║  RTX 5080 (16GB) │ OU-SDE + STDP │ Secure ZMQ IPC           ║")
@@ -184,6 +185,8 @@ function main()
     # ── Security & Resource Checks ─────────────────────────────────────────────────
     println("[brain] Performing security and resource checks...")
     check_cuda_memory()
+    CUDA.seed!(seed)
+    println("[brain] CUDA RNG seeded with LIMEN_SEED=$seed")
     println("[brain] ✓ CUDA memory check passed")
 
     # ── CUDA warm-up ─────────────────────────────────────────────────────────
@@ -273,16 +276,16 @@ function main()
                 basys_load=pulse.basys_buffer_load,
                 funding_rate=pulse.funding_rate,
                 liquidation_vol=pulse.liquidation_vol,
-                liquidity_delta=max(pulse.liquidity_delta, snap.reflex_signal),
+                liquidity_delta=strongest_reflex(pulse.liquidity_delta, snap.reflex_signal),
                 dydx_oi_delta=pulse.dydx_oi_delta,
                 dydx_funding_rate=pulse.dydx_funding_rate)
 
             # ── 4.5. Record to Vault (DuckDB) ───────────────────────
             record_tick!(vault, pulse, ensemble)
 
-            # ── 5. Periodic covariance on each lobe (GPU-intensive) ──────────
+            # ── 5. MC-only covariance on each lobe (GPU-intensive) ──────────
             # Uses subsampled 8192 neurons per lobe → 268 MB covariance matrix
-            if tick % COVARIANCE_INTERVAL == 0
+            if covariance_due(MC_PATHS, tick, COVARIANCE_INTERVAL)
                 for (li, lobe) in enumerate(ensemble.lobes)
                     result = compute_reservoir_covariance!(lobe)
                     if result !== nothing
