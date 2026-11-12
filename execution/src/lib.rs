@@ -356,6 +356,10 @@ mod tests {
     fn assert_no_fill(engine: &ExecutionEngine) {
         assert_eq!(engine.ghost_wallet.balance_atp, 500.0);
         assert!(engine.ghost_wallet.balances.is_empty());
+        assert_untouched_fill_counts(engine);
+    }
+
+    fn assert_untouched_fill_counts(engine: &ExecutionEngine) {
         assert_eq!(engine.ghost_wallet.trade_count, 0);
         assert_eq!(engine.step_counter, 0);
         assert!(!std::path::Path::new(&engine.log_path).exists());
@@ -457,22 +461,17 @@ mod tests {
             timestamp_ns: ts_now(),
         };
 
-        let decision = engine.process_signal(signal);
-        match decision {
+        let (quantity, kelly_fraction) = match engine.process_signal(signal) {
             ExecutionDecision::Executed {
                 quantity,
                 kelly_fraction,
                 ..
-            } => {
-                assert!((quantity - 7.25).abs() < 1e-5);
-                assert!((kelly_fraction - 0.145).abs() < 1e-6);
-                assert!((engine.ghost_wallet.balance("TESTSYM") - 7.2500052).abs() < 1e-6);
-                assert!((engine.ghost_wallet.balance_atp - 427.42743).abs() < 1e-4);
-                assert_eq!(engine.ghost_wallet.trade_count, 1);
-                assert_eq!(engine.step_counter, 1);
-            }
+            } => (quantity, kelly_fraction),
             other => panic!("expected Executed, got {other:?}"),
-        }
+        };
+        assert!((quantity - 7.25).abs() < 1e-5);
+        assert!((kelly_fraction - 0.145).abs() < 1e-6);
+        assert_buy_fill(&engine);
 
         let sell = TradeSignal {
             ticker: "TESTSYM".into(),
@@ -482,28 +481,59 @@ mod tests {
             confidence: 0.98,
             timestamp_ns: ts_now(),
         };
-        match engine.process_signal(sell) {
-            ExecutionDecision::Executed { side, quantity, .. } => {
-                assert_eq!(side, TradeSide::Sell);
-                assert!((quantity - 5.1647515).abs() < 1e-5);
-            }
+        let (side, sell_quantity) = match engine.process_signal(sell) {
+            ExecutionDecision::Executed { side, quantity, .. } => (side, quantity),
             other => panic!("expected Sell execution, got {other:?}"),
-        }
+        };
+        assert_eq!(side, TradeSide::Sell);
+        assert!((sell_quantity - 5.1647515).abs() < 1e-5);
         // Pin real ledger deltas, not just the advisory policy quantity.
+        assert_sell_fill(&engine);
+        assert_two_step_counts(&engine);
+
+        let records = read_ghost_records(&log);
+        assert_record_actions(&records);
+        assert_record_quantities(&records);
+    }
+
+    fn assert_buy_fill(engine: &ExecutionEngine) {
+        assert!((engine.ghost_wallet.balance("TESTSYM") - 7.2500052).abs() < 1e-6);
+        assert!((engine.ghost_wallet.balance_atp - 427.42743).abs() < 1e-4);
+        assert_single_fill_counts(engine);
+    }
+
+    fn assert_single_fill_counts(engine: &ExecutionEngine) {
+        assert_eq!(engine.ghost_wallet.trade_count, 1);
+        assert_eq!(engine.step_counter, 1);
+    }
+
+    fn assert_sell_fill(engine: &ExecutionEngine) {
         assert!((engine.ghost_wallet.balance("TESTSYM") - 2.0852537).abs() < 1e-5);
         assert!((engine.ghost_wallet.balance_atp - 489.34247).abs() < 1e-3);
         assert!((engine.ghost_wallet.cumulative_pnl - 10.215877).abs() < 1e-4);
+    }
+
+    fn assert_two_step_counts(engine: &ExecutionEngine) {
         assert_eq!(engine.ghost_wallet.trade_count, 2);
         assert_eq!(engine.ghost_wallet.closed_trade_count, 1);
         assert_eq!(engine.step_counter, 2);
-        let records: Vec<serde_json::Value> = std::fs::read_to_string(log)
+    }
+
+    fn read_ghost_records(log: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(log)
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
+            .collect()
+    }
+
+    fn assert_record_actions(records: &[serde_json::Value]) {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0]["action"], "buy");
         assert_eq!(records[1]["action"], "sell");
+    }
+
+    fn assert_record_quantities(records: &[serde_json::Value]) {
         assert!((records[0]["quantity"].as_f64().unwrap() - 7.2500052).abs() < 1e-5);
         assert!((records[1]["quantity"].as_f64().unwrap() - 5.1647515).abs() < 1e-5);
     }
