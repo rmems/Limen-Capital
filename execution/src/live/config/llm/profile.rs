@@ -163,36 +163,38 @@ impl ModelProfile {
 /// thinking budgets; both use adaptive thinking. An operator profile for the
 /// same model id replaces the built-in entry wholesale.
 pub(super) fn builtin_profile(model: &str) -> Option<ModelProfile> {
-    let profile = match model {
-        // claude-sonnet-5-5: decision role only. Rejects forced tool use
-        // (`any`/`tool`) and `thinking: disabled`; adaptive thinking only.
-        "claude-sonnet-5-5" => ModelProfile {
-            roles: vec![ROLE_DECISION.to_string()],
-            context_tokens: 200_000,
-            efforts: vec!["low".into(), "medium".into(), "high".into()],
-            default_effort: "high".into(),
-            response_contracts: vec![CONTRACT_JSON_SCHEMA.into(), CONTRACT_STRICT_TOOL.into()],
-            tool_choice: vec![TOOL_CHOICE_AUTO.into(), TOOL_CHOICE_NONE.into()],
-            thinking: THINKING_ADAPTIVE.into(),
-        },
-        // claude-haiku-5.5 helper profile: accepts forced tool choice but the
-        // helper contract is plain text, so it is not required. A decision-role
-        // Haiku profile must be operator-supplied.
-        "claude-haiku-5-5" => ModelProfile {
-            roles: vec![ROLE_HELPER.to_string()],
-            context_tokens: 200_000,
-            efforts: vec!["low".into(), "medium".into(), "high".into()],
-            default_effort: "medium".into(),
-            response_contracts: vec![CONTRACT_JSON_SCHEMA.into(), CONTRACT_STRICT_TOOL.into()],
-            tool_choice: vec![
+    // claude-sonnet-5-5: decision role only. Rejects forced tool use
+    // (`any`/`tool`) and `thinking: disabled`; adaptive thinking only.
+    // claude-haiku-5.5: helper profile. Accepts forced tool choice but the
+    // helper contract is plain text, so it is not required; a decision-role
+    // Haiku profile must be operator-supplied.
+    let (roles, default_effort, tool_choice): (Vec<String>, &str, Vec<String>) = match model {
+        "claude-sonnet-5-5" => (
+            vec![ROLE_DECISION.into()],
+            "high",
+            vec![TOOL_CHOICE_AUTO.into(), TOOL_CHOICE_NONE.into()],
+        ),
+        "claude-haiku-5-5" => (
+            vec![ROLE_HELPER.into()],
+            "medium",
+            vec![
                 TOOL_CHOICE_AUTO.into(),
                 TOOL_CHOICE_NONE.into(),
                 TOOL_CHOICE_ANY.into(),
                 TOOL_CHOICE_TOOL.into(),
             ],
-            thinking: THINKING_ADAPTIVE.into(),
-        },
+        ),
         _ => return None,
     };
-    Some(profile)
+    Some(ModelProfile {
+        roles,
+        context_tokens: 200_000,
+        efforts: ["low", "medium", "high"].map(String::from).to_vec(),
+        default_effort: default_effort.into(),
+        response_contracts: [CONTRACT_JSON_SCHEMA, CONTRACT_STRICT_TOOL]
+            .map(String::from)
+            .to_vec(),
+        tool_choice,
+        thinking: THINKING_ADAPTIVE.into(),
+    })
 }
