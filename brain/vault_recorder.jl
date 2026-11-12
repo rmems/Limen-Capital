@@ -65,7 +65,8 @@ function _resume_tick(con)
     return Int64(first(q)[1])
 end
 
-function record_tick!(vr::VaultRecorder, pulse::MarketPulse, ensemble::EnsembleBrain)
+# Both backends expose lobes with spike vectors; do not require the local type.
+function record_tick!(vr::VaultRecorder, pulse::MarketPulse, ensemble)
     vr.tick_count += 1
   tid = Int64(vr.tick_count)
     for (idx, (px, vol)) in enumerate(zip(pulse.prices, pulse.vols))

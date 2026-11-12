@@ -100,7 +100,8 @@ end
                 @test sum(nero.relevance) ≈ 1.0f0 atol=1f-5
             end
         end
-        for field in (:relevance, :prev_relevance, :raw_scores, :readout_ema, :spike_density, :temp_buffer, :surprise)
+        for field in (:relevance, :prev_relevance, :raw_scores, :inhibited_scores,
+                      :readout_ema, :spike_density, :temp_buffer, :surprise)
             nero = NeroOrchestrator()
             getfield(nero, field)[1] = NaN32
             @test all(isfinite, route_and_aggregate!(nero, healthy_ensemble()))

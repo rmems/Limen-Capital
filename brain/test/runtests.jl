@@ -2,6 +2,7 @@
 
 using Test
 using Random
+using LinearAlgebra
 
 const BRAIN = dirname(@__DIR__)
 
@@ -154,5 +155,18 @@ end
 
 include(joinpath(@__DIR__, "wire_hardening.jl"))
 include(joinpath(@__DIR__, "wire_fixtures.jl"))
+include(joinpath(@__DIR__, "model_math.jl"))
+include(joinpath(@__DIR__, "model_math_comparison.jl"))
+
+@testset "Fresh-process backend loading" begin
+    fixture_path = joinpath(@__DIR__, "fixtures")
+    script = joinpath(@__DIR__, "backend_loading.jl")
+    # JULIA_LOAD_PATH is separated by ';' on Windows, ':' elsewhere.
+    sep = Sys.iswindows() ? ';' : ':'
+    withenv("JULIA_LOAD_PATH" => fixture_path * sep * "@stdlib") do
+        @test success(pipeline(`$(Base.julia_cmd()) --startup-file=no --project=@stdlib $script`;
+            stdout=stdout, stderr=stderr))
+    end
+end
 
 println("All Capital unit tests finished.")

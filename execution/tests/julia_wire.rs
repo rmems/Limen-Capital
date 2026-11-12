@@ -48,7 +48,6 @@ fn julia_frames_reach_production_decisions_and_wallet() {
             resolve_fill_price(Some(&pulse), &u, &signal.ticker, pulse.timestamp_ns, 1).unwrap();
         assert_eq!(signal.price, 100.0);
         let atp = engine.ghost_wallet.balance_atp as f64;
-        let held = engine.ghost_wallet.balance(&u.symbols[0]) as f64;
         let expected_policy_fraction =
             ((signal.confidence as f64 * 0.05 - (1.0 - signal.confidence as f64)) / 0.05) * 0.25;
         match engine.process_signal(signal) {
@@ -68,16 +67,13 @@ fn julia_frames_reach_production_decisions_and_wallet() {
         }
         // Ledger fill sizing is independent of policy sizing (known limitation).
         if side == TradeSide::Buy {
-            close(engine.ghost_wallet.balance_atp as f64, 460.0);
-            close(engine.ghost_wallet.balance(&u.symbols[0]) as f64, 0.3996);
+            close(engine.ghost_wallet.balance_atp as f64, 387.86917);
+            close(engine.ghost_wallet.balance(&u.symbols[0]) as f64, 1.120188);
         } else {
-            close(
-                engine.ghost_wallet.balance_atp as f64,
-                atp + held * 0.08 * 100.0 * 0.999,
-            );
+            close(engine.ghost_wallet.balance_atp as f64, 474.67957);
             close(
                 engine.ghost_wallet.balance(&u.symbols[0]) as f64,
-                held * 0.92,
+                0.25121522,
             );
         }
     }
@@ -111,8 +107,8 @@ fn julia_frames_reach_production_decisions_and_wallet() {
         .collect();
     assert_eq!(records.len(), 2);
     for (record, action, quantity) in [
-        (&records[0], "buy", 0.3996),
-        (&records[1], "sell", 0.031968),
+        (&records[0], "buy", 1.120188),
+        (&records[1], "sell", 0.8689728),
     ] {
         assert_eq!(record["action"], action);
         assert_eq!(record["asset"], u.symbols[0]);

@@ -1,7 +1,25 @@
 # Limen-Capital — Experimental SNN-HFT (Julia Brain + Rust Muscle)
 
 Hybrid research stack: **Julia neuromorphic strategy** + **Rust deterministic execution**.
-Built for experimental spiking / liquid-state market research — **not live capital**.
+The Julia/wire/ghost-ledger path is for experimental spiking / liquid-state
+market research, **not live capital**. The separate, feature-gated `limen-live`
+experiment targets real-money micro-capital on **Alpaca (US stocks and ETFs)**.
+It is not a production trading system.
+
+**Live launch is blocked on this revision:** `limen-live` still has the legacy
+Robinhood adapter and refuses `paper = false`; there is no Alpaca adapter or
+live unlock. The Claude decider is wired for paper runs behind enforced model
+profiles and a persistent LLM budget, but it cannot submit live orders.
+Do not provision real keys or treat `config/live-soak.draft.toml` as runnable.
+See the [live runbook and release gates](docs/live-runbook.md) and
+[security model](docs/SECURITY.md). There is no paper phase or shadow soak:
+once the release gates are met, the first supervised real-money session is the
+soak, at micro caps ($10 position / at most $5 order / $4 daily loss, preferably
+$1 orders). CI/branch/secret protection [#26](https://github.com/rmems/Limen-Capital/issues/26)
+is a release blocker.
+
+A `limen-live` journal is an operational audit, **not a research result**.
+The journal and LLM output never enter a training set or research metrics.
 
 This repo is a **standalone application** (your personal/org remote). It is **not**
 published under the Limen-Neural GitHub organization. It *depends on* validated
@@ -83,6 +101,7 @@ Limen-Capital/
 cd execution && cargo test          # fetches metabolic-ledger (+ optional feature deps)
 cd ../brain && julia --project=. -e 'using Pkg; Pkg.instantiate()'
 julia --project=. test/runtests.jl
+julia --project=. test/backend_runtime.jl  # pinned imports + vault; 100-tick auto test on CUDA
 # or: ./scripts/smoke_wire_local.sh
 ```
 
@@ -104,6 +123,8 @@ julia --project=. research_helm.jl --duration 200 --seed 42 --horizon 5
 
 `ExperimentRunner` (`experiment_runner.jl` + `metrics.jl`) records walk-forward **hit_rate**, **PnL proxy**, and **latency p50/p99**.  
 Reservoir façade picks **LiquidCortex** when loadable (`LIMEN_RESERVOIR` / `--backend`).  
+LiquidCortex is imported at file load time without exporting its names into the helm.
+The backend runtime test reports GPU acceptance as skipped on CPU-only hosts.
 MC fan-out stays **off** in research mode (`LIMEN_MC_PATHS` only for live helm).
 
 ### 4. Rust Decision path (gates + fractional Kelly + metabolic-ledger)
@@ -141,8 +162,13 @@ win-rate statistics include both sides' friction exactly once.
 
 ```bash
 cd brain/
-julia --project=. spike_helm.jl
+LIMEN_SEED=42 julia --project=. spike_helm.jl
 ```
+
+The live helm logs `LIMEN_SEED` (default `42`) and seeds both host and CUDA RNGs
+before reservoir initialization. Replay also requires the same accepted pulse
+sequence, configuration, backend, Julia/package versions and GPU stack.
+`LIMEN_MC_PATHS=0` disables both MC paths and their covariance workload.
 
 ## Local notifications for `limen-live`
 
@@ -207,10 +233,18 @@ See `brain/feature_stream.jl`.
 dV = ((V_rest - V) / τ_m + W_rec·S + W_in·u) dt + σ·dW
 ```
 
-**STDP Covariance Learning:**
+**Local `naut_core` readout STDP (RM-2443):**
 ```
-ΔW = η · trace_pre · trace_post
+ΔW_out[i,j] = η · (post[i] · trace_pre[j] - trace_post[i] · pre[j])
 ```
+
+`post` is the current positive-readout event; traces decay before learning and
+receive current events afterwards. Both potentiation and depression run every
+10 ticks, with weights clamped to ±1. Recurrent initialization uses the random
+matrix proxy `||W||_F / sqrt(N) ≈ 0.9`, not RMS nonzero weight. This estimate does
+not guarantee echo-state stability. These changes invalidate earlier local-model
+results. See the [fixed-seed before/after comparison](docs/brain-model-math.md).
+The optional LiquidCortex backend keeps its pinned upstream learning rules.
 
 **Global Inhibition ("Cortisol"):**
 - GPU temp > 75°C → raise spike threshold

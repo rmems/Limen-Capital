@@ -65,7 +65,8 @@ mutable struct NeroOrchestrator
     readout_ema::Matrix{Float32}       # EMA of each lobe's readout (4×16)
     spike_density::Vector{Float32}     # Current spike density per lobe
     prev_relevance::Vector{Float32}    # Previous tick relevance (for momentum)
-    raw_scores::Vector{Float32}        # Separate from momentum history
+    raw_scores::Vector{Float32}        # Separate from relevance history
+    inhibited_scores::Vector{Float32}  # Next relevance, before committing history
     temp_buffer::Vector{Float32}       # Temporary buffer (reused to avoid allocation)
     surprise::Vector{Float32}          # Per-lobe manifold surprise
     tick_count::Int64
@@ -94,6 +95,7 @@ function NeroOrchestrator()
         zeros(Float32, N_LOBES),
         fill(0.25f0, N_LOBES),
         zeros(Float32, N_LOBES),
+        zeros(Float32, N_LOBES),
         zeros(Float32, N_OUT),
         zeros(Float32, N_LOBES),       # surprise
         Int64(0)
@@ -109,7 +111,8 @@ function reset_nero!(nero::NeroOrchestrator)
     end
     fill!(nero.relevance, 0.25f0)
     fill!(nero.prev_relevance, 0.25f0)
-    for buffer in (nero.readout_ema, nero.spike_density, nero.raw_scores, nero.temp_buffer, nero.surprise)
+    for buffer in (nero.readout_ema, nero.spike_density, nero.temp_buffer, nero.surprise,
+                   nero.raw_scores, nero.inhibited_scores)
         fill!(buffer, 0.0f0)
     end
     nero.tick_count = 0
@@ -119,7 +122,8 @@ end
 function nero_finite(nero::NeroOrchestrator)
     return all(buffer -> all(isfinite, buffer),
         (nero.relevance, nero.prev_relevance, nero.readout_ema,
-         nero.spike_density, nero.raw_scores, nero.temp_buffer, nero.surprise, nero.adjacency_matrix))
+         nero.spike_density, nero.temp_buffer, nero.surprise, nero.adjacency_matrix,
+         nero.raw_scores, nero.inhibited_scores))
 end
 
 """
@@ -155,6 +159,7 @@ function update_relevance!(nero::NeroOrchestrator, ensemble)
 
         # 1. Spike density (already a Float32 in [0,1])
         spike_density = lobe.last_spike_rate
+        nero.spike_density[i] = spike_density
 
         # 2. Readout EMA update (in-place; no new array)
         copyto!(nero.temp_buffer, Array(lobe.output))
@@ -186,13 +191,10 @@ function update_relevance!(nero::NeroOrchestrator, ensemble)
         end
     end
 
-    # Keep the old relevance only after all momentum terms have used history.
-    copyto!(nero.prev_relevance, nero.relevance)
-
     # ── Stage 4: cross-lobe graph inhibition ──────────────────────────────
     # inhibited[i] = raw[i] - Σⱼ≠ᵢ NERO_INHIBIT[j,i] × raw[j]
     # Uses the adjacency matrix for cross-lobe inhibition
-    inhibited = nero.relevance   # reuse as output buffer
+    inhibited = nero.inhibited_scores
     for dst in 1:N_LOBES
         inh_sum = 0.0f0
         for src in 1:N_LOBES
@@ -230,6 +232,9 @@ function update_relevance!(nero::NeroOrchestrator, ensemble)
         reset_nero!(nero)
         return false
     end
+    # Commit only after all lobes have used the two distinct historical scores.
+    copyto!(nero.prev_relevance, nero.relevance)
+    copyto!(nero.relevance, inhibited)
     return true
 end
 
@@ -321,3 +326,4 @@ function route_and_aggregate!(nero::NeroOrchestrator, ensemble)
     end
     return output
 end
+

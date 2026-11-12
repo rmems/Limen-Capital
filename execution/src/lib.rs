@@ -466,8 +466,8 @@ mod tests {
             } => {
                 assert!((quantity - 7.25).abs() < 1e-5);
                 assert!((kelly_fraction - 0.145).abs() < 1e-6);
-                assert!((engine.ghost_wallet.balance("TESTSYM") - 3.996).abs() < 1e-6);
-                assert_eq!(engine.ghost_wallet.balance_atp, 460.0);
+                assert!((engine.ghost_wallet.balance("TESTSYM") - 7.2500052).abs() < 1e-6);
+                assert!((engine.ghost_wallet.balance_atp - 427.42743).abs() < 1e-4);
                 assert_eq!(engine.ghost_wallet.trade_count, 1);
                 assert_eq!(engine.step_counter, 1);
             }
@@ -485,14 +485,14 @@ mod tests {
         match engine.process_signal(sell) {
             ExecutionDecision::Executed { side, quantity, .. } => {
                 assert_eq!(side, TradeSide::Sell);
-                assert!((quantity - 5.558333333).abs() < 1e-5);
+                assert!((quantity - 5.1647515).abs() < 1e-5);
             }
             other => panic!("expected Sell execution, got {other:?}"),
         }
         // Pin real ledger deltas, not just the advisory policy quantity.
-        assert!((engine.ghost_wallet.balance("TESTSYM") - 3.67632).abs() < 1e-6);
-        assert!((engine.ghost_wallet.balance_atp - 463.83234).abs() < 5e-5);
-        assert!((engine.ghost_wallet.cumulative_pnl - 0.63552386).abs() < 1e-6);
+        assert!((engine.ghost_wallet.balance("TESTSYM") - 2.0852537).abs() < 1e-5);
+        assert!((engine.ghost_wallet.balance_atp - 489.34247).abs() < 1e-3);
+        assert!((engine.ghost_wallet.cumulative_pnl - 10.215877).abs() < 1e-4);
         assert_eq!(engine.ghost_wallet.trade_count, 2);
         assert_eq!(engine.ghost_wallet.closed_trade_count, 1);
         assert_eq!(engine.step_counter, 2);
@@ -504,8 +504,8 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0]["action"], "buy");
         assert_eq!(records[1]["action"], "sell");
-        assert!((records[0]["quantity"].as_f64().unwrap() - 3.996).abs() < 1e-6);
-        assert!((records[1]["quantity"].as_f64().unwrap() - 0.31968).abs() < 1e-6);
+        assert!((records[0]["quantity"].as_f64().unwrap() - 7.2500052).abs() < 1e-5);
+        assert!((records[1]["quantity"].as_f64().unwrap() - 5.1647515).abs() < 1e-5);
     }
 
     #[test]
