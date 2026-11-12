@@ -63,6 +63,11 @@ const KNOWN_TOOL_CHOICES: &[&str] = &[
 ];
 const KNOWN_THINKING: &[&str] = &[THINKING_ADAPTIVE, THINKING_DISABLED];
 
+/// `values` is a non-empty list whose entries all come from `known`.
+fn subset_ok(values: &[String], known: &[&str]) -> bool {
+    !values.is_empty() && values.iter().all(|v| known.contains(&v.as_str()))
+}
+
 /// Prefix a sub-check failure with the model it describes.
 fn for_model(model: &str, e: ConfigError) -> ConfigError {
     match e {
@@ -74,13 +79,13 @@ fn for_model(model: &str, e: ConfigError) -> ConfigError {
 impl ModelProfile {
     /// Structural checks every profile must pass, whatever its role.
     pub fn validate(&self, model: &str) -> Result<(), ConfigError> {
-        self.validate_roles_and_window()
-            .and_then(|()| self.validate_capabilities())
+        self.check_shape()
+            .and_then(|()| self.check_capabilities())
             .map_err(|e| for_model(model, e))
     }
 
-    fn validate_roles_and_window(&self) -> Result<(), ConfigError> {
-        if self.roles.is_empty() || !self.roles.iter().all(|r| KNOWN_ROLES.contains(&r.as_str())) {
+    fn check_shape(&self) -> Result<(), ConfigError> {
+        if !subset_ok(&self.roles, KNOWN_ROLES) {
             return Err(invalid(
                 "roles must be a non-empty subset of [\"decision\", \"helper\"]",
             ));
@@ -94,14 +99,7 @@ impl ModelProfile {
         Ok(())
     }
 
-    fn validate_capabilities(&self) -> Result<(), ConfigError> {
-        self.validate_efforts()?;
-        self.validate_contracts()?;
-        self.validate_tool_choice()?;
-        self.validate_thinking()
-    }
-
-    fn validate_efforts(&self) -> Result<(), ConfigError> {
+    fn check_capabilities(&self) -> Result<(), ConfigError> {
         if self.efforts.is_empty() || self.efforts.iter().any(|e| e.is_empty()) {
             return Err(invalid("efforts must be a non-empty list of effort levels"));
         }
@@ -111,38 +109,22 @@ impl ModelProfile {
                 self.default_effort, self.efforts
             )));
         }
-        Ok(())
-    }
-
-    fn validate_contracts(&self) -> Result<(), ConfigError> {
-        if self.response_contracts.is_empty()
-            || !self
-                .response_contracts
-                .iter()
-                .all(|c| KNOWN_CONTRACTS.contains(&c.as_str()))
-        {
-            return Err(invalid(
-                "response_contracts must be a non-empty subset of [\"json_schema\", \"strict_tool\"]"
-            ));
-        }
-        Ok(())
-    }
-
-    fn validate_tool_choice(&self) -> Result<(), ConfigError> {
-        if self.tool_choice.is_empty()
-            || !self
-                .tool_choice
-                .iter()
-                .all(|t| KNOWN_TOOL_CHOICES.contains(&t.as_str()))
-        {
-            return Err(invalid(
+        for (values, known, msg) in [
+            (
+                self.response_contracts.as_slice(),
+                KNOWN_CONTRACTS,
+                "response_contracts must be a non-empty subset of [\"json_schema\", \"strict_tool\"]",
+            ),
+            (
+                self.tool_choice.as_slice(),
+                KNOWN_TOOL_CHOICES,
                 "tool_choice must be a non-empty subset of [\"auto\", \"none\", \"any\", \"tool\"]",
-            ));
+            ),
+        ] {
+            if !subset_ok(values, known) {
+                return Err(invalid(msg));
+            }
         }
-        Ok(())
-    }
-
-    fn validate_thinking(&self) -> Result<(), ConfigError> {
         if !KNOWN_THINKING.contains(&self.thinking.as_str()) {
             return Err(invalid(format!(
                 "thinking must be \"adaptive\" or \"disabled\", got {:?}",
