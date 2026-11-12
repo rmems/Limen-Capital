@@ -130,14 +130,14 @@ impl DeciderError {
             DeciderError::Refusal(_) => "refusal",
             DeciderError::Stale { .. } => "stale",
             DeciderError::Context(_) => "context_error",
-            DeciderError::MissingUsage(_) => "missing_usage",
-            DeciderError::Pricing(_) => "missing_pricing",
             _ => self.tail_kind(),
         }
     }
 
     fn tail_kind(&self) -> &'static str {
         match self {
+            DeciderError::MissingUsage(_) => "missing_usage",
+            DeciderError::Pricing(_) => "missing_pricing",
             DeciderError::PromptTooLarge { .. } => "prompt_too_large",
             DeciderError::Budget(BudgetError::Expired { .. }) => "expired",
             DeciderError::Budget(_) => "budget",

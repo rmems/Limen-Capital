@@ -16,24 +16,15 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Role names used inside [`ModelProfile::roles`].
-pub const ROLE_DECISION: &str = "decision";
-pub const ROLE_HELPER: &str = "helper";
-/// Serialization contracts a profile may declare.
-pub const CONTRACT_JSON_SCHEMA: &str = "json_schema";
-pub const CONTRACT_STRICT_TOOL: &str = "strict_tool";
-/// `tool_choice` modes a profile may declare. The decision role always sends
-/// `auto` (Sonnet 5.5 rejects forced tool use), so decision profiles must
-/// list it.
-pub const TOOL_CHOICE_AUTO: &str = "auto";
-pub const TOOL_CHOICE_NONE: &str = "none";
-pub const TOOL_CHOICE_ANY: &str = "any";
-pub const TOOL_CHOICE_TOOL: &str = "tool";
-/// Thinking modes. `adaptive` sends no `thinking` field (the model default);
-/// `disabled` sends `{"type": "disabled"}`. Manual token budgets are never
-/// sent: the 5.5 family rejects them.
-pub const THINKING_ADAPTIVE: &str = "adaptive";
-pub const THINKING_DISABLED: &str = "disabled";
+mod price;
+mod profile;
+
+pub use price::{LongContextPrice, ModelPrice, TokenCounts};
+pub use profile::{
+    ModelProfile, CONTRACT_JSON_SCHEMA, CONTRACT_STRICT_TOOL, ROLE_DECISION, ROLE_HELPER,
+    THINKING_ADAPTIVE, THINKING_DISABLED, TOOL_CHOICE_ANY, TOOL_CHOICE_AUTO, TOOL_CHOICE_NONE,
+    TOOL_CHOICE_TOOL,
+};
 
 /// Hard ceiling for `llm.max_llm_cost_usd_total` (whole experiment, all roles).
 pub const MAX_EXPERIMENT_BUDGET_USD: f64 = 200.0;
@@ -48,327 +39,6 @@ pub const DEFAULT_API_BASE_URL: &str = "https://api.anthropic.com";
 /// experiment's API credits may be used.
 pub fn credit_last_date() -> NaiveDate {
     NaiveDate::from_ymd_opt(2026, 11, 12).expect("valid date")
-}
-
-/// Capability profile for one model: which roles it may serve, its context
-/// window, accepted effort levels, serialization contracts, tool-choice modes
-/// and thinking mode. Operator-supplied profiles must be complete; a missing
-/// or incompatible profile fails validation before any paid call.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
-#[derive(Default)]
-pub struct ModelProfile {
-    /// Roles this model may serve: any of `"decision"`, `"helper"`.
-    pub roles: Vec<String>,
-    /// Context window in tokens. `llm.max_input_tokens` must fit inside the
-    /// smallest window among the configured role models.
-    pub context_tokens: u64,
-    /// Effort levels the model accepts (e.g. `low`, `medium`, `high`). This is
-    /// a per-model capability list, not a global ceiling.
-    pub efforts: Vec<String>,
-    /// Effort used when the role configuration leaves it unset.
-    pub default_effort: String,
-    /// Serialization contracts the model supports: `"json_schema"` and/or
-    /// `"strict_tool"`.
-    pub response_contracts: Vec<String>,
-    /// `tool_choice` modes the model accepts: `"auto"`, `"none"`, `"any"`,
-    /// `"tool"`. Decision-role profiles must include `"auto"`.
-    pub tool_choice: Vec<String>,
-    /// Thinking mode: `"adaptive"` or `"disabled"`.
-    pub thinking: String,
-}
-
-fn one_of(value: &str, allowed: &[&str]) -> bool {
-    allowed.contains(&value)
-}
-
-impl ModelProfile {
-    /// Structural checks every profile must pass, whatever its role.
-    pub fn validate(&self, model: &str) -> Result<(), ConfigError> {
-        self.validate_roles_and_window(model)?;
-        self.validate_capabilities(model)
-    }
-
-    fn validate_roles_and_window(&self, model: &str) -> Result<(), ConfigError> {
-        if self.roles.is_empty()
-            || !self
-                .roles
-                .iter()
-                .all(|r| one_of(r, &[ROLE_DECISION, ROLE_HELPER]))
-        {
-            return Err(invalid(format!(
-                "profile for {model:?}: roles must be a non-empty subset of [\"decision\", \"helper\"]"
-            )));
-        }
-        if self.context_tokens < 4_096 {
-            return Err(invalid(format!(
-                "profile for {model:?}: context_tokens must be >= 4096, got {}",
-                self.context_tokens
-            )));
-        }
-        Ok(())
-    }
-
-    fn validate_capabilities(&self, model: &str) -> Result<(), ConfigError> {
-        self.validate_efforts(model)?;
-        self.validate_contracts(model)?;
-        self.validate_tool_choice(model)?;
-        self.validate_thinking(model)
-    }
-
-    fn validate_efforts(&self, model: &str) -> Result<(), ConfigError> {
-        if self.efforts.is_empty() || self.efforts.iter().any(|e| e.is_empty()) {
-            return Err(invalid(format!(
-                "profile for {model:?}: efforts must be a non-empty list of effort levels"
-            )));
-        }
-        if !self.efforts.iter().any(|e| e == &self.default_effort) {
-            return Err(invalid(format!(
-                "profile for {model:?}: default_effort {:?} is not in efforts {:?}",
-                self.default_effort, self.efforts
-            )));
-        }
-        Ok(())
-    }
-
-    fn validate_contracts(&self, model: &str) -> Result<(), ConfigError> {
-        if self.response_contracts.is_empty()
-            || !self
-                .response_contracts
-                .iter()
-                .all(|c| one_of(c, &[CONTRACT_JSON_SCHEMA, CONTRACT_STRICT_TOOL]))
-        {
-            return Err(invalid(format!(
-                "profile for {model:?}: response_contracts must be a non-empty subset of [\"json_schema\", \"strict_tool\"]"
-            )));
-        }
-        Ok(())
-    }
-
-    fn validate_tool_choice(&self, model: &str) -> Result<(), ConfigError> {
-        if self.tool_choice.is_empty()
-            || !self.tool_choice.iter().all(|t| {
-                one_of(
-                    t,
-                    &[
-                        TOOL_CHOICE_AUTO,
-                        TOOL_CHOICE_NONE,
-                        TOOL_CHOICE_ANY,
-                        TOOL_CHOICE_TOOL,
-                    ],
-                )
-            })
-        {
-            return Err(invalid(format!(
-                "profile for {model:?}: tool_choice must be a non-empty subset of [\"auto\", \"none\", \"any\", \"tool\"]"
-            )));
-        }
-        Ok(())
-    }
-
-    fn validate_thinking(&self, model: &str) -> Result<(), ConfigError> {
-        if !one_of(&self.thinking, &[THINKING_ADAPTIVE, THINKING_DISABLED]) {
-            return Err(invalid(format!(
-                "profile for {model:?}: thinking must be \"adaptive\" or \"disabled\", got {:?}",
-                self.thinking
-            )));
-        }
-        Ok(())
-    }
-
-    /// Whether the profile lists `role` in [`ModelProfile::roles`].
-    pub fn allows(&self, role: &str) -> bool {
-        self.roles.iter().any(|r| r == role)
-    }
-}
-
-/// Maintained capability profiles for the default 5.5 family. These are the
-/// documented contracts: Sonnet 5.5 rejects forced tool use and manual
-/// thinking budgets; both use adaptive thinking. An operator profile for the
-/// same model id replaces the built-in entry wholesale.
-fn builtin_profile(model: &str) -> Option<ModelProfile> {
-    let profile = match model {
-        // claude-sonnet-5-5: decision role only. Rejects forced tool use
-        // (`any`/`tool`) and `thinking: disabled`; adaptive thinking only.
-        "claude-sonnet-5-5" => ModelProfile {
-            roles: vec![ROLE_DECISION.to_string()],
-            context_tokens: 200_000,
-            efforts: vec!["low".into(), "medium".into(), "high".into()],
-            default_effort: "high".into(),
-            response_contracts: vec![CONTRACT_JSON_SCHEMA.into(), CONTRACT_STRICT_TOOL.into()],
-            tool_choice: vec![TOOL_CHOICE_AUTO.into(), TOOL_CHOICE_NONE.into()],
-            thinking: THINKING_ADAPTIVE.into(),
-        },
-        // claude-haiku-5.5 helper profile: accepts forced tool choice but the
-        // helper contract is plain text, so it is not required. A decision-role
-        // Haiku profile must be operator-supplied.
-        "claude-haiku-5-5" => ModelProfile {
-            roles: vec![ROLE_HELPER.to_string()],
-            context_tokens: 200_000,
-            efforts: vec!["low".into(), "medium".into(), "high".into()],
-            default_effort: "medium".into(),
-            response_contracts: vec![CONTRACT_JSON_SCHEMA.into(), CONTRACT_STRICT_TOOL.into()],
-            tool_choice: vec![
-                TOOL_CHOICE_AUTO.into(),
-                TOOL_CHOICE_NONE.into(),
-                TOOL_CHOICE_ANY.into(),
-                TOOL_CHOICE_TOOL.into(),
-            ],
-            thinking: THINKING_ADAPTIVE.into(),
-        },
-        _ => return None,
-    };
-    Some(profile)
-}
-
-/// Token counts for one billed call, in the four price dimensions.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct TokenCounts {
-    pub input: u64,
-    pub output: u64,
-    pub cache_read: u64,
-    pub cache_write: u64,
-}
-
-impl TokenCounts {
-    /// Prompt-side tokens: everything billed at an input-family rate.
-    pub fn prompt_tokens(&self) -> u64 {
-        self.input + self.cache_read + self.cache_write
-    }
-}
-
-/// Long-context price tier: once the prompt reaches `threshold_tokens`, these
-/// rates replace the base rates for the whole call.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct LongContextPrice {
-    pub threshold_tokens: u64,
-    pub input_usd_per_mtok: f64,
-    pub output_usd_per_mtok: f64,
-    pub cache_read_usd_per_mtok: f64,
-    pub cache_write_usd_per_mtok: f64,
-}
-
-/// USD per million tokens for one model, optionally with a long-context tier.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct ModelPrice {
-    pub input_usd_per_mtok: f64,
-    pub output_usd_per_mtok: f64,
-    pub cache_read_usd_per_mtok: f64,
-    pub cache_write_usd_per_mtok: f64,
-    /// Rates applied when `prompt_tokens >= threshold_tokens`. Absent means a
-    /// single tier covers the model's whole context window.
-    #[serde(default)]
-    pub long_context: Option<LongContextPrice>,
-}
-
-/// The four per-MTok rates selected for a given prompt size.
-#[derive(Debug, Clone, Copy)]
-struct Rates {
-    input: f64,
-    output: f64,
-    cache_read: f64,
-    cache_write: f64,
-}
-
-impl ModelPrice {
-    fn base_rates(&self) -> Rates {
-        Rates {
-            input: self.input_usd_per_mtok,
-            output: self.output_usd_per_mtok,
-            cache_read: self.cache_read_usd_per_mtok,
-            cache_write: self.cache_write_usd_per_mtok,
-        }
-    }
-
-    fn rates_for(&self, prompt_tokens: u64) -> Rates {
-        match &self.long_context {
-            Some(lc) if prompt_tokens >= lc.threshold_tokens => Rates {
-                input: lc.input_usd_per_mtok,
-                output: lc.output_usd_per_mtok,
-                cache_read: lc.cache_read_usd_per_mtok,
-                cache_write: lc.cache_write_usd_per_mtok,
-            },
-            _ => self.base_rates(),
-        }
-    }
-
-    fn validate(&self, model: &str) -> Result<(), ConfigError> {
-        self.validate_rate_set(model, "", self.base_rates())?;
-        if let Some(lc) = &self.long_context {
-            if lc.threshold_tokens == 0 {
-                return Err(invalid(format!(
-                    "llm.pricing.{model:?}.long_context.threshold_tokens must be > 0"
-                )));
-            }
-            self.validate_rate_set(
-                model,
-                "long_context.",
-                Rates {
-                    input: lc.input_usd_per_mtok,
-                    output: lc.output_usd_per_mtok,
-                    cache_read: lc.cache_read_usd_per_mtok,
-                    cache_write: lc.cache_write_usd_per_mtok,
-                },
-            )?;
-        }
-        Ok(())
-    }
-
-    fn validate_rate_set(&self, model: &str, prefix: &str, r: Rates) -> Result<(), ConfigError> {
-        for (name, v, strictly_positive) in [
-            ("input_usd_per_mtok", r.input, true),
-            ("output_usd_per_mtok", r.output, true),
-            ("cache_read_usd_per_mtok", r.cache_read, false),
-            ("cache_write_usd_per_mtok", r.cache_write, false),
-        ] {
-            let ok = rate_ok(v, strictly_positive);
-            if !ok {
-                return Err(invalid(format!(
-                    "llm.pricing.{model:?}.{prefix}{name} must be a finite {} number, got {v}",
-                    if strictly_positive {
-                        "positive"
-                    } else {
-                        "non-negative"
-                    }
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    /// Actual charge for `tokens` at the tier their prompt size selects.
-    pub fn cost_usd(&self, tokens: &TokenCounts) -> f64 {
-        let r = self.rates_for(tokens.prompt_tokens());
-        (tokens.input as f64 * r.input
-            + tokens.output as f64 * r.output
-            + tokens.cache_read as f64 * r.cache_read
-            + tokens.cache_write as f64 * r.cache_write)
-            / 1e6
-    }
-
-    /// Upper bound for a call with at most `input_tokens` prompt tokens (each
-    /// billed at the dearest input-side rate across tiers) and `output_tokens`
-    /// output tokens (dearest output rate across tiers).
-    pub fn max_charge_usd(&self, input_tokens: u64, output_tokens: u64) -> f64 {
-        let base = self.base_rates();
-        let worst = match &self.long_context {
-            Some(lc) => Rates {
-                input: base.input.max(lc.input_usd_per_mtok),
-                output: base.output.max(lc.output_usd_per_mtok),
-                cache_read: base.cache_read.max(lc.cache_read_usd_per_mtok),
-                cache_write: base.cache_write.max(lc.cache_write_usd_per_mtok),
-            },
-            None => base,
-        };
-        let in_rate = worst.input.max(worst.cache_write).max(worst.cache_read);
-        (input_tokens as f64 * in_rate + output_tokens as f64 * worst.output) / 1e6
-    }
-}
-
-fn rate_ok(v: f64, strictly_positive: bool) -> bool {
-    v.is_finite() && if strictly_positive { v > 0.0 } else { v >= 0.0 }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -549,7 +219,7 @@ impl LlmConfig {
     pub fn profile_for(&self, model: &str) -> Result<ModelProfile, ConfigError> {
         let p = match self.profiles.get(model) {
             Some(p) => p.clone(),
-            None => builtin_profile(model).ok_or_else(|| {
+            None => profile::builtin_profile(model).ok_or_else(|| {
                 invalid(format!(
                     "no capability profile for {model:?}; add [llm.profiles.{model}] with roles, context_tokens, efforts, response_contracts, tool_choice and thinking, or use a maintained model"
                 ))
@@ -644,6 +314,22 @@ impl LlmConfig {
         fallbacks: &[String],
     ) -> Result<(), ConfigError> {
         let (total, day) = self.validate_budget_shape()?;
+        self.check_decision_candidates(model, fallbacks)?;
+        self.validate_decision_efforts(model, fallbacks)?;
+        if let Some(helper) = helper_model {
+            self.validate_helper(helper, total, day)?;
+        }
+        Ok(())
+    }
+
+    /// Bounded fallback list, then every decision-role candidate (primary and
+    /// fallbacks) must have a decision-capable profile, a complete price and a
+    /// resolvable effort.
+    fn check_decision_candidates(
+        &self,
+        model: &str,
+        fallbacks: &[String],
+    ) -> Result<(), ConfigError> {
         if fallbacks.len() > MAX_FALLBACK_MODELS {
             return Err(invalid(format!(
                 "llm.decision_fallback_models allows at most {MAX_FALLBACK_MODELS} candidates, got {}",
@@ -653,10 +339,6 @@ impl LlmConfig {
         self.check_decision_candidate(model)?;
         for fb in fallbacks {
             self.check_decision_candidate(fb)?;
-        }
-        self.validate_decision_efforts(model, fallbacks)?;
-        if let Some(helper) = helper_model {
-            self.validate_helper(helper, total, day)?;
         }
         Ok(())
     }
@@ -761,12 +443,9 @@ impl LlmConfig {
         Ok(())
     }
 
-    fn validate_bounds(&self) -> Result<(), ConfigError> {
-        if self.max_input_tokens == 0 {
-            return Err(invalid("llm.max_input_tokens must be >= 1"));
-        }
-        // (name, value, min, max) for every numeric per-call bound.
-        let bounds: [(&str, u64, u64, u64); 6] = [
+    /// (name, value, min, max) for every numeric per-call bound.
+    fn numeric_bounds(&self) -> [(&'static str, u64, u64, u64); 6] {
+        [
             (
                 "llm.decider_max_output_tokens",
                 u64::from(self.decider_max_output_tokens),
@@ -798,12 +477,10 @@ impl LlmConfig {
                 8 * 1024 * 1024,
             ),
             ("llm.retry_backoff_ms", self.retry_backoff_ms, 0, 30_000),
-        ];
-        for (name, value, lo, hi) in bounds {
-            if !(lo..=hi).contains(&value) {
-                return Err(invalid(format!("{name} must be in {lo}..={hi}")));
-            }
-        }
+        ]
+    }
+
+    fn validate_count_bounds(&self) -> Result<(), ConfigError> {
         if self.max_retries > 3 {
             return Err(invalid("llm.max_retries must be <= 3"));
         }
@@ -813,5 +490,17 @@ impl LlmConfig {
             )));
         }
         Ok(())
+    }
+
+    fn validate_bounds(&self) -> Result<(), ConfigError> {
+        if self.max_input_tokens == 0 {
+            return Err(invalid("llm.max_input_tokens must be >= 1"));
+        }
+        for (name, value, lo, hi) in self.numeric_bounds() {
+            if !(lo..=hi).contains(&value) {
+                return Err(invalid(format!("{name} must be in {lo}..={hi}")));
+            }
+        }
+        self.validate_count_bounds()
     }
 }

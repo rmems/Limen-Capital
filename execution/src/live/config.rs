@@ -656,50 +656,34 @@ cache_write_usd_per_mtok = 0.125
         assert!(e.contains("requires decider"), "{e}");
     }
 
+    /// Operator profile + price for `acme-think-1` plus a fallback list.
+    fn acme_decision_toml(fallbacks: &str) -> String {
+        claude_toml(
+            "model = \"acme-think-1\"",
+            &format!(
+                r#"
+decision_fallback_models = [{fallbacks}]
+[llm.profiles."acme-think-1"]
+roles = ["decision"]
+context_tokens = 100000
+efforts = ["low", "high"]
+default_effort = "high"
+response_contracts = ["strict_tool"]
+tool_choice = ["auto"]
+thinking = "adaptive"
+[llm.pricing."acme-think-1"]
+input_usd_per_mtok = 3.0
+output_usd_per_mtok = 15.0
+cache_read_usd_per_mtok = 0.3
+cache_write_usd_per_mtok = 3.75
+"#
+            ),
+        )
+    }
+
     #[test]
-    fn operator_profiles_and_fallbacks_extend_model_selection() {
-        // An operator-supplied profile + price makes a new model decision-capable.
-        let custom = claude_toml(
-            "model = \"acme-think-1\"",
-            r#"
-decision_fallback_models = ["claude-haiku-5-5"]
-[llm.profiles."acme-think-1"]
-roles = ["decision"]
-context_tokens = 100000
-efforts = ["low", "high"]
-default_effort = "high"
-response_contracts = ["strict_tool"]
-tool_choice = ["auto"]
-thinking = "adaptive"
-[llm.pricing."acme-think-1"]
-input_usd_per_mtok = 3.0
-output_usd_per_mtok = 15.0
-cache_read_usd_per_mtok = 0.3
-cache_write_usd_per_mtok = 3.75
-"#,
-        );
-        // claude-haiku-5-5 cannot be a decision fallback: helper-only profile.
-        assert!(err_of(&custom).contains("does not allow the decision role"));
-        // With a decision-capable fallback the config validates.
-        let ok = claude_toml(
-            "model = \"acme-think-1\"",
-            r#"
-decision_fallback_models = ["claude-sonnet-5-5"]
-[llm.profiles."acme-think-1"]
-roles = ["decision"]
-context_tokens = 100000
-efforts = ["low", "high"]
-default_effort = "high"
-response_contracts = ["strict_tool"]
-tool_choice = ["auto"]
-thinking = "adaptive"
-[llm.pricing."acme-think-1"]
-input_usd_per_mtok = 3.0
-output_usd_per_mtok = 15.0
-cache_read_usd_per_mtok = 0.3
-cache_write_usd_per_mtok = 3.75
-"#,
-        );
+    fn operator_profile_and_price_make_a_model_decision_capable() {
+        let ok = acme_decision_toml("\"claude-sonnet-5-5\"");
         let c = LiveConfig::from_toml_str(&ok).unwrap();
         assert_eq!(c.llm.decision_fallback_models, ["claude-sonnet-5-5"]);
         assert_eq!(c.llm.role_effort(None, "acme-think-1").unwrap(), "high");
@@ -710,7 +694,15 @@ cache_write_usd_per_mtok = 3.75
             1,
         );
         assert!(err_of(&bad_effort).contains("not supported"));
+    }
+
+    #[test]
+    fn fallback_candidates_must_be_decision_capable_and_need_claude() {
+        // claude-haiku-5-5 cannot be a decision fallback: helper-only profile.
+        let e = err_of(&acme_decision_toml("\"claude-haiku-5-5\""));
+        assert!(e.contains("does not allow the decision role"), "{e}");
         // Fallbacks require the claude decider.
+        let ok = acme_decision_toml("\"claude-sonnet-5-5\"");
         let rules = ok.replace("decider = \"claude\"", "decider = \"rules\"");
         assert!(err_of(&rules).contains("requires decider"));
     }

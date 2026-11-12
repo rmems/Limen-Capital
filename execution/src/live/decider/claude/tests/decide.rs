@@ -115,22 +115,28 @@ fn assert_request_body_is_clean(r: &RecordedRequest, b: &Value) {
 
 async fn assert_decision_spend(decider: &mut ClaudeDecider, calls: usize) {
     let reports = decider.take_llm_reports();
-    assert_eq!(reports.len(), calls);
-    for r in &reports {
-        assert_eq!(r.role, Role::Decider);
-        assert_eq!(r.model, SONNET);
-        assert_eq!(r.outcome, "ok");
-        assert_eq!(r.usage.input_tokens, 1000);
-        assert!((r.cost_usd - 0.004).abs() < 1e-12);
-        assert!(!r.summary().contains("PRIVATE-THOUGHT"));
-    }
+    assert!(
+        reports.len() == calls
+            && reports.iter().all(|r| {
+                r.role == Role::Decider
+                    && r.model == SONNET
+                    && r.outcome == "ok"
+                    && r.usage.input_tokens == 1000
+                    && (r.cost_usd - 0.004).abs() < 1e-12
+                    && !r.summary().contains("PRIVATE-THOUGHT")
+            }),
+        "{reports:?}"
+    );
     let expected = 0.004 * calls as f64;
     let snap = decider.ledger().snapshot();
-    assert!((snap.committed_usd.decider - expected).abs() < 1e-12);
-    assert_eq!(snap.committed_usd.helper, 0.0);
-    assert_eq!(snap.settled_calls.decider, calls as u64);
-    assert!(snap.reservations.is_empty());
-    assert!((decider.llm_cost_today_usd() - expected).abs() < 1e-12);
+    assert!(
+        (snap.committed_usd.decider - expected).abs() < 1e-12
+            && snap.committed_usd.helper == 0.0
+            && snap.settled_calls.decider == calls as u64
+            && snap.reservations.is_empty()
+            && (decider.llm_cost_today_usd() - expected).abs() < 1e-12,
+        "{snap:?}"
+    );
 }
 
 #[tokio::test]
