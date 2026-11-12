@@ -21,6 +21,7 @@ brain/Manifest.toml
 
 # RM-2436 live micro-capital experiment: journals are local artifacts, never committed
 journal*.md
+llm_budget.json*
 
 # Editor / local agent tooling (not product source)
 .vscode/

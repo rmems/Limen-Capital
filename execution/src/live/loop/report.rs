@@ -24,6 +24,40 @@ pub(super) fn start(
             DeciderKind::Rules => None,
         },
         limits: cfg.risk.clone(),
+        llm: match cfg.decider {
+            DeciderKind::Claude => {
+                let effort = cfg
+                    .llm
+                    .decider_effort
+                    .clone()
+                    .or_else(|| {
+                        cfg.llm
+                            .profile_for(&cfg.model)
+                            .ok()
+                            .map(|p| p.default_effort)
+                    })
+                    .unwrap_or_else(|| "-".into());
+                let (h_total, h_day) = cfg
+                    .llm
+                    .helper_max_cost_usd_total
+                    .zip(cfg.llm.helper_max_cost_usd_per_day)
+                    .unwrap_or((0.0, 0.0));
+                Some(format!(
+                    "decision_model={} fallbacks={} helper_model={} effort={} max_llm_cost_usd_total={} max_llm_cost_usd_per_day={} helper_cap_total={} helper_cap_day={} credit_expiry={} ledger={}",
+                    cfg.model,
+                    cfg.llm.decision_fallback_models.len(),
+                    cfg.helper_model.as_deref().unwrap_or("off"),
+                    effort,
+                    cfg.llm.max_llm_cost_usd_total.unwrap_or(0.0),
+                    cfg.llm.max_llm_cost_usd_per_day.unwrap_or(0.0),
+                    h_total,
+                    h_day,
+                    cfg.llm.credit_expiry.as_deref().unwrap_or("-"),
+                    cfg.llm.ledger_path,
+                ))
+            }
+            DeciderKind::Rules => None,
+        },
     })?;
     info!(
         "limen-live start: mode={} market={} symbol={} decider={} journal={} tick_interval={}s max_ticks={}",

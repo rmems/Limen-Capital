@@ -35,6 +35,7 @@ pub const COLUMNS: &[&str] = &[
     "fill",
     "pnl $",
     "llm $",
+    "llm calls",
 ];
 
 /// Run metadata written once at the top of a fresh journal.
@@ -47,6 +48,8 @@ pub struct JournalHeader {
     pub decider: String,
     pub model: Option<String>,
     pub limits: RiskLimits,
+    /// LLM budget line (Claude decider only).
+    pub llm: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -74,6 +77,9 @@ pub struct JournalRow {
     /// Realized PnL *this tick*.
     pub pnl_usd: f64,
     pub llm_cost_usd: f64,
+    /// Per-call audit (role, model, usage, cost, latency, outcome). Last
+    /// column, so prompts can drop it.
+    pub llm_calls: String,
 }
 
 fn cell(s: &str) -> String {
@@ -114,7 +120,8 @@ impl JournalRow {
             dash_if_empty(&self.order),
             dash_if_empty(&self.fill),
             format!("{:+.4}", self.pnl_usd),
-            format!("{:.4}", self.llm_cost_usd),
+            format!("{:.6}", self.llm_cost_usd),
+            dash_if_empty(&self.llm_calls),
         ];
         format!("| {} |", cells.join(" | "))
     }
@@ -199,6 +206,9 @@ impl Journal {
             l.max_open_orders,
             l.stale_order_ticks
         ));
+        if let Some(llm) = &h.llm {
+            s.push_str(&format!("- llm: {llm}\n"));
+        }
         s.push_str("- limit orders only (buy @ bid, sell @ ask); no leverage; no shorts; one instrument.\n");
         s.push_str(
             "- **Not a research result.** Journal/LLM output never enters any training set.\n\n",
@@ -244,7 +254,7 @@ impl Journal {
     fn write_run_marker(&mut self, header: &JournalHeader) -> io::Result<()> {
         // Appending to an existing journal: mark the new run.
         let marker = format!(
-                "| {} | 0 | {} | 0.00 | 0.00 | 0.00 | 0.00 | 0.00000000 | 0.0000 | 0.0000 | 0.0000 | - | run_start | 0.0000 | mode={} market={} decider={} | - | - | - | +0.0000 | 0.0000 |",
+                "| {} | 0 | {} | 0.00 | 0.00 | 0.00 | 0.00 | 0.00000000 | 0.0000 | 0.0000 | 0.0000 | - | run_start | 0.0000 | mode={} market={} decider={} | - | - | - | +0.0000 | 0.000000 | - |",
                 cell(&header.started_utc),
                 cell(&header.symbol),
                 cell(&header.mode),
@@ -299,6 +309,7 @@ mod tests {
             decider: "rules".into(),
             model: None,
             limits: RiskLimits::default(),
+            llm: None,
         }
     }
 
@@ -324,6 +335,7 @@ mod tests {
             fill: String::new(),
             pnl_usd: 0.0,
             llm_cost_usd: 0.0,
+            llm_calls: String::new(),
         }
     }
 
@@ -362,7 +374,7 @@ mod tests {
         assert_eq!(md.lines().count(), 1);
         assert!(md.contains("a \\| b c"));
         assert_eq!(md.matches(" | ").count(), COLUMNS.len() - 1);
-        assert!(md.ends_with(" | 0.0000 |"));
+        assert!(md.ends_with(" | 0.000000 | - |"));
         assert!(md.contains("| - | - |")); // empty order/fill become dashes
     }
 
