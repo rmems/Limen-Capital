@@ -1,7 +1,25 @@
 # Limen-Capital — Experimental SNN-HFT (Julia Brain + Rust Muscle)
 
 Hybrid research stack: **Julia neuromorphic strategy** + **Rust deterministic execution**.
-Built for experimental spiking / liquid-state market research — **not live capital**.
+The Julia/wire/ghost-ledger path is for experimental spiking / liquid-state
+market research, **not live capital**. The separate, feature-gated `limen-live`
+experiment targets real-money micro-capital on **Alpaca (US stocks and ETFs)**.
+It is not a production trading system.
+
+**Live launch is blocked on this revision:** `limen-live` still has the legacy
+Robinhood adapter and refuses `paper = false`; there is no Alpaca adapter or
+live unlock. The Claude decider is wired for paper runs behind enforced model
+profiles and a persistent LLM budget, but it cannot submit live orders.
+Do not provision real keys or treat `config/live-soak.draft.toml` as runnable.
+See the [live runbook and release gates](docs/live-runbook.md) and
+[security model](docs/SECURITY.md). There is no paper phase or shadow soak:
+once the release gates are met, the first supervised real-money session is the
+soak, at micro caps ($10 position / at most $5 order / $4 daily loss, preferably
+$1 orders). CI/branch/secret protection [#26](https://github.com/rmems/Limen-Capital/issues/26)
+is a release blocker.
+
+A `limen-live` journal is an operational audit, **not a research result**.
+The journal and LLM output never enter a training set or research metrics.
 
 This repo is a **standalone application** (your personal/org remote). It is **not**
 published under the Limen-Neural GitHub organization. It *depends on* validated
@@ -83,6 +101,7 @@ Limen-Capital/
 cd execution && cargo test          # fetches metabolic-ledger (+ optional feature deps)
 cd ../brain && julia --project=. -e 'using Pkg; Pkg.instantiate()'
 julia --project=. test/runtests.jl
+julia --project=. test/backend_runtime.jl  # pinned imports + vault; 100-tick auto test on CUDA
 # or: ./scripts/smoke_wire_local.sh
 ```
 
@@ -104,6 +123,8 @@ julia --project=. research_helm.jl --duration 200 --seed 42 --horizon 5
 
 `ExperimentRunner` (`experiment_runner.jl` + `metrics.jl`) records walk-forward **hit_rate**, **PnL proxy**, and **latency p50/p99**.  
 Reservoir façade picks **LiquidCortex** when loadable (`LIMEN_RESERVOIR` / `--backend`).  
+LiquidCortex is imported at file load time without exporting its names into the helm.
+The backend runtime test reports GPU acceptance as skipped on CPU-only hosts.
 MC fan-out stays **off** in research mode (`LIMEN_MC_PATHS` only for live helm).
 
 ### 4. Rust Decision path (gates + fractional Kelly + metabolic-ledger)
@@ -126,7 +147,16 @@ first pulse, after the pulse goes stale, or whose primary pair is RESIDUAL is
 refused and logged — never filled at a placeholder price.
 
 `ExecutionEngine::process_signal`: confidence gate → Neutral → **0.25× Kelly size**
-(from ATP bankroll, b=0.05) → max-qty gate → ghost fill. Zero Kelly → `RejectedNoEdge`.
+(from ATP bankroll, b=0.05) → max-quantity/holdings gate → quantity-taking ghost
+fill. The ledger applies the accepted quantity once, without its adaptive Kelly
+resizing it. `with_kelly_sizing(false)` uses `signal.quantity` instead.
+The limit bounds each fill and total long holdings per asset. Prices and
+quantities are rounded to the legacy ledger's `f32` units; `Executed` reports
+those actual fill values. Zero Kelly → `RejectedNoEdge`. Insufficient holdings
+(including selling while flat), insufficient ATP for quantity plus friction,
+invalid fills, or JSONL write failures → `RejectedFill`, with no wallet mutation.
+Buy friction enters cost basis and is realized on sale, so round-trip PnL and
+win-rate statistics include both sides' friction exactly once.
 
 ### 5. Julia live helm (binary wire v1)
 
@@ -139,6 +169,30 @@ The live helm logs `LIMEN_SEED` (default `42`) and seeds both host and CUDA RNGs
 before reservoir initialization. Replay also requires the same accepted pulse
 sequence, configuration, backend, Julia/package versions and GPU stack.
 `LIMEN_MC_PATHS=0` disables both MC paths and their covariance workload.
+
+## Local notifications for `limen-live`
+
+With `--features live-robinhood`, the paper loop sends one local desktop
+notification per fill, stale-order cancel, decider error, or halt (daily-loss
+cap or Ctrl-C). Normal holds and reaching `--max-ticks` do not notify.
+Notifications identify paper mode, symbol, tick, event details, and journal path.
+`journal.md` (or `--journal PATH`) remains the record; no hosted service is used.
+
+On Linux, install `notify-send` (for example, the `libnotify-bin` package on
+Debian/Ubuntu) and run in the operator's desktop session with its session D-Bus
+environment (`DBUS_SESSION_BUS_ADDRESS`). An unattended user service must inherit
+that environment and have a running desktop notification daemon. Verify delivery
+from the same user/service environment with:
+
+```bash
+notify-send --app-name=limen-live -- "limen-live test" "Local notifications ready"
+```
+
+Missing helpers, unavailable desktop sessions, nonzero exits, or delivery taking
+over five seconds produce a warning without interrupting trading or journaling.
+There is no stderr-only fallback notification and no automatic retry. Headless
+machines without a notification daemon (and non-Linux systems) need a compatible
+local `notify-send` implementation before relying on these alerts.
 
 ## Signal Pipeline
 

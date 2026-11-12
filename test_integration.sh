@@ -250,14 +250,7 @@ echo "Test 9: Documentation..."
 [ -f "$ROOT/docs/deps.md" ] && pass "docs/deps.md" || fail "docs/deps.md missing"
 [ -f "$ROOT/docs/wire-protocol-v1.md" ] && pass "docs/wire-protocol-v1.md" || fail "docs/wire-protocol-v1.md missing"
 
-# Test 10: No hardcoded fake CURVE secrets in spike_helm
-echo ""
-echo "Test 10: Secret hygiene..."
-if grep -q 'R)@\[+f1J' "$ROOT/brain/spike_helm.jl" 2>/dev/null; then
-    fail "Hardcoded fake CURVE key still in spike_helm.jl"
-else
-    pass "No hardcoded CURVE key material in spike_helm.jl"
-fi
+# Secret scanning is a separate required CI job (Gitleaks), not a structure check.
 
 # Summary
 echo ""
