@@ -10,6 +10,11 @@
 //! default) and never touches the Julia brain, wire fixtures or the paper
 //! simulation contracts.
 //!
+//! With `decider = "claude"`, Sonnet proposes advisory decisions through one
+//! strict tool call, an optional Haiku helper writes journal tags only, and a
+//! persistent ledger (`decider::budget`) meters all Claude spend against a
+//! cumulative cap and the credit-expiry cutoff before any paid call.
+//!
 //! Secrets are read from the environment only:
 //! `ROBINHOOD_API_KEY`, `ROBINHOOD_PRIVATE_KEY`, `ANTHROPIC_API_KEY`.
 

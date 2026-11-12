@@ -10,14 +10,17 @@ additional controls below. Research isolation is not a live-money safety claim.
 On this revision, `limen-live` is behind `live-robinhood`, reads legacy
 `ROBINHOOD_API_KEY` / `ROBINHOOD_PRIVATE_KEY`, and refuses `paper = false` in
 both the CLI and loop setup. It has no Alpaca adapter or halt-file handler.
-Claude setup is also refused. **Do not put real keys on a box for this revision.**
+The Claude decider is wired for paper runs with enforced model profiles and a
+persistent LLM budget, but it cannot submit live orders.
+**Do not put real keys on a box for this revision.**
 
 Before any real key is provisioned, the release must include and verify:
 
 - [#41 / RM-2460](https://github.com/rmems/Limen-Capital/issues/41): Alpaca
   place/cancel/poll and removal of Robinhood and Ed25519 signing.
-- [#40 / RM-2461](https://github.com/rmems/Limen-Capital/issues/40): allowlisted
-  Claude roles and accounted, bounded LLM spend.
+- [x] [#40 / RM-2461](https://github.com/rmems/Limen-Capital/issues/40):
+  allowlisted Claude roles and accounted, bounded LLM spend — merged; the
+  release must still verify it end-to-end.
 - [#42 / RM-2462](https://github.com/rmems/Limen-Capital/issues/42): durable
   reconciled account state, single-instance lock, cancel-on-stop, and halt file.
 - [#43 / RM-2463](https://github.com/rmems/Limen-Capital/issues/43): explicit
@@ -44,9 +47,10 @@ binary before the first real session; RM-2464 is not complete until then.
 - Use a dedicated **Anthropic key with its own workspace spend limit**. Set
   provider limits as well as local daily/experiment limits; do not rely on a
   prompt or estimated token cost to enforce billing. Verify current model
-  availability and pricing. Planned roles are `claude-sonnet-5-5` for decisions
+  availability and pricing. Roles are `claude-sonnet-5-5` for decisions
   and optional `claude-haiku-5-5` for non-trading helper tags. Current main
-  validates only a nonempty model string; this is not an enforced allowlist yet.
+  enforces capability profiles and role allowlists: a model without a
+  `[llm.pricing]` price entry and a compatible profile cannot be used.
 - Alpaca authenticates with `APCA-API-KEY-ID` / `APCA-API-SECRET-KEY` **HTTP
   headers**, not signed requests. Use the official live HTTPS origin
   `https://api.alpaca.markets` and the adapter's official data endpoint. Never

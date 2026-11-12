@@ -18,9 +18,10 @@ it does not record a passed session.
   verified. It is a release blocker for this binary, not part of this docs fix.
 - [ ] [#41 / RM-2460](https://github.com/rmems/Limen-Capital/issues/41) ships
   Alpaca place/cancel/poll; Robinhood and its signing code are removed.
-- [ ] [#40 / RM-2461](https://github.com/rmems/Limen-Capital/issues/40) ships
+- [x] [#40 / RM-2461](https://github.com/rmems/Limen-Capital/issues/40) shipped
   Sonnet decisions, optional Haiku helper tags, enforced role/model allowlists,
-  parse-error reporting, and bounded, durable LLM billing.
+  parse-error reporting, and bounded, durable LLM billing. Merged on main;
+  re-verify against the release binary.
 - [ ] [#42 / RM-2462](https://github.com/rmems/Limen-Capital/issues/42) ships
   venue reconciliation, durable loss/spend/fill/order state, a single-instance
   lock, halt file and cancellation on halt/exit.
@@ -31,10 +32,11 @@ it does not record a passed session.
   `risk::check` applies `max_order_usd` to buys only, so it does not yet prove
   the all-order soak ceiling. Resolve this with the live implementation before
   launch; do not silently exempt sells or relax the session requirement.
-- [ ] Update this runbook, `config/live.example.toml`, and `.env.example` to
+- [ ] Update this runbook, `config/live-soak.draft.toml`, and `.env.example` to
   the **merged binary's exact** feature name, source/schema, credential names,
   halt path and journal events. Test its real CLI entry point with dummy
-  credentials. The draft config deliberately fails current symbol validation.
+  credentials. `config/live.example.toml` remains the paper-mode example; the
+  soak draft deliberately fails current symbol validation.
 - [ ] Record the release commit, successful CI checks and operator approval.
   A merged docs PR alone does not clear this gate or complete RM-2464.
 
@@ -69,9 +71,11 @@ auto-restarts, or unrelated holdings. Keep durable state and a fresh journal
 for this session; never reset daily accounting to get another allowance.
 
 The planned decision model is `claude-sonnet-5-5`; optional `claude-haiku-5-5`
-helpers only label the journal and cannot trade. Confirm availability, pricing,
-credit expiry and enforced role allowlists in the released implementation.
-No aliases, unpriced model substitutions, or prompt-based budget enforcement.
+helpers only label the journal and cannot trade. Role/model allowlists,
+pricing and the persistent budget ledger are enforced by `[llm]` config on
+main; confirm availability, pricing and credit expiry in the released
+implementation. No aliases, unpriced model substitutions, or prompt-based
+budget enforcement.
 
 ## 3. Read-only live-quote preflight
 
@@ -186,7 +190,9 @@ reconciling them against venue fills and provider usage:
   retries: `errors / attempts = rate`. Separate transport errors and helper
   parse attempts. If attempts are zero, report `N/A`, not 0%. Reference
   journal evidence; inability to identify attempts/errors is a failed gate.
-  Main currently records no such LLM attempts and cannot pass this check.
+  Main journals per-call `llm calls` summaries with outcome and attempt
+  counts (`xN`); confirm the outcome vocabulary distinguishes parse failures
+  from transport errors in the released binary.
 - [ ] Sum journal `llm $` across all calls/roles/retries, including failures and
   cache charges, for both the UTC day (including preflight/earlier sessions)
   and whole experiment. Record totals and configured caps. Both must be

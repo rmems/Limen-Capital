@@ -7,8 +7,10 @@ experiment targets real-money micro-capital on **Alpaca (US stocks and ETFs)**.
 It is not a production trading system.
 
 **Live launch is blocked on this revision:** `limen-live` still has the legacy
-Robinhood adapter and refuses `paper = false`; the Claude decider is not wired.
-Do not provision real keys or treat the draft example as runnable.
+Robinhood adapter and refuses `paper = false`; there is no Alpaca adapter or
+live unlock. The Claude decider is wired for paper runs behind enforced model
+profiles and a persistent LLM budget, but it cannot submit live orders.
+Do not provision real keys or treat `config/live-soak.draft.toml` as runnable.
 See the [live runbook and release gates](docs/live-runbook.md) and
 [security model](docs/SECURITY.md). There is no paper phase or shadow soak:
 once the release gates are met, the first supervised real-money session is the
@@ -99,6 +101,7 @@ Limen-Capital/
 cd execution && cargo test          # fetches metabolic-ledger (+ optional feature deps)
 cd ../brain && julia --project=. -e 'using Pkg; Pkg.instantiate()'
 julia --project=. test/runtests.jl
+julia --project=. test/backend_runtime.jl  # pinned imports + vault; 100-tick auto test on CUDA
 # or: ./scripts/smoke_wire_local.sh
 ```
 
@@ -120,6 +123,8 @@ julia --project=. research_helm.jl --duration 200 --seed 42 --horizon 5
 
 `ExperimentRunner` (`experiment_runner.jl` + `metrics.jl`) records walk-forward **hit_rate**, **PnL proxy**, and **latency p50/p99**.  
 Reservoir façade picks **LiquidCortex** when loadable (`LIMEN_RESERVOIR` / `--backend`).  
+LiquidCortex is imported at file load time without exporting its names into the helm.
+The backend runtime test reports GPU acceptance as skipped on CPU-only hosts.
 MC fan-out stays **off** in research mode (`LIMEN_MC_PATHS` only for live helm).
 
 ### 4. Rust Decision path (gates + fractional Kelly + metabolic-ledger)

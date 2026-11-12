@@ -131,6 +131,12 @@ jobs:
           julia --color=yes --code-coverage=user --project=. test/runtests.jl
         working-directory: brain
 
+      - name: Test pinned backend loading and recording (GPU acceptance when available)
+        env:
+          JULIA_NUM_PRECOMPILE_TASKS: '2'
+          OPENBLAS_NUM_THREADS: '1'
+        run: julia --project=brain brain/test/backend_runtime.jl
+
       - name: Test pinned CPU forecast adapter and comparison
         env:
           JULIA_NUM_PRECOMPILE_TASKS: '2'
