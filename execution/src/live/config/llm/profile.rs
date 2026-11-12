@@ -57,70 +57,77 @@ fn one_of(value: &str, allowed: &[&str]) -> bool {
     allowed.contains(&value)
 }
 
+/// Prefix a sub-check failure with the model it describes.
+fn for_model(model: &str, e: ConfigError) -> ConfigError {
+    match e {
+        ConfigError::Invalid(m) => ConfigError::Invalid(format!("profile for {model:?}: {m}")),
+        other => other,
+    }
+}
+
 impl ModelProfile {
     /// Structural checks every profile must pass, whatever its role.
     pub fn validate(&self, model: &str) -> Result<(), ConfigError> {
-        self.validate_roles_and_window(model)?;
-        self.validate_capabilities(model)
+        self.validate_roles_and_window()
+            .and_then(|()| self.validate_capabilities())
+            .map_err(|e| for_model(model, e))
     }
 
-    fn validate_roles_and_window(&self, model: &str) -> Result<(), ConfigError> {
+    fn validate_roles_and_window(&self) -> Result<(), ConfigError> {
         if self.roles.is_empty()
             || !self
                 .roles
                 .iter()
                 .all(|r| one_of(r, &[ROLE_DECISION, ROLE_HELPER]))
         {
-            return Err(invalid(format!(
-                "profile for {model:?}: roles must be a non-empty subset of [\"decision\", \"helper\"]"
-            )));
+            return Err(invalid(
+                "roles must be a non-empty subset of [\"decision\", \"helper\"]",
+            ));
         }
         if self.context_tokens < 4_096 {
             return Err(invalid(format!(
-                "profile for {model:?}: context_tokens must be >= 4096, got {}",
+                "context_tokens must be >= 4096, got {}",
                 self.context_tokens
             )));
         }
         Ok(())
     }
 
-    fn validate_capabilities(&self, model: &str) -> Result<(), ConfigError> {
-        self.validate_efforts(model)?;
-        self.validate_contracts(model)?;
-        self.validate_tool_choice(model)?;
-        self.validate_thinking(model)
+    fn validate_capabilities(&self) -> Result<(), ConfigError> {
+        self.validate_efforts()?;
+        self.validate_contracts()?;
+        self.validate_tool_choice()?;
+        self.validate_thinking()
     }
 
-    fn validate_efforts(&self, model: &str) -> Result<(), ConfigError> {
+    fn validate_efforts(&self) -> Result<(), ConfigError> {
         if self.efforts.is_empty() || self.efforts.iter().any(|e| e.is_empty()) {
-            return Err(invalid(format!(
-                "profile for {model:?}: efforts must be a non-empty list of effort levels"
-            )));
+            return Err(invalid("efforts must be a non-empty list of effort levels"));
         }
         if !self.efforts.iter().any(|e| e == &self.default_effort) {
             return Err(invalid(format!(
-                "profile for {model:?}: default_effort {:?} is not in efforts {:?}",
+                "default_effort {:?} is not in efforts {:?}",
                 self.default_effort, self.efforts
             )));
         }
         Ok(())
     }
 
-    fn validate_contracts(&self, model: &str) -> Result<(), ConfigError> {
+    fn validate_contracts(&self) -> Result<(), ConfigError> {
         if self.response_contracts.is_empty()
             || !self
                 .response_contracts
                 .iter()
                 .all(|c| one_of(c, &[CONTRACT_JSON_SCHEMA, CONTRACT_STRICT_TOOL]))
         {
-            return Err(invalid(format!(
-                "profile for {model:?}: response_contracts must be a non-empty subset of [\"json_schema\", \"strict_tool\"]"
-            )));
+            return Err(invalid(
+                "response_contracts must be a non-empty subset of [\"json_schema\", \"strict_tool\"]"
+            ));
         }
         Ok(())
     }
 
-    fn validate_tool_choice(&self, model: &str) -> Result<(), ConfigError> {
+    fn validate_tool_choice(&self) -> Result<(), ConfigError> {
         if self.tool_choice.is_empty()
             || !self.tool_choice.iter().all(|t| {
                 one_of(
@@ -134,17 +141,17 @@ impl ModelProfile {
                 )
             })
         {
-            return Err(invalid(format!(
-                "profile for {model:?}: tool_choice must be a non-empty subset of [\"auto\", \"none\", \"any\", \"tool\"]"
-            )));
+            return Err(invalid(
+                "tool_choice must be a non-empty subset of [\"auto\", \"none\", \"any\", \"tool\"]",
+            ));
         }
         Ok(())
     }
 
-    fn validate_thinking(&self, model: &str) -> Result<(), ConfigError> {
+    fn validate_thinking(&self) -> Result<(), ConfigError> {
         if !one_of(&self.thinking, &[THINKING_ADAPTIVE, THINKING_DISABLED]) {
             return Err(invalid(format!(
-                "profile for {model:?}: thinking must be \"adaptive\" or \"disabled\", got {:?}",
+                "thinking must be \"adaptive\" or \"disabled\", got {:?}",
                 self.thinking
             )));
         }
