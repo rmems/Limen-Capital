@@ -7,6 +7,13 @@ use limen_execution::wire::{
 use limen_execution::{ExecutionDecision, ExecutionEngine, TradeSide, TradeSignal};
 use std::path::{Path, PathBuf};
 
+/// Shared fixtures for one Julia → Rust decision pass.
+struct WireRun {
+    dir: PathBuf,
+    universe: TradeUniverse,
+    pulse: MarketPulse,
+}
+
 fn close(actual: f64, expected: f64) {
     assert!((actual - expected).abs() < 1e-5, "{actual} != {expected}");
 }
@@ -73,25 +80,24 @@ fn assert_wallet_after(engine: &ExecutionEngine, universe: &TradeUniverse, side:
     }
 }
 
-fn exercise_side(
-    engine: &mut ExecutionEngine,
-    dir: &Path,
-    universe: &TradeUniverse,
-    pulse: &MarketPulse,
-    name: &str,
-    side: TradeSide,
-) {
+fn exercise_side(run: &WireRun, engine: &mut ExecutionEngine, name: &str, side: TradeSide) {
     let packet = decode_readout(
-        &std::fs::read(dir.join(format!("{name}.bin"))).unwrap(),
-        universe,
+        &std::fs::read(run.dir.join(format!("{name}.bin"))).unwrap(),
+        &run.universe,
     )
     .unwrap();
-    assert_packet_contract(&packet, pulse.timestamp_ns as i64, side);
-    let mut signal = readout_to_trade_signal(&packet, universe, 0.0, 999.0, None);
-    assert_signal_ids(&signal, universe, side, packet.tick);
+    assert_packet_contract(&packet, run.pulse.timestamp_ns as i64, side);
+    let mut signal = readout_to_trade_signal(&packet, &run.universe, 0.0, 999.0, None);
+    assert_signal_ids(&signal, &run.universe, side, packet.tick);
     close(signal.confidence as f64, 3.0_f64.tanh());
-    signal.price =
-        resolve_fill_price(Some(pulse), universe, &signal.ticker, pulse.timestamp_ns, 1).unwrap();
+    signal.price = resolve_fill_price(
+        Some(&run.pulse),
+        &run.universe,
+        &signal.ticker,
+        run.pulse.timestamp_ns,
+        1,
+    )
+    .unwrap();
     assert_eq!(signal.price, 100.0);
     let atp = engine.ghost_wallet.balance_atp as f64;
     let fraction = policy_fraction(signal.confidence as f64);
@@ -109,22 +115,16 @@ fn exercise_side(
     assert_eq!(price, 100.0);
     assert_fill_sizing(quantity, kelly_fraction, atp, fraction);
     // Ledger fill sizing is independent of policy sizing (known limitation).
-    assert_wallet_after(engine, universe, side);
+    assert_wallet_after(engine, &run.universe, side);
 }
 
-fn assert_rejection(
-    engine: &mut ExecutionEngine,
-    dir: &Path,
-    universe: &TradeUniverse,
-    name: &str,
-    before: f32,
-) {
+fn assert_rejection(run: &WireRun, engine: &mut ExecutionEngine, name: &str, before: f32) {
     let packet = decode_readout(
-        &std::fs::read(dir.join(format!("{name}.bin"))).unwrap(),
-        universe,
+        &std::fs::read(run.dir.join(format!("{name}.bin"))).unwrap(),
+        &run.universe,
     )
     .unwrap();
-    let signal = readout_to_trade_signal(&packet, universe, 100.0, 1.0, None);
+    let signal = readout_to_trade_signal(&packet, &run.universe, 100.0, 1.0, None);
     let result = engine.process_signal(signal);
     match name {
         "no_edge" => assert!(matches!(
@@ -144,10 +144,10 @@ fn assert_rejection(
     assert_eq!(engine.step_counter, 2);
 }
 
-fn assert_rejections(engine: &mut ExecutionEngine, dir: &Path, universe: &TradeUniverse) {
+fn assert_rejections(run: &WireRun, engine: &mut ExecutionEngine) {
     let before = engine.ghost_wallet.balance_atp;
     for name in ["neutral", "low_confidence", "no_edge"] {
-        assert_rejection(engine, dir, universe, name, before);
+        assert_rejection(run, engine, name, before);
     }
 }
 
@@ -188,13 +188,18 @@ fn julia_frames_reach_production_decisions_and_wallet() {
     let pulse =
         decode_market_pulse(&std::fs::read(dir.join("market.bin")).unwrap(), &universe).unwrap();
     assert_pulse_contract(&pulse);
+    let run = WireRun {
+        dir,
+        universe,
+        pulse,
+    };
     let logs = tempfile::tempdir().unwrap();
     let log = logs.path().join("ghost_trades.jsonl");
     let mut engine = ExecutionEngine::default().with_log_path(log.to_str().unwrap().into());
     assert_default_engine(&engine);
     for (name, side) in [("buy", TradeSide::Buy), ("sell", TradeSide::Sell)] {
-        exercise_side(&mut engine, &dir, &universe, &pulse, name, side);
+        exercise_side(&run, &mut engine, name, side);
     }
-    assert_rejections(&mut engine, &dir, &universe);
-    assert_log_records(&log, &universe);
+    assert_rejections(&run, &mut engine);
+    assert_log_records(&log, &run.universe);
 }
