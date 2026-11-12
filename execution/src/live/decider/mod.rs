@@ -100,6 +100,9 @@ pub enum DeciderError {
     Stale {
         detail: String,
     },
+    /// Required decision context is missing or cannot be assembled within
+    /// configured limits; no paid call was made.
+    Context(String),
     /// A 200 response without usable `usage`; paid calls halt.
     MissingUsage(String),
     /// No configured price for the model or tier; paid calls halt.
@@ -122,6 +125,7 @@ impl DeciderError {
             DeciderError::Timeout { .. } => "timeout",
             DeciderError::Parse { .. } => "parse",
             DeciderError::Stale { .. } => "stale",
+            DeciderError::Context(_) => "context_error",
             DeciderError::MissingUsage(_) => "missing_usage",
             DeciderError::Pricing(_) => "missing_pricing",
             _ => self.tail_kind(),
@@ -146,6 +150,7 @@ impl fmt::Display for DeciderError {
             DeciderError::Timeout { after_ms } => write!(f, "decider timeout after {after_ms} ms"),
             DeciderError::Parse { detail, .. } => write!(f, "decider parse_error: {detail}"),
             DeciderError::Stale { detail } => write!(f, "decision stale: {detail}"),
+            DeciderError::Context(m) => write!(f, "decision context: {m}"),
             DeciderError::MissingUsage(m) => write!(f, "missing usage: {m}"),
             DeciderError::Pricing(m) => write!(f, "missing pricing: {m}"),
             _ => self.fmt_tail(f),
@@ -244,6 +249,13 @@ pub trait Decider: Send {
     /// LLM call audit records produced since the last call.
     fn take_llm_reports(&mut self) -> Vec<LlmCallReport> {
         Vec::new()
+    }
+
+    /// Graceful shutdown: let in-flight background work (e.g. a helper call)
+    /// finish so its reservation settles and its report is audited instead of
+    /// being aborted. Default: nothing to flush.
+    fn shutdown<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
     }
 }
 #[cfg(test)]

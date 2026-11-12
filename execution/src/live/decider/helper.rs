@@ -25,14 +25,16 @@ pub struct HaikuHelper {
     model: String,
     max_output_tokens: u32,
     timeout: Duration,
+    effort: String,
 }
 
 impl HaikuHelper {
-    pub fn new(model: &str, max_output_tokens: u32, timeout: Duration) -> Self {
+    pub fn new(model: &str, max_output_tokens: u32, timeout: Duration, effort: String) -> Self {
         Self {
             model: model.to_string(),
             max_output_tokens,
             timeout,
+            effort,
         }
     }
 
@@ -49,7 +51,7 @@ impl HaikuHelper {
                 "role": "user",
                 "content": format!("State:\n{state_json}\n\nRecent rows:\n{}", rows.join("\n"))
             }],
-            "output_config": {"effort": "medium"}
+            "output_config": {"effort": self.effort}
         })
     }
 

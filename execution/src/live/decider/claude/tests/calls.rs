@@ -71,7 +71,7 @@ async fn each_retry_goes_back_through_the_budget_gate() {
         |c| {
             c.llm.max_retries = 3;
             c.llm.retry_backoff_ms = 400;
-            c.risk.max_llm_cost_usd_per_day = 0.5;
+            c.llm.max_llm_cost_usd_per_day = Some(0.5);
             c.llm.max_llm_cost_usd_total = Some(1.0);
         },
     )
@@ -87,7 +87,13 @@ async fn each_retry_goes_back_through_the_budget_gate() {
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
         ledger
-            .reserve(Role::Decider, SONNET, 0.5, now, now)
+            .reserve(&crate::live::decider::budget::ReserveRequest {
+                role: Role::Decider,
+                model: SONNET,
+                amount_usd: 0.5,
+                now,
+                call_end: now,
+            })
             .unwrap()
     });
     let err = h.decider.decide(&fresh_state(), &[]).await.unwrap_err();
@@ -183,7 +189,7 @@ async fn affordable_small_budget_passes_and_unaffordable_is_refused() {
     // Bounded output keeps the worst case (~$0.02) inside a $0.04 day.
     let mut h = harness(vec![(200, decision("hold", 0.0, "ok"))], |c| {
         c.llm.max_llm_cost_usd_total = Some(0.05);
-        c.risk.max_llm_cost_usd_per_day = 0.04;
+        c.llm.max_llm_cost_usd_per_day = Some(0.04);
         c.llm.decider_max_output_tokens = 1_000;
     })
     .await;
@@ -196,7 +202,7 @@ async fn affordable_small_budget_passes_and_unaffordable_is_refused() {
     // The default 8192-token reservation (~$0.09) does not fit: refused first.
     let mut h = harness(vec![(200, decision("hold", 0.0, "never"))], |c| {
         c.llm.max_llm_cost_usd_total = Some(0.05);
-        c.risk.max_llm_cost_usd_per_day = 0.04;
+        c.llm.max_llm_cost_usd_per_day = Some(0.04);
     })
     .await;
     let err = h.decider.decide(&fresh_state(), &[]).await.unwrap_err();

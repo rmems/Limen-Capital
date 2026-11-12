@@ -1,7 +1,9 @@
 //! `LiveConfig` (TOML file) + `Secrets` (environment only).
 //!
 //! Caps and venue settings are **configuration**, never constants in the
-//! decider, and the decider never sees them. Secrets never live in TOML.
+//! decider. The Claude decider sees the effective caps only as read-only
+//! facts in its prompt; Rust alone validates and enforces them. Secrets
+//! never live in TOML.
 
 pub mod llm;
 
@@ -15,8 +17,10 @@ use std::path::Path;
 pub const ALLOWED_SYMBOLS: &[&str] = &["BTC-USD", "ETH-USD"];
 
 pub use llm::{
-    LlmConfig, ModelPrice, DECISION_MODELS, HELPER_MODELS, MAX_EXPERIMENT_BUDGET_USD,
-    MAX_PROMPT_TOKENS,
+    LlmConfig, LongContextPrice, ModelPrice, ModelProfile, TokenCounts, CONTRACT_JSON_SCHEMA,
+    CONTRACT_STRICT_TOOL, MAX_CORRECTIONS, MAX_EXPERIMENT_BUDGET_USD, MAX_FALLBACK_MODELS,
+    MAX_OUTPUT_TOKENS, ROLE_DECISION, ROLE_HELPER, THINKING_ADAPTIVE, THINKING_DISABLED,
+    TOOL_CHOICE_ANY, TOOL_CHOICE_AUTO, TOOL_CHOICE_NONE, TOOL_CHOICE_TOOL,
 };
 
 /// Decision-role model (the only role that may propose orders).
@@ -125,10 +129,11 @@ pub struct LiveConfig {
     pub base_url: String,
     /// Seconds between ticks.
     pub tick_interval_secs: u64,
-    /// Decision-role model id; must be in [`DECISION_MODELS`].
+    /// Decision-role model id; must have a decision-capable capability
+    /// profile (built-in or `[llm.profiles]`) and a price entry.
     pub model: String,
-    /// Optional helper-role model (disabled by default); must be in
-    /// [`HELPER_MODELS`]. Helpers never propose orders.
+    /// Optional helper-role model (disabled by default); must have a
+    /// helper-capable profile and a price. Helpers never propose orders.
     pub helper_model: Option<String>,
     /// Paper mode: never submit orders; log what would have been sent.
     pub paper: bool,
@@ -227,38 +232,36 @@ impl LiveConfig {
         self.llm.validate(
             &self.model,
             self.helper_model.as_deref(),
-            self.risk.max_llm_cost_usd_per_day,
+            &self.llm.decision_fallback_models,
         )
     }
 
+    /// Role checks that hold for every decider kind: the decision model needs
+    /// a decision-capable profile, the helper a helper-capable one, and every
+    /// fallback candidate a decision-capable one. Claude-only concerns
+    /// (pricing, pacing, bounds) live in [`LlmConfig::validate`].
     fn validate_models(&self) -> Result<(), ConfigError> {
-        if !DECISION_MODELS.contains(&self.model.as_str()) {
-            let why = if HELPER_MODELS.contains(&self.model.as_str()) {
-                "is a helper model and cannot hold the decision role"
-            } else {
-                "is not an allowed model"
-            };
-            return Err(ConfigError::Invalid(format!(
-                "model {:?} {why}; the decision role allows only {DECISION_MODELS:?}",
-                self.model
-            )));
-        }
+        self.llm.role_profile(&self.model, ROLE_DECISION)?;
         if let Some(helper) = &self.helper_model {
-            if !HELPER_MODELS.contains(&helper.as_str()) {
-                let why = if DECISION_MODELS.contains(&helper.as_str()) {
-                    "is a decision model and cannot hold the helper role"
-                } else {
-                    "is not an allowed model"
-                };
-                return Err(ConfigError::Invalid(format!(
-                    "helper_model {helper:?} {why}; the helper role allows only {HELPER_MODELS:?}"
-                )));
-            }
+            self.llm.role_profile(helper, ROLE_HELPER)?;
             if self.decider != DeciderKind::Claude {
                 return Err(ConfigError::Invalid(
                     "helper_model requires decider = \"claude\"".into(),
                 ));
             }
+        }
+        for fb in &self.llm.decision_fallback_models {
+            if fb == &self.model || self.helper_model.as_ref() == Some(fb) {
+                return Err(ConfigError::Invalid(format!(
+                    "decision_fallback_models entry {fb:?} duplicates the decision or helper model"
+                )));
+            }
+            self.llm.role_profile(fb, ROLE_DECISION)?;
+        }
+        if !self.llm.decision_fallback_models.is_empty() && self.decider != DeciderKind::Claude {
+            return Err(ConfigError::Invalid(
+                "decision_fallback_models requires decider = \"claude\"".into(),
+            ));
         }
         Ok(())
     }
@@ -590,6 +593,7 @@ decider = "claude"
 {extra_top}
 [llm]
 max_llm_cost_usd_total = 200.0
+max_llm_cost_usd_per_day = 60.0
 credit_expiry = "2026-11-12T23:59:59-08:00"
 {extra_llm}
 [llm.pricing."claude-sonnet-5-5"]
@@ -623,20 +627,81 @@ cache_write_usd_per_mtok = 0.125
     }
 
     #[test]
-    fn model_roles_are_allow_listed() {
+    fn model_roles_are_profile_driven() {
         LiveConfig::from_toml_str(&claude_toml("", "")).unwrap();
+        // No maintained profile: rejected before any pricing lookup.
         let e = err_of(&claude_toml("model = \"claude-opus-9\"", ""));
-        assert!(e.contains("not an allowed model"), "{e}");
+        assert!(e.contains("no capability profile"), "{e}");
+        // Haiku's built-in profile is helper-only.
         let e = err_of(&claude_toml("model = \"claude-haiku-5-5\"", ""));
-        assert!(e.contains("helper model"), "{e}");
+        assert!(e.contains("does not allow the decision role"), "{e}");
         let e = err_of(&claude_toml("helper_model = \"claude-sonnet-5-5\"", ""));
-        assert!(e.contains("decision model"), "{e}");
+        assert!(e.contains("does not allow the helper role"), "{e}");
         let e = err_of(&claude_toml("helper_model = \"gpt-x\"", ""));
-        assert!(e.contains("helper_model"), "{e}");
+        assert!(e.contains("no capability profile"), "{e}");
         // Rules decider: model ids are still checked, and helpers need claude.
         assert!(LiveConfig::from_toml_str("model = \"claude-haiku-5-5\"").is_err());
         let e = err_of("helper_model = \"claude-haiku-5-5\"");
         assert!(e.contains("requires decider"), "{e}");
+    }
+
+    #[test]
+    fn operator_profiles_and_fallbacks_extend_model_selection() {
+        // An operator-supplied profile + price makes a new model decision-capable.
+        let custom = claude_toml(
+            "model = \"acme-think-1\"",
+            r#"
+decision_fallback_models = ["claude-haiku-5-5"]
+[llm.profiles."acme-think-1"]
+roles = ["decision"]
+context_tokens = 100000
+efforts = ["low", "high"]
+default_effort = "high"
+response_contracts = ["strict_tool"]
+tool_choice = ["auto"]
+thinking = "adaptive"
+[llm.pricing."acme-think-1"]
+input_usd_per_mtok = 3.0
+output_usd_per_mtok = 15.0
+cache_read_usd_per_mtok = 0.3
+cache_write_usd_per_mtok = 3.75
+"#,
+        );
+        // claude-haiku-5-5 cannot be a decision fallback: helper-only profile.
+        assert!(err_of(&custom).contains("does not allow the decision role"));
+        // With a decision-capable fallback the config validates.
+        let ok = claude_toml(
+            "model = \"acme-think-1\"",
+            r#"
+decision_fallback_models = ["claude-sonnet-5-5"]
+[llm.profiles."acme-think-1"]
+roles = ["decision"]
+context_tokens = 100000
+efforts = ["low", "high"]
+default_effort = "high"
+response_contracts = ["strict_tool"]
+tool_choice = ["auto"]
+thinking = "adaptive"
+[llm.pricing."acme-think-1"]
+input_usd_per_mtok = 3.0
+output_usd_per_mtok = 15.0
+cache_read_usd_per_mtok = 0.3
+cache_write_usd_per_mtok = 3.75
+"#,
+        );
+        let c = LiveConfig::from_toml_str(&ok).unwrap();
+        assert_eq!(c.llm.decision_fallback_models, ["claude-sonnet-5-5"]);
+        assert_eq!(c.llm.role_effort(None, "acme-think-1").unwrap(), "high");
+        // An effort the profile does not list is refused.
+        let bad_effort = ok.replacen(
+            "decision_fallback_models",
+            "decider_effort = \"medium\"\ndecision_fallback_models",
+            1,
+        );
+        assert!(err_of(&bad_effort).contains("not supported"));
+        // Fallbacks require the claude decider.
+        let rules = ok.replace("decider = \"claude\"", "decider = \"rules\"");
+        assert!(err_of(&rules).contains("requires decider"));
     }
 
     #[test]
@@ -649,10 +714,14 @@ cache_write_usd_per_mtok = 0.125
             assert!(e.contains("max_llm_cost_usd_total"), "{bad}: {e}");
         }
         // The daily pacing cap must be strictly smaller than the total.
-        let e = err_of(&claude_toml("[risk]\nmax_llm_cost_usd_per_day = 200.0", ""));
+        let base = claude_toml("", "");
+        let with_day = |v: &str| base.replace("max_llm_cost_usd_per_day = 60.0", v);
+        let e = err_of(&with_day("max_llm_cost_usd_per_day = 200.0"));
         assert!(e.contains("pacing sub-cap"), "{e}");
-        LiveConfig::from_toml_str(&claude_toml("[risk]\nmax_llm_cost_usd_per_day = 199.0", ""))
-            .unwrap();
+        LiveConfig::from_toml_str(&with_day("max_llm_cost_usd_per_day = 199.0")).unwrap();
+        // Pacing is explicit operator configuration, not derived.
+        let e = err_of(&base.replace("max_llm_cost_usd_per_day = 60.0\n", ""));
+        assert!(e.contains("max_llm_cost_usd_per_day is required"), "{e}");
     }
 
     #[test]
@@ -700,13 +769,15 @@ cache_write_usd_per_mtok = 0.125
         LiveConfig::from_toml_str(&claude_toml("", "api_base_url = \"http://127.0.0.1:9\""))
             .unwrap();
         for (k, v) in [
-            ("max_input_tokens", "100001"),
+            // Above every maintained context window (200k tokens).
+            ("max_input_tokens", "200001"),
             ("max_input_tokens", "0"),
             ("decider_max_output_tokens", "0"),
             ("request_timeout_secs", "0"),
             ("decision_deadline_secs", "0"),
             ("max_retries", "9"),
             ("max_response_bytes", "10"),
+            ("max_corrections", "4"),
         ] {
             let e = err_of(&claude_toml("", &format!("{k} = {v}")));
             assert!(e.contains(k), "{k}={v}: {e}");
@@ -715,24 +786,28 @@ cache_write_usd_per_mtok = 0.125
 
     #[test]
     fn helper_needs_a_smaller_carved_out_share() {
-        let h = "helper_model = \"claude-haiku-5-5\"\n[risk]\nmax_llm_cost_usd_per_day = 10.0";
-        let e = err_of(&claude_toml(h, ""));
+        // Pacing day cap of 10 makes the helper share comparisons meaningful.
+        let h = "helper_model = \"claude-haiku-5-5\"";
+        let day10 = |extra_llm: &str| {
+            claude_toml(h, extra_llm).replace(
+                "max_llm_cost_usd_per_day = 60.0",
+                "max_llm_cost_usd_per_day = 10.0",
+            )
+        };
+        let e = err_of(&day10(""));
         assert!(e.contains("helper_max_cost_usd_total is required"), "{e}");
-        let e = err_of(&claude_toml(
-            h,
+        let e = err_of(&day10(
             "helper_max_cost_usd_total = 200.0\nhelper_max_cost_usd_per_day = 1.0",
         ));
         assert!(e.contains("smaller than llm.max_llm_cost_usd_total"), "{e}");
-        let e = err_of(&claude_toml(
-            h,
+        let e = err_of(&day10(
             "helper_max_cost_usd_total = 5.0\nhelper_max_cost_usd_per_day = 10.0",
         ));
         assert!(
-            e.contains("smaller than risk.max_llm_cost_usd_per_day"),
+            e.contains("smaller than llm.max_llm_cost_usd_per_day"),
             "{e}"
         );
-        LiveConfig::from_toml_str(&claude_toml(
-            h,
+        LiveConfig::from_toml_str(&day10(
             "helper_max_cost_usd_total = 5.0\nhelper_max_cost_usd_per_day = 1.0",
         ))
         .unwrap();

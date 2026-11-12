@@ -279,6 +279,7 @@ pub mod claude {
                     output_usd_per_mtok: 10.0,
                     cache_read_usd_per_mtok: 0.2,
                     cache_write_usd_per_mtok: 2.5,
+                    long_context: None,
                 },
             ),
             (
@@ -288,6 +289,7 @@ pub mod claude {
                     output_usd_per_mtok: 0.5,
                     cache_read_usd_per_mtok: 0.01,
                     cache_write_usd_per_mtok: 0.125,
+                    long_context: None,
                 },
             ),
         ])
@@ -308,6 +310,7 @@ pub mod claude {
                 api_base_url: api_base_url.to_string(),
                 ledger_path: dir.join("llm_budget.json").to_string_lossy().into_owned(),
                 max_llm_cost_usd_total: Some(200.0),
+                max_llm_cost_usd_per_day: Some(60.0),
                 credit_expiry: Some(EXPIRY.to_string()),
                 request_timeout_secs: 5,
                 decision_deadline_secs: 30,

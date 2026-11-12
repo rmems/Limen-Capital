@@ -160,8 +160,46 @@ pub async fn run_with_parts(
             break;
         }
     }
+    shutdown_decider(&mut runner).await?;
     report::done(&runner.summary);
     Ok(runner.summary)
+}
+
+/// After the last tick: let the decider flush in-flight background work
+/// (helper calls) so reservations settle and reports are journaled, then
+/// record any leftover LLM audit as a final row.
+async fn shutdown_decider(runner: &mut Runner<'_>) -> Result<(), LoopError> {
+    runner.parts.decider.shutdown().await;
+    let reports = runner.parts.decider.take_llm_reports();
+    if reports.is_empty() {
+        return Ok(());
+    }
+    let now = Utc::now().timestamp();
+    let mid = runner.recent_mids.last().copied().unwrap_or(0.0);
+    let book = &runner.parts.book;
+    runner.parts.journal.append(&JournalRow {
+        ts_utc: iso(now),
+        tick: runner.summary.ticks,
+        symbol: runner.cfg.symbol.clone(),
+        bid: mid,
+        ask: mid,
+        mid,
+        position_qty: book.position_qty,
+        position_usd: book.position_qty * mid,
+        cash_usd: book.cash_usd,
+        realized_pnl_usd: book.realized_pnl_usd,
+        decider: runner.parts.decider.name().to_string(),
+        action: "none".into(),
+        reason: "llm_shutdown".into(),
+        llm_cost_usd: reports.iter().map(|r| r.cost_usd).sum(),
+        llm_calls: reports
+            .iter()
+            .map(|r| r.summary())
+            .collect::<Vec<_>>()
+            .join("; "),
+        ..Default::default()
+    })?;
+    Ok(())
 }
 
 /// Mutable session state shared by the ordered tick phases.
@@ -301,7 +339,9 @@ impl Runner<'_> {
         inputs: &RiskInputs,
         row: &mut JournalRow,
     ) -> Result<(), LoopError> {
-        let recent = self.parts.journal.tail(5)?;
+        // The decider selects relevance from the full retained window; the
+        // Claude decider embeds the most recent rows plus the active thesis.
+        let recent = self.parts.journal.tail(crate::live::journal::RECENT_ROWS)?;
         let decider = &mut self.parts.decider;
         let decision = match decider.decide(state, &recent).await {
             Ok(decision) => decision,

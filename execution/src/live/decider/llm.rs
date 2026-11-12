@@ -4,9 +4,9 @@
 //! [`BudgetLedger`] before dispatch and settles against the response `usage`.
 //! The API key only ever goes into the `x-api-key` header.
 
-use super::budget::{BudgetError, Clock, Role, SharedLedger};
+use super::budget::{BudgetError, Clock, ReserveRequest, Role, SharedLedger};
 use super::{DeciderError, LlmCallReport};
-use crate::live::config::{LlmConfig, ModelPrice, MAX_PROMPT_TOKENS};
+use crate::live::config::{LlmConfig, ModelPrice, TokenCounts};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -64,12 +64,12 @@ impl Usage {
     }
 
     pub fn cost_usd(&self, p: &ModelPrice) -> f64 {
-        p.cost_usd(
-            self.input_tokens,
-            self.output_tokens,
-            self.cache_read_input_tokens,
-            self.cache_creation_input_tokens,
-        )
+        p.cost_usd(&TokenCounts {
+            input: self.input_tokens,
+            output: self.output_tokens,
+            cache_read: self.cache_read_input_tokens,
+            cache_write: self.cache_creation_input_tokens,
+        })
     }
 }
 
@@ -104,6 +104,26 @@ pub struct CallRequest<'a> {
     pub deadline: Instant,
 }
 
+/// Everything one dispatch attempt needs beyond the logical request.
+struct AttemptPlan<'a> {
+    body: &'a [u8],
+    price: ModelPrice,
+    reserve_usd: f64,
+}
+
+/// Identity and pricing for settling a 200 response.
+struct SettleCtx<'a> {
+    id: u64,
+    price: ModelPrice,
+    model: &'a str,
+}
+
+/// A parsed 200 response and its billed usage.
+struct ResponseFacts<'a> {
+    value: &'a Value,
+    usage: &'a Usage,
+}
+
 /// Transport outcome of a single attempt.
 enum Attempt {
     Status(u16, Vec<u8>),
@@ -125,6 +145,8 @@ pub struct LlmCaller {
     endpoint: String,
     api_key: String,
     pricing: BTreeMap<String, ModelPrice>,
+    /// Context window per model, from the effective capability profiles.
+    contexts: BTreeMap<String, u64>,
     limits: CallLimits,
     ledger: SharedLedger,
     clock: Clock,
@@ -169,11 +191,18 @@ impl LlmCaller {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| format!("http client: {e}"))?;
+        let mut contexts = BTreeMap::new();
+        for model in cfg.pricing.keys() {
+            if let Ok(p) = cfg.profile_for(model) {
+                contexts.insert(model.clone(), p.context_tokens);
+            }
+        }
         Ok(Self {
             http,
             endpoint: format!("{}/v1/messages", cfg.api_base_url.trim_end_matches('/')),
             api_key: api_key.to_string(),
             pricing: cfg.pricing.clone(),
+            contexts,
             limits: CallLimits::from_config(cfg),
             ledger,
             clock,
@@ -223,11 +252,16 @@ impl LlmCaller {
             return Err(DeciderError::Pricing(format!("no price for {}", req.model)));
         };
         let reserve_usd = price.max_charge_usd(input_upper, u64::from(req.max_output_tokens));
+        let plan = AttemptPlan {
+            body: &body,
+            price,
+            reserve_usd,
+        };
         let mut attempt: u32 = 0;
         loop {
             attempt += 1;
             report.attempts = attempt;
-            let retryable = match self.attempt(req, &body, &price, reserve_usd, report).await {
+            let retryable = match self.attempt(req, &plan, report).await {
                 Outcome::Done(result) => return result,
                 Outcome::Retry(e) => e,
             };
@@ -261,9 +295,7 @@ impl LlmCaller {
     async fn attempt(
         &self,
         req: &CallRequest<'_>,
-        body: &[u8],
-        price: &ModelPrice,
-        reserve_usd: f64,
+        plan: &AttemptPlan<'_>,
         report: &mut LlmCallReport,
     ) -> Outcome {
         let remaining = req.deadline.saturating_duration_since(Instant::now());
@@ -273,14 +305,20 @@ impl LlmCaller {
             }));
         }
         let timeout = remaining.min(self.limits.request_timeout);
-        let id = match self.reserve(req, reserve_usd, timeout) {
+        let id = match self.reserve(req, plan.reserve_usd, timeout) {
             Ok(id) => id,
             Err(e) => return Outcome::Done(Err(e)),
         };
-        match self.send(body, timeout).await {
-            Attempt::Status(200, bytes) => {
-                Outcome::Done(self.settle_success(id, price, req.model, &bytes, report))
-            }
+        match self.send(plan.body, timeout).await {
+            Attempt::Status(200, bytes) => Outcome::Done(self.settle_success(
+                &SettleCtx {
+                    id,
+                    price: plan.price,
+                    model: req.model,
+                },
+                &bytes,
+                report,
+            )),
             other => self.unsuccessful(id, other, timeout),
         }
     }
@@ -295,7 +333,13 @@ impl LlmCaller {
         let now = (self.clock)();
         let call_end = now + chrono::Duration::from_std(timeout).unwrap_or(chrono::Duration::MAX);
         self.ledger
-            .reserve(req.role, req.model, reserve_usd, now, call_end)
+            .reserve(&ReserveRequest {
+                role: req.role,
+                model: req.model,
+                amount_usd: reserve_usd,
+                now,
+                call_end,
+            })
             .map_err(budget)
     }
 
@@ -348,19 +392,23 @@ impl LlmCaller {
 
     fn settle_success(
         &self,
-        id: u64,
-        price: &ModelPrice,
-        model: &str,
+        ctx: &SettleCtx<'_>,
         bytes: &[u8],
         report: &mut LlmCallReport,
     ) -> Result<Value, DeciderError> {
-        let v = self.ok_json(id, bytes)?;
-        let usage = self.required_usage(id, &v)?;
+        let v = self.ok_json(ctx.id, bytes)?;
+        let usage = self.required_usage(ctx.id, &v)?;
         report.usage.add(&usage);
-        self.verify_priced(id, &v, model, &usage)?;
-        let cost = usage.cost_usd(price);
+        self.verify_priced(
+            ctx,
+            &ResponseFacts {
+                value: &v,
+                usage: &usage,
+            },
+        )?;
+        let cost = usage.cost_usd(&ctx.price);
         report.cost_usd += cost;
-        self.ledger.settle(id, cost).map_err(budget)?;
+        self.ledger.settle(ctx.id, cost).map_err(budget)?;
         Ok(v)
     }
 
@@ -390,28 +438,37 @@ impl LlmCaller {
         Ok(usage)
     }
 
-    /// The served model must be the priced one, and the prompt must be inside
-    /// the priced under-100k tier.
+    /// The served model must be the priced one, and the billed prompt must
+    /// stay inside the model's context window. Pricing tiers are per model:
+    /// when the prompt enters a configured long-context tier the matching
+    /// rates are used automatically; an unconfigured tier is the operator's
+    /// responsibility (the reservation covers the dearest declared rate).
     fn verify_priced(
         &self,
-        id: u64,
-        v: &Value,
-        model: &str,
-        usage: &Usage,
+        ctx: &SettleCtx<'_>,
+        facts: &ResponseFacts<'_>,
     ) -> Result<(), DeciderError> {
-        let served = v.get("model").and_then(Value::as_str).unwrap_or("");
-        if !(served == model || served.starts_with(&format!("{model}-"))) {
-            self.keep_and_halt(id, "response model has no price", "missing_pricing")?;
+        let served = facts
+            .value
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !(served == ctx.model || served.starts_with(&format!("{}-", ctx.model))) {
+            self.keep_and_halt(ctx.id, "response model has no price", "missing_pricing")?;
             return Err(DeciderError::Pricing(format!(
-                "served model {served:?} does not match {model}"
+                "served model {served:?} does not match {}",
+                ctx.model
             )));
         }
-        if usage.prompt_tokens() >= MAX_PROMPT_TOKENS {
-            self.keep_and_halt(id, "prompt in long-context tier", "missing_pricing")?;
-            return Err(DeciderError::Pricing(format!(
-                "prompt used {} tokens; long-context pricing is not configured",
-                usage.prompt_tokens()
-            )));
+        if let Some(window) = self.contexts.get(ctx.model) {
+            let prompt = facts.usage.prompt_tokens();
+            if prompt > *window {
+                self.keep_and_halt(ctx.id, "prompt exceeds model context", "missing_pricing")?;
+                return Err(DeciderError::Pricing(format!(
+                    "prompt used {prompt} tokens; {} context window is {window}",
+                    ctx.model
+                )));
+            }
         }
         Ok(())
     }

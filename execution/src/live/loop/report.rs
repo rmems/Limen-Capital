@@ -25,15 +25,30 @@ pub(super) fn start(
         },
         limits: cfg.risk.clone(),
         llm: match cfg.decider {
-            DeciderKind::Claude => Some(format!(
-                "decision_model={} helper_model={} effort=medium max_llm_cost_usd_total={} max_llm_cost_usd_per_day={} credit_expiry={} ledger={}",
-                cfg.model,
-                cfg.helper_model.as_deref().unwrap_or("off"),
-                cfg.llm.max_llm_cost_usd_total.unwrap_or(0.0),
-                cfg.risk.max_llm_cost_usd_per_day,
-                cfg.llm.credit_expiry.as_deref().unwrap_or("-"),
-                cfg.llm.ledger_path,
-            )),
+            DeciderKind::Claude => {
+                let effort = cfg
+                    .llm
+                    .decider_effort
+                    .clone()
+                    .or_else(|| {
+                        cfg.llm
+                            .profile_for(&cfg.model)
+                            .ok()
+                            .map(|p| p.default_effort)
+                    })
+                    .unwrap_or_else(|| "-".into());
+                Some(format!(
+                    "decision_model={} fallbacks={} helper_model={} effort={} max_llm_cost_usd_total={} max_llm_cost_usd_per_day={} credit_expiry={} ledger={}",
+                    cfg.model,
+                    cfg.llm.decision_fallback_models.len(),
+                    cfg.helper_model.as_deref().unwrap_or("off"),
+                    effort,
+                    cfg.llm.max_llm_cost_usd_total.unwrap_or(0.0),
+                    cfg.llm.max_llm_cost_usd_per_day.unwrap_or(0.0),
+                    cfg.llm.credit_expiry.as_deref().unwrap_or("-"),
+                    cfg.llm.ledger_path,
+                ))
+            }
             DeciderKind::Rules => None,
         },
     })?;

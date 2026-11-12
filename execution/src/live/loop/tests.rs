@@ -327,7 +327,7 @@ async fn claude_decisions_are_risk_gated_and_journaled_with_usage_and_cost() {
 fn assert_claude_journal(text: &str) {
     use crate::live::test_support::claude::TEST_KEY;
     assert!(
-        text.contains("decision_model=claude-sonnet-5-5 helper_model=off"),
+        text.contains("decision_model=claude-sonnet-5-5 fallbacks=0 helper_model=off effort=high"),
         "{text}"
     );
     assert!(text.contains("dip, small entry"));

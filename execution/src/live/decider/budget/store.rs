@@ -85,11 +85,19 @@ fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
     f.sync_all()
 }
 
-/// fsync the directory so the rename survives a crash.
+/// fsync the directory so the rename survives a crash. Windows cannot open a
+/// directory as a `File` through std, so the directory sync is skipped there;
+/// the file itself is still fsynced before the rename.
+#[cfg(unix)]
 fn sync_parent_dir(path: &Path) -> io::Result<()> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) -> io::Result<()> {
+    Ok(())
 }

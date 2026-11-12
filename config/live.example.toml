@@ -16,6 +16,11 @@ decider = "claude"
 model = "claude-sonnet-5-5"
 # Optional helper role (off by default). Writes journal tags only; never trades.
 # helper_model = "claude-haiku-5-5"
+# Optional ordered decision-model fallbacks (off by default). Tried in order,
+# only after transport/timeout/parse failures; each attempt is separately
+# reserved and risk-gated. Every entry needs a decision-capable profile and a
+# price below. The helper model is never promoted implicitly.
+# decision_fallback_models = ["claude-sonnet-4-6"]
 
 [risk]
 max_position_usd = 10.0
@@ -34,6 +39,10 @@ ledger_path = "llm_budget.json"
 # Whole experiment, all roles, retries and cache charges included. At most 200.
 # Persisted in the ledger: restarts, new days, and config edits cannot raise it.
 max_llm_cost_usd_total = 200.0
+# Explicit daily pacing sub-cap for the spend ledger, required. Must be smaller
+# than max_llm_cost_usd_total. The [risk] cap above is the loop-level halt;
+# keep them consistent.
+max_llm_cost_usd_per_day = 60.0
 # Provider credit expiry. Must carry an explicit offset and fall on or before
 # 2026-11-12 in that offset. No paid call starts at or after it. Set this to the
 # exact cutoff the provider states.
@@ -41,6 +50,13 @@ credit_expiry = "2026-11-12T23:59:59-08:00"
 # Helper share of the totals (required only when helper_model is set).
 # helper_max_cost_usd_total = 5.0
 # helper_max_cost_usd_per_day = 2.0
+# Bounded serialization correction: after a schema/parse failure the model gets
+# up to this many extra chances to return one valid decision tool call. 0 off.
+max_corrections = 1
+# Per-role effort (unset uses each model profile's default; Sonnet: "high").
+# Must be an effort the model's capability profile lists.
+# decider_effort = "high"
+# helper_effort = "medium"
 max_input_tokens = 20000
 decider_max_output_tokens = 8192
 helper_max_output_tokens = 1024
@@ -63,3 +79,29 @@ input_usd_per_mtok = 0.10
 output_usd_per_mtok = 0.50
 cache_read_usd_per_mtok = 0.01
 cache_write_usd_per_mtok = 0.125
+
+# Optional: capability profiles for non-maintained models. A [llm.profiles]
+# entry replaces the built-in profile for that model id wholesale and must be
+# complete: roles, context_tokens, efforts + default_effort, response_contracts,
+# tool_choice, thinking ("adaptive" or "disabled"). Decision-role profiles must
+# allow tool_choice "auto". Models without a profile or a price entry cannot be
+# used in either role.
+#
+# [llm.profiles."claude-sonnet-4-6"]
+# roles = ["decision"]
+# context_tokens = 200000
+# efforts = ["low", "medium", "high"]
+# default_effort = "high"
+# response_contracts = ["json_schema", "strict_tool"]
+# tool_choice = ["auto", "none"]
+# thinking = "adaptive"
+#
+# Optional per-model long-context pricing tier: these rates apply to the whole
+# call once the prompt reaches threshold_tokens. The reservation always covers
+# the dearest declared rate.
+# [llm.pricing."claude-sonnet-5-5".long_context]
+# threshold_tokens = 100000
+# input_usd_per_mtok = 4.0
+# output_usd_per_mtok = 15.0
+# cache_read_usd_per_mtok = 0.4
+# cache_write_usd_per_mtok = 5.0

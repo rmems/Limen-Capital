@@ -127,6 +127,11 @@ pub struct LedgerState {
     pub version: u32,
     pub cap_total_usd: f64,
     pub expiry_unix: i64,
+    /// Sub-second part of the credit-expiry cutoff. Ledgers written before
+    /// precision was preserved lack this field and default to 0, which keeps
+    /// their whole-second behaviour.
+    #[serde(default)]
+    pub expiry_nanos: u32,
     pub committed_usd: RoleTotals,
     pub committed_by_day: BTreeMap<String, RoleTotals>,
     pub settled_calls: RoleCounts,
@@ -141,6 +146,7 @@ impl LedgerState {
             version: LEDGER_VERSION,
             cap_total_usd: policy.cap_total_usd,
             expiry_unix: policy.expiry.timestamp(),
+            expiry_nanos: policy.expiry.timestamp_subsec_nanos(),
             committed_usd: RoleTotals::default(),
             committed_by_day: BTreeMap::new(),
             settled_calls: RoleCounts::default(),
@@ -191,7 +197,7 @@ impl BudgetPolicy {
         };
         Ok(Self {
             cap_total_usd: cfg.llm.budget_total_usd()?,
-            cap_per_day_usd: cfg.risk.max_llm_cost_usd_per_day,
+            cap_per_day_usd: cfg.llm.pacing_per_day_usd()?,
             helper_total_usd,
             helper_per_day_usd,
             expiry: cfg.llm.credit_expiry_utc()?,
@@ -360,11 +366,19 @@ impl fmt::Debug for BudgetLedger {
     }
 }
 
+/// The stored credit-expiry cutoff at full precision.
+fn expiry_dt(s: &LedgerState) -> DateTime<Utc> {
+    DateTime::<Utc>::from_timestamp(s.expiry_unix, s.expiry_nanos)
+        .unwrap_or(DateTime::<Utc>::from_timestamp(s.expiry_unix, 0).unwrap_or_default())
+}
+
 /// A config may only tighten the stored cap and expiry; reservations left
 /// pending by a crash stay counted as ambiguous until reconciled.
 fn reconcile(mut s: LedgerState, policy: &BudgetPolicy) -> LedgerState {
     s.cap_total_usd = s.cap_total_usd.min(policy.cap_total_usd);
-    s.expiry_unix = s.expiry_unix.min(policy.expiry.timestamp());
+    let effective = expiry_dt(&s).min(policy.expiry);
+    s.expiry_unix = effective.timestamp();
+    s.expiry_nanos = effective.timestamp_subsec_nanos();
     for r in &mut s.reservations {
         if r.state == ReservationState::Pending {
             r.state = ReservationState::Ambiguous;
@@ -374,10 +388,15 @@ fn reconcile(mut s: LedgerState, policy: &BudgetPolicy) -> LedgerState {
     s
 }
 
-fn iso(unix: i64) -> String {
-    DateTime::<Utc>::from_timestamp(unix, 0)
-        .map(|d| d.to_rfc3339())
-        .unwrap_or_else(|| unix.to_string())
+/// Everything [`BudgetLedger::reserve`] needs for one reservation.
+#[derive(Debug, Clone, Copy)]
+pub struct ReserveRequest<'a> {
+    pub role: Role,
+    pub model: &'a str,
+    pub amount_usd: f64,
+    pub now: DateTime<Utc>,
+    /// Latest instant the call could still be running.
+    pub call_end: DateTime<Utc>,
 }
 
 impl BudgetLedger {
@@ -433,9 +452,9 @@ impl BudgetLedger {
                 requested_usd: policy.cap_total_usd,
             });
         }
-        if policy.expiry.timestamp() > s.expiry_unix {
+        if policy.expiry > expiry_dt(s) {
             return Err(BudgetError::ExpiryExtended {
-                stored_utc: iso(s.expiry_unix),
+                stored_utc: expiry_dt(s).to_rfc3339(),
                 requested_utc: policy.expiry.to_rfc3339(),
             });
         }
@@ -448,39 +467,34 @@ impl BudgetLedger {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Atomically check every gate and persist a reservation of `amount_usd`.
-    /// `call_end` is the latest instant the call could still be running.
-    pub fn reserve(
-        &self,
-        role: Role,
-        model: &str,
-        amount_usd: f64,
-        now: DateTime<Utc>,
-        call_end: DateTime<Utc>,
-    ) -> Result<u64, BudgetError> {
+    /// Atomically check every gate and persist a reservation. Compared at
+    /// full timestamp precision: a call whose end overlaps the expiry cutoff
+    /// — even within the same second — is refused.
+    pub fn reserve(&self, req: &ReserveRequest<'_>) -> Result<u64, BudgetError> {
         let mut g = self.lock();
         if let Some(reason) = &g.state.halted {
             return Err(BudgetError::Halted(reason.clone()));
         }
-        if now.timestamp() >= g.state.expiry_unix || call_end.timestamp() > g.state.expiry_unix {
+        let expiry = expiry_dt(&g.state);
+        if req.now >= expiry || req.call_end > expiry {
             return Err(BudgetError::Expired {
-                expiry_utc: iso(g.state.expiry_unix),
+                expiry_utc: expiry.to_rfc3339(),
             });
         }
-        if !(amount_usd.is_finite() && amount_usd > 0.0) {
-            return Err(BudgetError::Invalid(format!("amount {amount_usd}")));
+        if !(req.amount_usd.is_finite() && req.amount_usd > 0.0) {
+            return Err(BudgetError::Invalid(format!("amount {}", req.amount_usd)));
         }
-        let day = day_key(now);
-        g.check_affordable(role, &day, amount_usd)?;
+        let day = day_key(req.now);
+        g.check_affordable(req.role, &day, req.amount_usd)?;
         let id = g.state.next_id;
         g.state.next_id += 1;
         g.state.reservations.push(Reservation {
             id,
-            role,
-            model: model.to_string(),
+            role: req.role,
+            model: req.model.to_string(),
             day,
-            amount_usd,
-            created_unix: now.timestamp(),
+            amount_usd: req.amount_usd,
+            created_unix: req.now.timestamp(),
             state: ReservationState::Pending,
             note: None,
         });
