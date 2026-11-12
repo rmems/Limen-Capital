@@ -27,17 +27,18 @@ async fn buy_sell_hold_through_the_strict_decision_tool() {
     )
     .await;
     let s = fresh_state();
-    assert_eq!(
+    let got = [
         h.decider.decide(&s, &[]).await.unwrap(),
-        Decision::buy(2.5, "dip below mean")
-    );
-    assert_eq!(
         h.decider.decide(&s, &[]).await.unwrap(),
-        Decision::sell(4.0, "take profit")
-    );
-    assert_eq!(
         h.decider.decide(&s, &[]).await.unwrap(),
-        Decision::hold("no edge")
+    ];
+    assert_eq!(
+        got,
+        [
+            Decision::buy(2.5, "dip below mean"),
+            Decision::sell(4.0, "take profit"),
+            Decision::hold("no edge"),
+        ]
     );
     let reqs = h.server.requests().await;
     assert_eq!(reqs.len(), 3);
@@ -54,15 +55,30 @@ fn assert_decision_request(r: &RecordedRequest) {
 }
 
 fn assert_decision_envelope(r: &RecordedRequest) {
-    assert_eq!(r.method, "POST");
-    assert_eq!(r.path, "/v1/messages");
-    assert_eq!(r.header("x-api-key"), Some(TEST_KEY));
-    assert_eq!(r.header("anthropic-version"), Some("2023-06-01"));
     let b = body(r);
-    assert_eq!(b["model"], SONNET);
-    assert_eq!(b["max_tokens"], 8192);
-    assert_eq!(b["output_config"], json!({"effort": "high"}));
-    assert_eq!(b["tool_choice"], json!({"type": "auto"}));
+    assert_eq!(
+        (
+            r.method.as_str(),
+            r.path.as_str(),
+            r.header("x-api-key"),
+            r.header("anthropic-version"),
+        ),
+        ("POST", "/v1/messages", Some(TEST_KEY), Some("2023-06-01"))
+    );
+    assert_eq!(
+        (
+            b["model"].as_str().unwrap(),
+            b["max_tokens"].as_u64().unwrap(),
+            b["output_config"].clone(),
+            b["tool_choice"].clone(),
+        ),
+        (
+            SONNET,
+            8192,
+            json!({"effort": "high"}),
+            json!({"type": "auto"}),
+        )
+    );
 }
 
 fn assert_decision_tool_shape(r: &RecordedRequest) {
@@ -84,15 +100,17 @@ fn assert_request_body_is_clean(r: &RecordedRequest, b: &Value) {
         assert!(b.get(banned).is_none(), "{banned} must not be sent");
     }
     let msgs = b["messages"].as_array().unwrap();
-    assert_eq!(msgs.len(), 1, "no assistant prefill");
-    assert_eq!(msgs[0]["role"], "user");
-    assert!(!r.body.contains(TEST_KEY));
     let content = msgs[0]["content"].as_str().unwrap();
-    assert!(content.contains("\"symbol\":\"BTC-USD\""));
+    assert_eq!((msgs.len(), msgs[0]["role"].as_str().unwrap()), (1, "user"));
     // Effective caps ride along as read-only facts inside effective_limits —
     // present, but framed as enforced-by-Rust data, not instructions.
-    assert!(content.contains("effective_limits"), "{content}");
-    assert!(content.contains("read-only"), "{content}");
+    assert!(
+        !r.body.contains(TEST_KEY)
+            && content.contains("\"symbol\":\"BTC-USD\"")
+            && content.contains("effective_limits")
+            && content.contains("read-only"),
+        "{content}"
+    );
 }
 
 async fn assert_decision_spend(decider: &mut ClaudeDecider, calls: usize) {
@@ -132,10 +150,13 @@ async fn prompt_carries_bounded_history_without_the_llm_audit_column() {
         assert!(content.contains(&format!("| row{i} | data |")), "{content}");
     }
     // The versioned manifest and provenance ride with the context.
-    assert!(content.contains(CONTEXT_MANIFEST_VERSION), "{content}");
-    assert!(content.contains("active_thesis"), "{content}");
-    assert!(!content.contains("IGNORE RULES"), "{content}");
-    assert!(!content.contains("PRIVATE-THOUGHT"));
+    assert!(
+        content.contains(CONTEXT_MANIFEST_VERSION)
+            && content.contains("active_thesis")
+            && !content.contains("IGNORE RULES")
+            && !content.contains("PRIVATE-THOUGHT"),
+        "{content}"
+    );
 }
 
 #[tokio::test]
@@ -194,14 +215,19 @@ async fn malformed_tool_calls_fail_closed_as_parse_errors() {
         assert!(matches!(err, DeciderError::Parse { .. }), "case {i}: {err}");
     }
     let reqs = h.server.requests().await;
-    assert_eq!(reqs.len(), n);
+    let snap = h.decider.ledger().snapshot();
+    assert_eq!(
+        (
+            reqs.len(),
+            snap.reservations.is_empty(),
+            snap.settled_calls.decider
+        ),
+        (n, true, n as u64)
+    );
     assert!(
         models(&reqs).iter().all(|m| m == SONNET),
         "no fallback model"
     );
-    let snap = h.decider.ledger().snapshot();
-    assert!(snap.reservations.is_empty());
-    assert_eq!(snap.settled_calls.decider, n as u64);
     assert!(h
         .decider
         .take_llm_reports()
@@ -294,11 +320,13 @@ async fn configured_fallback_takes_over_after_transport_failure() {
 }
 
 fn assert_fallback_reports(reports: &[LlmCallReport]) {
-    assert_eq!(reports.len(), 2);
-    assert_eq!(reports[0].outcome, "error:http");
-    assert_eq!(reports[0].model, SONNET);
-    assert_eq!(reports[1].outcome, "ok");
-    assert_eq!(reports[1].model, FALLBACK);
+    assert_eq!(
+        reports
+            .iter()
+            .map(|r| (r.outcome.as_str(), r.model.as_str()))
+            .collect::<Vec<_>>(),
+        [("error:http", SONNET), ("ok", FALLBACK)]
+    );
 }
 
 #[tokio::test]
@@ -347,11 +375,15 @@ async fn parse_failure_gets_a_bounded_correction() {
         .as_str()
         .unwrap()
         .to_string();
-    assert!(content.contains("Correction:"), "{content}");
     let reports = h.decider.take_llm_reports();
-    assert_eq!(reports.len(), 2);
-    assert_eq!(reports[0].outcome, "error:parse");
-    assert_eq!(reports[1].outcome, "ok");
+    assert!(
+        content.contains("Correction:")
+            && reports
+                .iter()
+                .map(|r| r.outcome.as_str())
+                .eq(["error:parse", "ok"]),
+        "{content}"
+    );
 }
 
 #[tokio::test]
