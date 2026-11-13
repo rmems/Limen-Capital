@@ -28,7 +28,7 @@ cp -rf source dest          # NOT: cp -r source dest
 
 ## PR metadata hygiene — set at creation, not as a retrofit
 
-Every pull request opened in this repo should carry, in the same pass it is created. If an item does not apply or cannot be set, state the exception in the PR body before treating the PR as complete:
+Every pull request opened in this repo must carry the following PR metadata, in the same pass it is created. If an item does not apply or cannot be set, state the exception in the PR body before treating the PR as complete:
 
 - **Assignee:** `rmems`.
 - **Linear issue ID** in the PR title as a trailing `(RM-xxxx)` or `(LIM-xxxx)`, in the branch name, and in commit subjects — so the GitHub↔Linear integration attaches the PR to its issue natively.
