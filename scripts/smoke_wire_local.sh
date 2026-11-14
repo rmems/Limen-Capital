@@ -2,7 +2,7 @@
 # Local (non-CI) smoke: pack/decode fixtures + cargo/julia tests. No live ZMQ required.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-LIMEN_NEURAL="${LIMEN_NEURAL:-$(cd "$ROOT/../Limen-Neural" 2>/dev/null && pwd || true)}"
+LIMEN_NEURAL="${LIMEN_NEURAL:-$(if cd "$ROOT/../Limen-Neural" 2>/dev/null; then pwd; fi)}"
 echo "ROOT=$ROOT"
 echo "LIMEN_NEURAL=${LIMEN_NEURAL:-<unset>}"
 echo "== corpus-ipc =="
@@ -16,8 +16,9 @@ echo "== Capital execution =="
 echo "== Capital julia wire tests =="
 (cd "$ROOT/brain" && julia --project=. test/runtests.jl)
 echo "== fixtures =="
-test -f "$ROOT/wire/fixtures/marketpulse.bin"
-test -f "$ROOT/wire/fixtures/readout.bin"
+python3 "$ROOT/wire/generate_fixtures.py"
+echo "== Julia → Rust decision path =="
+bash "$ROOT/scripts/test_julia_rust_wire.sh"
 echo "OK — NervousWire local verification passed"
 echo ""
 echo "Manual E2E (3 terminals):"

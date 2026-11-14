@@ -1,6 +1,6 @@
 #!/bin/bash
-# End-to-End Integration Checks for Limen-Capital (experimental SNN-HFT)
-# Structure + dependency presence; does not require full GPU brain init.
+# Structure, dependency pins, and executable wire fixture checks.
+# Full Julia → Rust decisions run in scripts/test_julia_rust_wire.sh.
 
 set -euo pipefail
 
@@ -251,6 +251,16 @@ echo "Test 9: Documentation..."
 [ -f "$ROOT/docs/wire-protocol-v1.md" ] && pass "docs/wire-protocol-v1.md" || fail "docs/wire-protocol-v1.md missing"
 
 # Secret scanning is a separate required CI job (Gitleaks), not a structure check.
+
+# Test 11: independent wire oracle plus real Rust writers/decoders/default gates.
+echo ""
+echo "Test 11: Executable wire fixture contracts..."
+if python3 "$ROOT/wire/generate_fixtures.py" &&
+   cargo test --manifest-path "$ROOT/execution/Cargo.toml" --locked --test wire_fixtures; then
+    pass "Wire oracle, writers, decoders, and production golden decision"
+else
+    fail "Executable wire fixture contracts failed"
+fi
 
 # Summary
 echo ""

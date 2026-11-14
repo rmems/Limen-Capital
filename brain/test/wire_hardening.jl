@@ -114,4 +114,31 @@ end
         @test nero_finite(nero)
     end
 end
+
+@testset "Production aggregation modes and NERO momentum" begin
+    ensemble = healthy_ensemble()
+    for i in 1:4
+        fill!(ensemble.lobes[i].output, Float32(i))
+    end
+    for (mode, expected) in (("relevance", 1.0f0), ("static", 2.5f0), ("blend", 1.75f0))
+        withenv("LIMEN_AGG_MODE" => mode) do
+            aggregate_with_relevance!(ensemble, Float32[1, 0, 0, 0])
+            @test ensemble.agg_output == fill(expected, 16)
+        end
+    end
+    nero = NeroOrchestrator()
+    # Zero density/output isolate momentum: |0.7 - 0.25| × 0.15 = 0.0675.
+    quiet = healthy_ensemble()
+    for i in 1:4
+        quiet.lobes[i] = (output=zeros(Float32, 16), last_spike_rate=0.0f0)
+    end
+    nero.relevance .= Float32[0.7, 0.1, 0.1, 0.1]
+    @test update_relevance!(nero, quiet)
+    @test nero.raw_scores ≈ Float32[0.0675, 0.0225, 0.0225, 0.0225]
+    @test nero.prev_relevance == Float32[0.7, 0.1, 0.1, 0.1]
+    previous = copy(nero.relevance)
+    @test update_relevance!(nero, quiet)
+    @test nero.raw_scores ≈ NERO_GAMMA .* abs.(previous .- Float32[0.7, 0.1, 0.1, 0.1])
+    @test nero.prev_relevance == previous
+end
 end
