@@ -37,12 +37,12 @@ checks do not qualify them.
 - **M-1**: `metabolic-ledger` `GhostWallet` is long-only; DendriteTrader
   supports signed/short paper positions. Integrated fills are long-only spot
   until ledger short support lands (separate issue).
-- **M-2 (open)**: ADR 0001 defines, but does not enforce, one sizing authority.
-  Rust `execution/src/kelly.rs` gates/logs a policy quantity; the pinned ledger's
-  `execute_buy` / `execute_sell` accept no quantity and apply their own adaptive
-  Kelly sizing. Disabling Rust Kelly does not make ledger calls accounting-only.
-  Exact upstream-sized fills remain unimplemented; future DendriteTrader
-  `SizingModule` integration must not introduce another sizing layer.
+- **M-2 (open)**: ADR 0001's one-authority rule is enforced on the legacy ghost
+  path (RM-2439): `process_signal` passes its accepted quantity and explicit
+  friction to `apply_ghost_fill`, and the ledger's `execute_*` sizing helpers
+  are unused there. Still open: consuming an external sizing proposal
+  (DendriteTrader `SizingModule`) as the single authority — future integration
+  must not introduce another sizing layer.
 - **M-3**: Julia `Manifest.toml` files are not committed; `[sources]`/`Cargo`
   git+rev pins in `docs/deps.md` are the pins of record.
 - **M-4**: `spikenaut-execution-engine` crate name predates the rebrand —

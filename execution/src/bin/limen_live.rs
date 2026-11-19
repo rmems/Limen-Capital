@@ -6,7 +6,8 @@
 //! ```
 //!
 //! Requires `--features live-robinhood`. Secrets come from the environment:
-//! `ROBINHOOD_API_KEY`, `ROBINHOOD_PRIVATE_KEY` (and later `ANTHROPIC_API_KEY`).
+//! `ROBINHOOD_API_KEY`, `ROBINHOOD_PRIVATE_KEY`, and `ANTHROPIC_API_KEY` for
+//! `decider = "claude"` (see `config/live.example.toml`).
 //!
 //! `--once --paper` runs a single read-only tick: account, pair rules,
 //! holdings, bid/ask, decision and risk verdict, with no order submission.
@@ -32,7 +33,7 @@ const USAGE: &str = "usage: limen-live [--config PATH] [--paper] [--once] [--max
   --once           single tick: account, pair rules, bid/ask, decision, risk verdict; no orders
   --max-ticks N    stop after N ticks (default: run until Ctrl-C or the daily-loss halt)
   --journal PATH   override journal_path
-  --model ID       override the decider model id
+  --model ID       override the decision model id (only claude-sonnet-5-5 is allowed)
   --symbol PAIR    override the trading pair (BTC-USD | ETH-USD)
 ";
 

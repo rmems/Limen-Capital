@@ -21,9 +21,10 @@ pub async fn build_parts(cfg: &LiveConfig, secrets: &Secrets) -> Result<LoopPart
     let decider: Box<dyn Decider> = match cfg.decider {
         DeciderKind::Rules => Box::new(RulesDecider::new(cfg.rules.clone())),
         DeciderKind::Claude => {
-            return Err(LoopError::Config(
-                "decider = \"claude\" is not implemented yet; use decider = \"rules\"".into(),
-            ))
+            let key = secrets
+                .anthropic()
+                .map_err(|e| LoopError::Config(e.to_string()))?;
+            Box::new(ClaudeDecider::new(cfg, key).map_err(LoopError::Config)?)
         }
     };
     Ok(LoopParts {
@@ -32,6 +33,7 @@ pub async fn build_parts(cfg: &LiveConfig, secrets: &Secrets) -> Result<LoopPart
         decider,
         book: PaperBook::new(cfg.paper_starting_cash_usd, cfg.paper_fee_ratio),
         journal: Journal::new(&cfg.journal_path),
+        notifier: Box::new(crate::live::notify::DesktopNotifier),
         account_line: source.account_line,
         day_start_realized: None,
     })

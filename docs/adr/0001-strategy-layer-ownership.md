@@ -11,17 +11,18 @@
 
 Limen-Capital is the integrated application: a Julia brain (`brain/`, `math/`)
 emits an 88-byte `ReadoutPacket` over ZMQ and the Rust muscle (`execution/`)
-consumes it (confidence/Kelly policy gates → ledger-sized ghost
+consumes it (confidence/Kelly gates → caller-sized ghost
 fills). DendriteTrader.jl PRs #84–#86 landed deterministic L2 replay, causal
 features/labels, and chronological splits — Tasks 1–3 of
 `docs/superpowers/plans/2026-09-20-snn-hft-experiments.md`. Task 4 (forecast /
 encoder / baseline contracts) proceeds independently inside DendriteTrader.
 
-There are three sizing mechanisms to reconcile: DendriteTrader `SizingModule`
+Three sizing mechanisms exist to reconcile: DendriteTrader `SizingModule`
 (half-Kelly, cap 0.20), `execution/src/kelly.rs` (0.25× fractional, `b=0.05`
-policy gates), and `metabolic-ledger`'s internal adaptive Kelly on ATP/inventory
-(actual fills). This ADR defines the ownership contract before dependency
-integration; it does not implement that contract.
+policy sizing), and `metabolic-ledger`'s internal adaptive Kelly on ATP/inventory
+(`execute_*` helpers, unused on the ghost path since RM-2439). This ADR defines
+the ownership contract; the legacy-path enforcement below is implemented, the
+integrated-proposal mode is not.
 
 ## Ownership contract
 
@@ -32,23 +33,16 @@ integration; it does not implement that contract.
 | Sizing **proposal** | `rmems/DendriteTrader.jl` (`SizingModule`) |
 | Paper simulation and research execution engine | `rmems/DendriteTrader.jl` (`ExecutionEngine`, `Backtest`) |
 | Orchestration, wire adapters (ZMQ/`binary_wire`), systems measurement, dydx feed | `rmems/Limen-Capital` (`brain/`, `execution/`, `wire/`, `strategy/`) |
-| Fill application, persistent accounting, realized PnL, JSONL audit | `rmems/metabolic-ledger` (`GhostWallet`, `execute_buy`/`execute_sell`) |
+| Fill application, persistent accounting, realized PnL, JSONL audit | `rmems/metabolic-ledger` (`GhostWallet`, `apply_ghost_fill`) |
 | Transport schemas | `corpus-ipc` once it publishes `MarketPulse`/`ReadoutPacket`; until then in-tree `execution/src/binary_wire.rs` — corpus-ipc is generic transport, never a venue/trading engine |
 
-## Sizing authority — exactly one per run (target contract, unimplemented)
+## Sizing authority — exactly one per run
 
-**Implementation status:** this section is the intended contract, not current
-behavior. In `execution/src/lib.rs`, `kelly.rs` produces a policy quantity used
-for the no-edge/max-quantity gates and logging. Neither `execute_buy` nor
-`execute_sell` receives that quantity. The pinned ledger actually sizes buys
-from ATP × its adaptive Kelly fraction (less metabolic cost), and sells that
-fraction of inventory. Ledger Kelly is therefore **applied**, not merely
-observed. `ExecutionDecision::Executed.quantity` is a policy quantity, not a
-confirmed fill, and the max-quantity gate does not cap actual ledger fills.
-`use_kelly_sizing = false` changes the policy gate input to `signal.quantity`;
-it does not make the ledger accounting-only or enforce an external proposal.
-The sizing follow-up must enforce this contract before either mode below can
-claim a single sizing authority.
+**Implementation status:** the legacy self-contained path is enforced (RM-2439,
+below). The integrated mode — consuming a DendriteTrader `SizingModule`
+proposal — is still a target, not implemented behavior: nothing today feeds an
+external proposal into `process_signal`, so `kelly.rs` remains the sizing
+authority for every run.
 
 `forecast → sizing proposal → safety decision → accepted fill → accounting`
 
@@ -58,12 +52,21 @@ claim a single sizing authority.
   on a proposal (`use_kelly_sizing = false` when consuming external proposals).
   `metabolic-ledger` records fills accounting-only; its adaptive Kelly state is
   observed for reporting, never applied on top of an upstream proposal.
-- **Legacy live-helm runs, target behavior** (self-contained, no DendriteTrader proposals):
-  Rust `kelly.rs` is to be the single authority;
-  ledger Kelly stays observed-not-applied as above.
+- **Legacy live-helm runs** (self-contained, no DendriteTrader proposals):
+  Rust `kelly.rs` is the single authority — implemented via `apply_ghost_fill`
+  (RM-2439, below); ledger Kelly stays observed-not-applied as above.
 - The authority is an explicit per-run selection, never implied by which
   libraries happen to be loaded. Applying two Kelly layers to one signal is a
   bug, not a compounding feature.
+
+RM-2439 enforces this on the legacy multi-asset ghost path:
+`process_signal` passes its accepted quantity and explicit simulated friction
+to `apply_ghost_fill`, never to the ledger's ATP/Kelly-sizing `execute_*`
+helpers. `Executed` requires a committed fill and reports the ledger's `f32`
+price/quantity. Flat sells, oversells, unfunded fills, and log-write failures
+are explicit rejections. Buy friction enters cost basis and is realized on
+sale. This is still the legacy floating-point ghost path, not the separate
+integer `PaperLedger` parity path.
 
 ## Identifiers, units, clocks
 

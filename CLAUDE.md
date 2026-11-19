@@ -28,10 +28,12 @@ done)
 ## Architecture Overview
 
 Experimental SNN-HFT stack: **Julia brain** (`brain/`) produces binary `ReadoutPacket`
-frames; **Rust muscle** (`execution/`) consumes wire frames and gates/logs a
-fractional-Kelly policy quantity. The pinned `metabolic-ledger` helpers accept no
-quantity and size actual ghost trades themselves using adaptive Kelly.
-ADR 0001's single-sizing-authority rule is a target, not implemented behavior.
+frames; **Rust muscle** (`execution/`) consumes wire frames, gates/logs a
+fractional-Kelly policy quantity, and passes the accepted quantity plus
+explicit friction to `metabolic-ledger`'s `apply_ghost_fill` (caller-sized
+fills, RM-2439). ADR 0001's single-sizing-authority rule is enforced on this
+legacy ghost path; consuming external proposals (e.g. DendriteTrader
+`SizingModule`) remains a target.
 Both `research_helm.jl` / `ExperimentRunner` and `spike_helm.jl` require CUDA,
 even with `LIMEN_RESERVOIR=naut_core`. The brain CPU unit suite builds no reservoir;
 the separate root CPU comparison explicitly uses `reference_cpu`.

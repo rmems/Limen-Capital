@@ -20,7 +20,7 @@ There is no repository toolchain file.
 
 | Crate | Role | Release / pin | Status |
 |-------|------|-----------|--------|
-| **metabolic-ledger** | Ghost wallet, ATP gates, JSONL | `91822f842c13…` (2026-07-11) | **Required** (`rmems`) |
+| **metabolic-ledger** | Caller-sized ghost fills, wallet, JSONL | `825d6a9a8683…` (RM-2439) | **Required** (`rmems`) |
 | kinetic-signals | Streaming Hawkes / surprise | crates.io `0.5.0` | Optional feature `kinetic` |
 | neuromod | Reference LIF/STDP | crates.io `0.7.0` | Optional feature `snn` |
 | corpus-ipc | Typed IPC models / optional ZMQ transport | crates.io `0.2.1` | Optional feature `corpus-ipc`; runtime migration deferred |
@@ -28,7 +28,7 @@ There is no repository toolchain file.
 | plasticity-lab | Reward-modulated STDP session owner | crates.io `0.2.1` | Optional feature `plasticity-lab`; train_ghost wiring deferred |
 
 ```toml
-metabolic-ledger = { git = "https://github.com/rmems/metabolic-ledger", rev = "91822f842c13b0a2b5d8d7b75160933fab2459d6" }
+metabolic-ledger = { git = "https://github.com/rmems/metabolic-ledger", rev = "825d6a9a8683356104e856dd22d31d8cb22dae1b" }
 kinetic-signals = { version = "0.5.0", optional = true }
 neuromod = { version = "0.7.0", optional = true }
 corpus-ipc = { version = "0.2.1", optional = true }
@@ -46,10 +46,28 @@ This is dependency adoption only: `zmq` and `execution/src/binary_wire.rs` remai
 the active IPC path, Julia still owns the 28-spike `MarketEncoder`, and
 `train_ghost` does not yet call plasticity-lab. The `corpus-ipc` feature currently
 enables its typed core only; its upstream `zmq` transport feature is not enabled.
+
 `plasticity-lab` depends on **neuromod 0.6.0**, alongside the direct optional
 **0.7.0** dependency. Do not pass version-specific neuromod types across that
 boundary without a follow-up compatibility design. Its optional `critic` feature
 is not enabled, so `limbic-critic` is not adopted.
+
+### metabolic-ledger quantity-fill compatibility review (RM-2439)
+
+The pin advances from `91822f842c13…` to `825d6a9a8683…`
+([upstream PR #40](https://github.com/rmems/metabolic-ledger/pull/40)).
+`process_signal` now calls `apply_ghost_fill` with accepted quantity and explicit
+simulated friction, instead of the ledger's ATP/Kelly-sizing helpers.
+`GhostWallet` and its summaries remain the multi-asset compatibility surface.
+The bridge returns a committed fill record or an error and propagates JSONL
+write failures before committing wallet state. Buy friction enters cost basis,
+so sell PnL and adaptive Kelly include both sides; buy log rows now report zero
+realized PnL. `trade_value_usdt` on bridge rows is pre-friction notional.
+
+The newer upstream also adds a separate integer, single-instrument `PaperLedger`
+and traceability APIs. Execution does not migrate to them here: this is still
+the legacy `f32` ghost path, with explicit conversion at the fill boundary,
+not integer accounting parity or an exchange-fee model.
 
 ### kinetic-signals compatibility review
 

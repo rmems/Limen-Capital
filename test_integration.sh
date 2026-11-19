@@ -1,6 +1,6 @@
 #!/bin/bash
-# End-to-End Integration Checks for Limen-Capital (experimental SNN-HFT)
-# Structure + dependency presence; does not require full GPU brain init.
+# Structure, dependency pins, and executable wire fixture checks.
+# Full Julia → Rust decisions run in scripts/test_julia_rust_wire.sh.
 
 set -euo pipefail
 
@@ -250,13 +250,16 @@ echo "Test 9: Documentation..."
 [ -f "$ROOT/docs/deps.md" ] && pass "docs/deps.md" || fail "docs/deps.md missing"
 [ -f "$ROOT/docs/wire-protocol-v1.md" ] && pass "docs/wire-protocol-v1.md" || fail "docs/wire-protocol-v1.md missing"
 
-# Test 10: No hardcoded fake CURVE secrets in spike_helm
+# Secret scanning is a separate required CI job (Gitleaks), not a structure check.
+
+# Test 11: independent wire oracle plus real Rust writers/decoders/default gates.
 echo ""
-echo "Test 10: Secret hygiene..."
-if grep -q 'R)@\[+f1J' "$ROOT/brain/spike_helm.jl" 2>/dev/null; then
-    fail "Hardcoded fake CURVE key still in spike_helm.jl"
+echo "Test 11: Executable wire fixture contracts..."
+if python3 "$ROOT/wire/generate_fixtures.py" &&
+   cargo test --manifest-path "$ROOT/execution/Cargo.toml" --locked --test wire_fixtures; then
+    pass "Wire oracle, writers, decoders, and production golden decision"
 else
-    pass "No hardcoded CURVE key material in spike_helm.jl"
+    fail "Executable wire fixture contracts failed"
 fi
 
 # Summary

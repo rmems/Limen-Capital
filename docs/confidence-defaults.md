@@ -21,10 +21,11 @@ separate, train-only calibration study and held-out evaluation.
 - With **b = 0.05**, positive policy Kelly requires `p > 1 / (1 + b) ≈ 0.952381`.
   The **0.15** threshold is only the initial gate; passing it does not imply a
   nonzero policy quantity. SNN confidence is not calibrated as **p**.
-- This is a **policy gate**, not exact fill sizing. The pinned ledger helpers
-  accept no quantity and apply their own adaptive Kelly to ATP/inventory;
-  Rust's policy quantity and max-quantity gate do not constrain actual fills.
-  ADR 0001's one-authority rule remains unimplemented.
+- The accepted policy quantity **is** the fill quantity: `process_signal`
+  passes it (rounded to the ledger's `f32` units) with explicit friction to
+  `apply_ghost_fill`; the ledger's ATP/Kelly-sizing `execute_*` helpers are not
+  used on this path (RM-2439). ADR 0001's one-authority rule is enforced for
+  legacy runs; upstream sizing proposals remain future work.
 - Override via environment: `LIMEN_CONFIDENCE_THRESHOLD` (documented in `README.md`).
 
 ## CPU comparison campaign defaults

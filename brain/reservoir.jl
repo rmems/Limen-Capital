@@ -18,15 +18,19 @@ if !@isdefined(hft_inhibition)
     include(joinpath(@__DIR__, "hft_inhibition.jl"))
 end
 
-# LiquidCortex resolves via brain/Project.toml [sources] (git+rev). No path clones.
-function _try_load_liquid_cortex()::Bool
+# Load in the including module's top-level world, before any reservoir calls.
+# Import only the module: its exports overlap with the local naut_core API.
+# LiquidCortex resolves via Project.toml [sources] (git+rev). No path clones.
+const _LIQUID_CORTEX_AVAILABLE = if Base.find_package("LiquidCortex") !== nothing
     try
-        @eval Main using LiquidCortex
-        return true
+        import LiquidCortex
+        true
     catch e
         @debug "LiquidCortex not available via Pkg; using naut_core fallback" exception = e
-        return false
+        false
     end
+else
+    false
 end
 
 """
@@ -51,7 +55,7 @@ function build_reservoir(; backend::Symbol=:auto, n_in::Int=28, n_out::Int=16,
     neurons::Int=32, rng=Random.default_rng())
     # Explicit research backend never inherits the live helm's environment override.
     if backend === :reference_cpu
-        @eval import LiquidCortex
+        _LIQUID_CORTEX_AVAILABLE || error("CPU reference backend requires LiquidCortex")
         ens = LiquidCortex.ReferenceLSM(; n_in, n_out, N=neurons, rng, gpu=false)
         return Reservoir(:reference_cpu, ens, n_in, n_out)
     end
@@ -62,7 +66,7 @@ function build_reservoir(; backend::Symbol=:auto, n_in::Int=28, n_out::Int=16,
 
     use_lc = false
     if pref === :liquid_cortex || pref === :auto
-        use_lc = _try_load_liquid_cortex()
+        use_lc = _LIQUID_CORTEX_AVAILABLE
         if pref === :liquid_cortex && !use_lc
             error("LIMEN_RESERVOIR=liquid_cortex but LiquidCortex failed to load")
         end
@@ -70,21 +74,23 @@ function build_reservoir(; backend::Symbol=:auto, n_in::Int=28, n_out::Int=16,
 
     if use_lc && (pref === :liquid_cortex || pref === :auto)
         println("[reservoir] backend=LiquidCortex n_in=$n_in n_out=$n_out")
-        # LiquidCortex.EnsembleBrain is in Main after `using`
-        ens = Main.LiquidCortex.EnsembleBrain(; n_in=n_in, n_out=n_out)
+        ens = LiquidCortex.EnsembleBrain(; n_in=n_in, n_out=n_out)
         return Reservoir(:liquid_cortex, ens, n_in, n_out)
     end
 
     # Local naut_core — must already be included by caller, or we include it.
-    if !isdefined(Main, :EnsembleBrain) || !(Main.EnsembleBrain isa DataType)
+    if !@isdefined(EnsembleBrain)
         include(joinpath(@__DIR__, "naut_core.jl"))
     end
     println("[reservoir] backend=naut_core (local) n_in=$n_in n_out=$n_out")
     # naut_core uses compile-time N_IN; document mismatch if n_in != N_IN
-    if isdefined(Main, :N_IN) && n_in != Main.N_IN
-        @warn "naut_core N_IN=$(Main.N_IN) ≠ requested n_in=$n_in — using naut_core constants"
+    if @isdefined(N_IN) && n_in != N_IN
+        @warn "naut_core N_IN=$(N_IN) ≠ requested n_in=$n_in — using naut_core constants"
     end
-    ens = Main.EnsembleBrain()
+    # The fallback may have just been included in this call.
+    ens = Base.invokelatest() do
+        EnsembleBrain()
+    end
     return Reservoir(:naut_core, ens, n_in, n_out)
 end
 
@@ -117,11 +123,13 @@ function reservoir_step!(res::Reservoir, u;
     if res.backend === :reference_cpu
         LiquidCortex.run_lsm_step!(res.ensemble, u, inhib)
     elseif res.backend === :liquid_cortex
-        Main.LiquidCortex.ensemble_step!(res.ensemble, u;
+        LiquidCortex.ensemble_step!(res.ensemble, u;
             inhibition=inhib, reflex_signal=liquidity_delta)
     else
         # naut_core keyword API
-        ensemble_step!(res.ensemble, u; inhibition=inhib, reflex_signal=liquidity_delta)
+        Base.invokelatest() do
+            ensemble_step!(res.ensemble, u; inhibition=inhib, reflex_signal=liquidity_delta)
+        end
     end
     return nothing
 end
@@ -142,9 +150,11 @@ function reservoir_output(res::Reservoir)
     if res.backend === :reference_cpu
         return Array(res.ensemble.Wout * res.ensemble.x)
     elseif res.backend === :liquid_cortex
-        return Main.LiquidCortex.get_ensemble_output(res.ensemble)
+        return LiquidCortex.get_ensemble_output(res.ensemble)
     else
-        return get_ensemble_output(res.ensemble)
+        return Base.invokelatest() do
+            get_ensemble_output(res.ensemble)
+        end
     end
 end
 
@@ -160,9 +170,11 @@ function reservoir_diagnostics(res::Reservoir)
         return (backend=res.backend, n_in=res.n_in, n_out=res.n_out,
             neurons=length(res.ensemble.x), finite_state=all(isfinite, res.ensemble.x))
     elseif res.backend === :liquid_cortex
-        return Main.LiquidCortex.ensemble_diagnostics(res.ensemble)
+        return LiquidCortex.ensemble_diagnostics(res.ensemble)
     else
-        return ensemble_diagnostics(res.ensemble)
+        return Base.invokelatest() do
+            ensemble_diagnostics(res.ensemble)
+        end
     end
 end
 
