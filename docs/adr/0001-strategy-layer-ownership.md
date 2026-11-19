@@ -40,9 +40,10 @@ integrated-proposal mode is not.
 
 **Implementation status:** the legacy self-contained path is enforced (RM-2439,
 below). The integrated mode — consuming a DendriteTrader `SizingModule`
-proposal — is still a target, not implemented behavior: nothing today feeds an
-external proposal into `process_signal`, so `kelly.rs` remains the sizing
-authority for every run.
+proposal — is still a target, not implemented behavior. `use_kelly_sizing =
+false` already lets a library caller supply `signal.quantity` as the fill
+size, but there is no declared per-run authority selection and no proposal
+contract (validation, units, identifiers) around that path yet.
 
 `forecast → sizing proposal → safety decision → accepted fill → accounting`
 
@@ -53,7 +54,7 @@ authority for every run.
   `metabolic-ledger` records fills accounting-only; its adaptive Kelly state is
   observed for reporting, never applied on top of an upstream proposal.
 - **Legacy live-helm runs** (self-contained, no DendriteTrader proposals):
-  Rust `kelly.rs` is the single authority — implemented via `apply_ghost_fill`
+  Rust `kelly.rs` is the default authority — implemented via `apply_ghost_fill`
   (RM-2439, below); ledger Kelly stays observed-not-applied as above.
 - The authority is an explicit per-run selection, never implied by which
   libraries happen to be loaded. Applying two Kelly layers to one signal is a
