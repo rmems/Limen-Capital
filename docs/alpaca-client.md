@@ -37,7 +37,9 @@ Use polling to observe the final outcome, including fills racing with cancel.
 
 `poll_order` is bounded by a caller-supplied poll count and interval. It returns
 the latest order, whether terminal or still open. Filled, canceled, expired,
-and rejected stop polling. An unknown status is neither terminal nor a fill.
+rejected, and replaced stop polling — `replaced` is terminal for that order id
+because the venue issued a successor order, which is a different object to poll.
+An unknown status is neither terminal nor a fill.
 `filled_qty` is Alpaca's cumulative total of partial fills for that order;
 do not sum successive snapshots. To total fills across distinct orders, sum
 their latest `filled_qty` once per venue order ID.

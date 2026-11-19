@@ -182,7 +182,7 @@ async fn partial_fill_snapshots_are_cumulative_not_double_counted() {
 
 #[tokio::test]
 async fn every_terminal_state_stops_polling_including_close_expiry() {
-    for state in ["filled", "canceled", "expired", "rejected"] {
+    for state in ["filled", "canceled", "expired", "rejected", "replaced"] {
         let server = MockServer::start(vec![Route::ok(
             "GET",
             "/v2/orders/venue-id",
