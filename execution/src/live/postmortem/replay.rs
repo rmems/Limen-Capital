@@ -131,15 +131,24 @@ fn evidence(s: &Stats, comparison: &str) -> String {
     )
 }
 
+/// Journal text and the UTC day it is billed against.
+pub(super) struct Doc<'a> {
+    pub(super) text: &'a str,
+    pub(super) day: &'a str,
+}
+
 /// Rows usable for replay, with `s` accumulating row statistics.
-fn usable_rows(text: &str, day: &str, s: &mut Stats) -> io::Result<Vec<Vec<String>>> {
+fn usable_rows(doc: &Doc<'_>, s: &mut Stats) -> io::Result<Vec<Vec<String>>> {
     let mut rows = Vec::new();
-    for line in text.lines().filter(|l| l.starts_with("| ")) {
+    for line in doc.text.lines().filter(|l| l.starts_with("| ")) {
         let c = cells(line);
         if c.first().map(String::as_str) == Some(COLUMNS[0]) {
             continue;
         }
-        let r = Row { cells: &c, day };
+        let r = Row {
+            cells: &c,
+            day: doc.day,
+        };
         if row_stats(&r, s)? {
             rows.push(c);
         }
@@ -147,12 +156,12 @@ fn usable_rows(text: &str, day: &str, s: &mut Stats) -> io::Result<Vec<Vec<Strin
     Ok(rows)
 }
 
-pub(super) fn analyze(text: &str, cfg: &LiveConfig, day: &str) -> io::Result<Analysis> {
-    if !text.starts_with("# limen-live journal") {
+pub(super) fn analyze(doc: &Doc<'_>, cfg: &LiveConfig) -> io::Result<Analysis> {
+    if !doc.text.starts_with("# limen-live journal") {
         return Err(io::Error::other("not a limen-live journal"));
     }
     let mut s = Stats::default();
-    let rows = usable_rows(text, day, &mut s)?;
+    let rows = usable_rows(doc, &mut s)?;
     if rows.is_empty() {
         return Err(io::Error::other("journal has no usable ticks"));
     }

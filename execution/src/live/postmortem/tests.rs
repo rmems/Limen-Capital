@@ -33,19 +33,38 @@ async fn server(status: u16, body: &str) -> MockServer {
     .await
 }
 
+async fn run(cfg: &LiveConfig, server: &MockServer) -> Result<PathBuf, Error> {
+    run_at(
+        cfg,
+        "key",
+        &reqwest::Client::new(),
+        &format!("{}/v1/messages", server.base_url()),
+    )
+    .await
+}
+
+fn reserve(journal: &Path, day: &str, amount: f64, spend: f64) -> std::io::Result<String> {
+    cost::reserve(
+        journal,
+        day,
+        amount,
+        cost::Budget {
+            journal_spend: spend,
+            cap: 1.0,
+        },
+    )
+}
+
+fn replay_out(text: &str, cfg: &LiveConfig, day: &str) -> replay::Analysis {
+    replay::analyze(&replay::Doc { text, day }, cfg).unwrap()
+}
+
 #[tokio::test]
 async fn fixture_produces_note_with_sonnet_only_and_no_venue_requests() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config(dir.path());
     let server = server(200, &response()).await;
-    let path = run_at(
-        &cfg,
-        "test-only-key",
-        &reqwest::Client::new(),
-        &format!("{}/v1/messages", server.base_url()),
-    )
-    .await
-    .unwrap();
+    let path = run(&cfg, &server).await.unwrap();
     let note = fs::read_to_string(path).unwrap();
     for expected in [
         "Trades (fill rows): 2",
@@ -71,14 +90,7 @@ async fn fixture_produces_note_with_sonnet_only_and_no_venue_requests() {
     let day = Utc::now().format("%Y-%m-%d").to_string();
     assert!((cost::spent(Path::new(&cfg.journal_path), &day).unwrap() - 0.003).abs() < 1e-10);
     // Repeated passes create separate notes and accumulate rather than reset spend.
-    run_at(
-        &cfg,
-        "key",
-        &reqwest::Client::new(),
-        &format!("{}/v1/messages", server.base_url()),
-    )
-    .await
-    .unwrap();
+    run(&cfg, &server).await.unwrap();
     assert!((cost::spent(Path::new(&cfg.journal_path), &day).unwrap() - 0.006).abs() < 1e-10);
 }
 
@@ -89,7 +101,7 @@ fn replay_has_independent_equity_and_fee_expectations() {
         symbol: "BTC-USD".into(),
         ..LiveConfig::default()
     };
-    let a = replay::analyze(FIXTURE, &cfg, "2026-11-09").unwrap();
+    let a = replay_out(FIXTURE, &cfg, "2026-11-09");
     // Buy floor(5/99, 1e-8) at 99, sell at 100 on a later quote.
     assert!(
         a.evidence.contains("rules final equity $10.0505"),
@@ -99,21 +111,21 @@ fn replay_has_independent_equity_and_fee_expectations() {
     assert!(a.evidence.contains("recorded final equity $9.9550"));
     assert!(a.evidence.contains("rules fills 2, fees $0.0000"));
     assert!((a.today_spend - 0.006).abs() < 1e-10);
-    assert_eq!(
-        replay::analyze(FIXTURE, &cfg, "2026-11-10")
-            .unwrap()
-            .today_spend,
-        0.0
-    );
+    assert_eq!(replay_out(FIXTURE, &cfg, "2026-11-10").today_spend, 0.0);
     let bad = FIXTURE.replace("| 98 | 98 |", "| NaN | 98 |");
-    assert!(replay::analyze(&bad, &cfg, "2026-11-09")
-        .unwrap()
+    assert!(replay_out(&bad, &cfg, "2026-11-09")
         .evidence
         .contains("inconclusive"));
-    assert!(replay::analyze(&FIXTURE.replace("0.001 |", "NaN |"), &cfg, "2026-11-09").is_err());
+    assert!(replay::analyze(
+        &replay::Doc {
+            text: &FIXTURE.replace("0.001 |", "NaN |"),
+            day: "2026-11-09"
+        },
+        &cfg
+    )
+    .is_err());
     let runs = FIXTURE.replace("| hold | 0 | done", "| run_start | 0 | done");
-    assert!(replay::analyze(&runs, &cfg, "2026-11-09")
-        .unwrap()
+    assert!(replay_out(&runs, &cfg, "2026-11-09")
         .evidence
         .contains("inconclusive"));
 }
@@ -128,14 +140,7 @@ async fn daily_cap_includes_journal_and_reservations_before_paid_request() {
     cfg.risk.max_llm_cost_usd_per_day = 0.02;
     // Existing journal $0.006 + reservation $0.014488 exceeds $0.02.
     let server = server(200, &response()).await;
-    assert!(run_at(
-        &cfg,
-        "key",
-        &reqwest::Client::new(),
-        &format!("{}/v1/messages", server.base_url())
-    )
-    .await
-    .is_err());
+    assert!(run(&cfg, &server).await.is_err());
     assert_eq!(server.requests().await.len(), 1);
     assert_eq!(
         cost::spent(Path::new(&cfg.journal_path), &day).unwrap(),
@@ -154,14 +159,7 @@ async fn failures_remain_charged_and_never_retry() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = config(dir.path());
         let server = server(status, &body).await;
-        assert!(run_at(
-            &cfg,
-            "key",
-            &reqwest::Client::new(),
-            &format!("{}/v1/messages", server.base_url())
-        )
-        .await
-        .is_err());
+        assert!(run(&cfg, &server).await.is_err());
         assert_eq!(server.requests().await.len(), 2);
         let spent = cost::spent(
             Path::new(&cfg.journal_path),
@@ -177,40 +175,13 @@ async fn failures_remain_charged_and_never_retry() {
 fn reservations_are_durable_serialized_and_reset_by_utc_day() {
     let dir = tempfile::tempdir().unwrap();
     let journal = dir.path().join("cost.md");
-    let id = cost::reserve(
-        &journal,
-        "2026-11-09",
-        0.6,
-        cost::Budget {
-            journal_spend: 0.1,
-            cap: 1.0,
-        },
-    )
-    .unwrap();
-    assert!(cost::reserve(
-        &journal,
-        "2026-11-09",
-        0.4,
-        cost::Budget {
-            journal_spend: 0.1,
-            cap: 1.0
-        }
-    )
-    .is_err());
+    let id = reserve(&journal, "2026-11-09", 0.6, 0.1).unwrap();
+    assert!(reserve(&journal, "2026-11-09", 0.4, 0.1).is_err());
     assert_eq!(cost::spent(&journal, "2026-11-09").unwrap(), 0.6);
     cost::settle(&journal, "2026-11-09", &id, 0.2).unwrap();
     assert_eq!(cost::spent(&journal, "2026-11-09").unwrap(), 0.2);
     assert_eq!(cost::spent(&journal, "2026-11-10").unwrap(), 0.0);
-    cost::reserve(
-        &journal,
-        "2026-11-10",
-        1.0,
-        cost::Budget {
-            journal_spend: 0.0,
-            cap: 1.0,
-        },
-    )
-    .unwrap();
+    reserve(&journal, "2026-11-10", 1.0, 0.0).unwrap();
 }
 
 #[test]
@@ -224,16 +195,7 @@ fn overlapping_reservations_cannot_both_spend_the_remaining_budget() {
             let barrier = barrier.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                cost::reserve(
-                    &journal,
-                    "2026-11-10",
-                    0.6,
-                    cost::Budget {
-                        journal_spend: 0.0,
-                        cap: 1.0,
-                    },
-                )
-                .is_ok()
+                reserve(&journal, "2026-11-10", 0.6, 0.0).is_ok()
             })
         })
         .collect();

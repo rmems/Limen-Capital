@@ -39,7 +39,13 @@ async fn run_at(
 ) -> Result<PathBuf, Error> {
     let (journal, text) = read_journal(&cfg.journal_path)?;
     let day = Utc::now().format("%Y-%m-%d").to_string();
-    let analysis = replay::analyze(&text, cfg, &day)?;
+    let analysis = replay::analyze(
+        &replay::Doc {
+            text: &text,
+            day: &day,
+        },
+        cfg,
+    )?;
     let request = request_body(&text, &analysis.evidence);
     let api = Api {
         client,
