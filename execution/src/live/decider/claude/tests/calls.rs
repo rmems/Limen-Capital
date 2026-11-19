@@ -93,6 +93,7 @@ async fn each_retry_goes_back_through_the_budget_gate() {
                 amount_usd: 0.5,
                 now,
                 call_end: now,
+                external_day_usd: 0.0,
             })
             .unwrap()
     });
