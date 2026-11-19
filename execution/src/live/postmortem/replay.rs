@@ -220,21 +220,7 @@ impl Sim<'_> {
         }
         self.book
             .on_tick(*bid, *ask, *tick, self.cfg.risk.stale_order_ticks);
-        let state = MarketState::new(
-            ts.timestamp(),
-            *tick,
-            &self.cfg.symbol,
-            *bid,
-            *ask,
-            AccountState {
-                position_qty: self.book.free_position_qty(),
-                avg_cost_usd: self.book.avg_cost_usd,
-                cash_usd: self.book.free_cash_usd() / (1.0 + self.book.fee_ratio),
-                realized_pnl_usd: self.book.realized_pnl_usd,
-            },
-            std::mem::take(&mut self.mids),
-        );
-        self.mids = state.recent_mids.clone();
+        let state = self.market(quote);
         let inputs = RiskInputs {
             now_secs: state.ts,
             last_order_secs: self.last_order,
@@ -247,15 +233,41 @@ impl Sim<'_> {
             self.halted = true;
             return;
         }
-        let decision = self.rules.decide_sync(&state);
+        self.decide(&state, &inputs, *tick);
+    }
+
+    /// Market state for one quote, keeping the rolling mids.
+    fn market(&mut self, quote: &Tick) -> MarketState {
+        let Tick { n, ts, bid, ask } = quote;
+        let state = MarketState::new(
+            ts.timestamp(),
+            *n,
+            &self.cfg.symbol,
+            *bid,
+            *ask,
+            AccountState {
+                position_qty: self.book.free_position_qty(),
+                avg_cost_usd: self.book.avg_cost_usd,
+                cash_usd: self.book.free_cash_usd() / (1.0 + self.book.fee_ratio),
+                realized_pnl_usd: self.book.realized_pnl_usd,
+            },
+            std::mem::take(&mut self.mids),
+        );
+        self.mids = state.recent_mids.clone();
+        state
+    }
+
+    /// Decide and place any approved order.
+    fn decide(&mut self, state: &MarketState, inputs: &RiskInputs, tick: u64) {
+        let decision = self.rules.decide_sync(state);
         if let RiskVerdict::Approved(order) = risk::check(
             &decision,
-            &state,
+            state,
             &SyntheticMarket::pair_rules(&self.cfg.symbol),
             &self.cfg.risk,
-            &inputs,
+            inputs,
         ) {
-            self.book.place(&order, *tick);
+            self.book.place(&order, tick);
             self.last_order = Some(state.ts);
         }
     }
