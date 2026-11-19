@@ -10,7 +10,7 @@ fn cfg(journal: &std::path::Path, seed: u64) -> LiveConfig {
         journal_path: journal.to_string_lossy().into_owned(),
         market: MarketSourceConfig::Synthetic {
             seed,
-            start_price: 100_000.0,
+            start_price: Some(100_000.0),
             vol: 0.004,
             half_spread_bps: 1.0,
         },

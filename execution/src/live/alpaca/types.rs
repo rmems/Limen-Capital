@@ -84,10 +84,12 @@ pub enum OrderState {
     Unknown,
 }
 impl OrderState {
+    /// `Replaced` is terminal for this order id: the venue closed it and
+    /// issued a successor order, which is a different object to poll.
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Filled | Self::Canceled | Self::Expired | Self::Rejected
+            Self::Filled | Self::Canceled | Self::Expired | Self::Rejected | Self::Replaced
         )
     }
 }

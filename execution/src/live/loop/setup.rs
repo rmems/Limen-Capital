@@ -50,7 +50,8 @@ async fn build_market(cfg: &LiveConfig, secrets: &Secrets) -> Result<MarketParts
         } => Ok(MarketParts {
             market: Box::new(SyntheticMarket::new(
                 *seed,
-                *start_price,
+                start_price
+                    .unwrap_or_else(|| crate::live::config::default_start_price(&cfg.symbol)),
                 *vol,
                 *half_spread_bps,
             )),

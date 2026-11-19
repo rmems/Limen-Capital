@@ -306,7 +306,7 @@ pub mod claude {
             journal_path: dir.join("journal.md").to_string_lossy().into_owned(),
             market: MarketSourceConfig::Synthetic {
                 seed: 1,
-                start_price: 100_000.0,
+                start_price: Some(100_000.0),
                 vol: 0.004,
                 half_spread_bps: 1.0,
             },

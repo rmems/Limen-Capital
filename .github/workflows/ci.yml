@@ -75,7 +75,7 @@ jobs:
           incomplete: true
 
       - name: Test shared Alpaca harness
-        run: cargo test --locked --features live-alpaca
+        run: cargo test --locked --features live-alpaca --test alpaca_mock
 
       - name: Test Alpaca client and paper-only loop
         run: cargo test --locked --features live-alpaca

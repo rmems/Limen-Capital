@@ -79,8 +79,9 @@ pub enum MarketSourceConfig {
     Synthetic {
         #[serde(default = "default_seed")]
         seed: u64,
-        #[serde(default = "default_start_price")]
-        start_price: f64,
+        /// Unset falls back to a symbol-aware default: 100_000 for crypto
+        /// pairs (`BTC-USD`), 200 for equities (`AAPL`).
+        start_price: Option<f64>,
         /// Per-tick log-return volatility (e.g. 0.002 = 20 bps).
         #[serde(default = "default_vol")]
         vol: f64,
@@ -93,8 +94,13 @@ pub enum MarketSourceConfig {
 fn default_seed() -> u64 {
     42
 }
-fn default_start_price() -> f64 {
-    200.0
+/// Synthetic start price for a symbol when the config omits it.
+pub(crate) fn default_start_price(symbol: &str) -> f64 {
+    if symbol.contains('-') {
+        100_000.0
+    } else {
+        200.0
+    }
 }
 fn default_vol() -> f64 {
     0.002
@@ -352,11 +358,17 @@ impl LiveConfig {
     }
 }
 
-fn validate_synthetic(start_price: f64, vol: f64, half_spread_bps: f64) -> Result<(), ConfigError> {
-    if !(start_price.is_finite() && start_price > 0.0) {
-        return Err(ConfigError::Invalid(
-            "market.start_price must be positive".into(),
-        ));
+fn validate_synthetic(
+    start_price: Option<f64>,
+    vol: f64,
+    half_spread_bps: f64,
+) -> Result<(), ConfigError> {
+    if let Some(p) = start_price {
+        if !(p.is_finite() && p > 0.0) {
+            return Err(ConfigError::Invalid(
+                "market.start_price must be positive".into(),
+            ));
+        }
     }
     if !(vol.is_finite() && vol >= 0.0) {
         return Err(ConfigError::Invalid("market.vol must be >= 0".into()));
@@ -511,7 +523,7 @@ start_price = 3000.0
                 ..
             } => {
                 assert_eq!(seed, 7);
-                assert_eq!(start_price, 3000.0);
+                assert_eq!(start_price, Some(3000.0));
                 assert_eq!(vol, 0.002);
             }
             other => panic!("{other:?}"),

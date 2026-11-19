@@ -1,10 +1,11 @@
 # limen-live example: Claude decider (RM-2461).
 #
-#   cargo run --features live-robinhood --bin limen-live -- --config config/live.example.toml --paper --once
+#   cargo run --features live-alpaca --bin limen-live -- --config config/live.example.toml --paper --once
 #
-# Secrets come from the environment only: ROBINHOOD_API_KEY, ROBINHOOD_PRIVATE_KEY,
-# ANTHROPIC_API_KEY. `paper = false` stays refused until RM-2463 unlocks it; nothing
-# below depends on paper mode.
+# Secrets come from the environment only: ROBINHOOD_API_KEY, ROBINHOOD_PRIVATE_KEY
+# (crypto quotes below), ANTHROPIC_API_KEY. APCA_API_KEY_ID / APCA_API_SECRET_KEY
+# are only needed with `market.source = "alpaca"`. `paper = false` stays refused
+# until RM-2463 unlocks it; nothing below depends on paper mode.
 
 symbol = "BTC-USD"
 tick_interval_secs = 900
@@ -21,6 +22,11 @@ model = "claude-sonnet-5-5"
 # reserved and risk-gated. Every entry needs a decision-capable profile and a
 # price below. The helper model is never promoted implicitly.
 # decision_fallback_models = ["claude-sonnet-4-6"]
+
+# Read-only Robinhood Crypto quotes for the BTC-USD pair; Alpaca carries the
+# write path (equities only) and paper mode submits nothing anyway.
+[market]
+source = "robinhood"
 
 [risk]
 max_position_usd = 10.0
