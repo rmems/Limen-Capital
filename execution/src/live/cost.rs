@@ -3,8 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
-use std::io::{self, Read, Seek, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Default, Serialize, Deserialize)]
@@ -16,6 +16,12 @@ fn path(journal: &Path) -> PathBuf {
     let mut p = journal.as_os_str().to_os_string();
     p.push(".llm-cost.json");
     p.into()
+}
+
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(suffix);
+    s.into()
 }
 
 fn read_ledger(file: &mut std::fs::File) -> io::Result<Ledger> {
@@ -36,36 +42,47 @@ fn read_ledger(file: &mut std::fs::File) -> io::Result<Ledger> {
     Ok(ledger)
 }
 
-fn write_ledger(file: &mut std::fs::File, ledger: &Ledger) -> io::Result<()> {
+// The sidecar is replaced atomically (temp + rename) so an interrupted write
+// never leaves a partial ledger; the lock lives on a stable sibling file
+// because a rename swaps the locked inode out from under a waiting process.
+fn write_ledger(journal: &Path, ledger: &Ledger) -> io::Result<()> {
     let bytes = serde_json::to_vec(ledger)?;
-    file.rewind()?;
-    file.write_all(&bytes)?;
-    file.set_len(bytes.len() as u64)?;
-    file.sync_all()
+    let tmp = sibling(&path(journal), ".tmp");
+    let mut f = File::create(&tmp)?;
+    f.write_all(&bytes)?;
+    f.sync_all()?;
+    drop(f);
+    fs::rename(&tmp, path(journal))
 }
 
 fn update<T>(journal: &Path, f: impl FnOnce(&mut Ledger) -> io::Result<T>) -> io::Result<T> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
+    let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
-        .open(path(journal))?;
-    file.lock()?;
-    let mut ledger = read_ledger(&mut file)?;
+        .write(true)
+        .open(sibling(&path(journal), ".lock"))?;
+    lock.lock()?;
+    let mut ledger = if path(journal).exists() {
+        read_ledger(&mut File::open(path(journal))?)?
+    } else {
+        Ledger::default()
+    };
     let value = f(&mut ledger)?;
-    write_ledger(&mut file, &ledger)?;
+    write_ledger(journal, &ledger)?;
     Ok(value)
 }
 
 pub fn spent(journal: &Path, day: &str) -> io::Result<f64> {
-    // A read by the tick loop does not create or rewrite an absent ledger.
+    // A read by the tick loop does not create, lock, or rewrite the ledger.
     if !path(journal).exists() {
         return Ok(0.0);
     }
-    update(journal, |l| {
-        Ok(l.days.get(day).map(|d| d.values().sum()).unwrap_or(0.0))
-    })
+    let ledger = read_ledger(&mut File::open(path(journal))?)?;
+    Ok(ledger
+        .days
+        .get(day)
+        .map(|d| d.values().sum())
+        .unwrap_or(0.0))
 }
 
 /// Journal spend already recorded plus the daily cap a reservation must fit under.
