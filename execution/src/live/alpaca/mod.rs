@@ -245,10 +245,11 @@ fn validate_order(o: &PlaceLimitOrderRequest) -> Result<(), ClientError> {
             "client_order_id must be a UUID",
         ));
     }
-    if o.symbol.trim().is_empty() || o.extended_hours {
-        return Err(ClientError::InvalidRequest(
-            "symbol required; extended hours unsupported",
-        ));
+    if o.symbol.trim().is_empty() {
+        return Err(ClientError::InvalidRequest("symbol required"));
+    }
+    if o.extended_hours {
+        return Err(ClientError::InvalidRequest("extended hours unsupported"));
     }
     let size = match &o.size {
         LimitSize::Qty { qty } => qty,
