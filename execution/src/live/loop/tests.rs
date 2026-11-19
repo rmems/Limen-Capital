@@ -47,8 +47,10 @@ async fn tick_counts_offline_spend_without_calling_postmortem() {
         &p,
         &Utc::now().format("%Y-%m-%d").to_string(),
         1.0,
-        0.0,
-        1.0,
+        crate::live::cost::Budget {
+            journal_spend: 0.0,
+            cap: 1.0,
+        },
     )
     .unwrap();
     let mut parts = build_parts(&c, &Secrets::default()).await.unwrap();

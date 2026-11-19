@@ -240,8 +240,10 @@ impl Sim<'_> {
     fn step(&mut self, row: &[String]) -> Option<&'static str> {
         let tick: u64 = row[1].parse().unwrap();
         let ts = DateTime::parse_from_rfc3339(&row[0]).unwrap();
-        if tick != self.prev_tick + 1 || ts.timestamp() < self.prev_ts || row[2] != self.cfg.symbol
-        {
+        if tick != self.prev_tick + 1 || ts.timestamp() < self.prev_ts {
+            return Some("tick ordering or symbol mismatch");
+        }
+        if row[2] != self.cfg.symbol {
             return Some("tick ordering or symbol mismatch");
         }
         self.prev_tick = tick;

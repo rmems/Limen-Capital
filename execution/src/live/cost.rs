@@ -68,17 +68,22 @@ pub fn spent(journal: &Path, day: &str) -> io::Result<f64> {
     })
 }
 
+/// Journal spend already recorded plus the daily cap a reservation must fit under.
+pub(crate) struct Budget {
+    pub journal_spend: f64,
+    pub cap: f64,
+}
+
 pub(crate) fn reserve(
     journal: &Path,
     day: &str,
     amount: f64,
-    journal_spend: f64,
-    cap: f64,
+    budget: Budget,
 ) -> io::Result<String> {
     update(journal, |l| {
         let entries = l.days.entry(day.into()).or_default();
-        let total = entries.values().sum::<f64>() + journal_spend + amount;
-        if !total.is_finite() || total > cap {
+        let total = entries.values().sum::<f64>() + budget.journal_spend + amount;
+        if !total.is_finite() || total > budget.cap {
             return Err(io::Error::other(
                 "max_llm_cost_usd_per_day would be exceeded",
             ));

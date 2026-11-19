@@ -70,7 +70,10 @@ impl Args {
     }
 
     fn check_postmortem(self, tick_limit_given: bool) -> Result<Self, String> {
-        if self.postmortem && (self.once || tick_limit_given || self.model.is_some()) {
+        let overrides_run = [self.once, tick_limit_given, self.model.is_some()]
+            .into_iter()
+            .any(|v| v);
+        if self.postmortem && overrides_run {
             return Err(
                 "--postmortem cannot use --once, --max-ticks, or --model (Sonnet 5.5 only)".into(),
             );

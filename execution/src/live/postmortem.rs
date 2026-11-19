@@ -46,7 +46,13 @@ async fn run_at(
         url: api,
         key,
     };
-    let id = reserve_for(&api, &request, &journal, &day, &analysis, cfg).await?;
+    let budget = LedgerBudget {
+        journal: &journal,
+        day: &day,
+        spend: analysis.today_spend,
+        cap: cfg.risk.max_llm_cost_usd_per_day,
+    };
+    let id = reserve_for(&api, &request, &budget).await?;
     // No retries: on transport/API/parse failures the reservation remains charged.
     let response = api.post_message(&request).await?;
     let actual = response.usage.input_tokens as f64 * INPUT_USD
@@ -55,11 +61,13 @@ async fn run_at(
     let note = note_text(&response)?;
     Ok(write_note(
         &journal,
-        &id,
-        &day,
-        actual,
-        &analysis.evidence,
-        &note,
+        &Note {
+            id: &id,
+            day: &day,
+            actual,
+            evidence: &analysis.evidence,
+            text: &note,
+        },
     )?)
 }
 
@@ -75,14 +83,19 @@ fn read_journal(journal_path: &str) -> io::Result<(PathBuf, String)> {
     Ok((journal, text))
 }
 
+/// Everything a reservation needs to know about the journal's day and cap.
+struct LedgerBudget<'a> {
+    journal: &'a Path,
+    day: &'a str,
+    spend: f64,
+    cap: f64,
+}
+
 /// Reserve budget against the day's cap before the paid request goes out.
 async fn reserve_for(
     api: &Api<'_>,
     request: &serde_json::Value,
-    journal: &Path,
-    day: &str,
-    analysis: &replay::Analysis,
-    cfg: &LiveConfig,
+    budget: &LedgerBudget<'_>,
 ) -> Result<String, Error> {
     // Count the actual prompt rather than guessing its tokenization.
     let input_tokens = api.count_tokens(request).await?;
@@ -90,11 +103,13 @@ async fn reserve_for(
     let reservation =
         ((input_tokens as f64 * 1.1) + 1024.0) * INPUT_USD + MAX_OUTPUT as f64 * OUTPUT_USD;
     Ok(cost::reserve(
-        journal,
-        day,
+        budget.journal,
+        budget.day,
         reservation,
-        analysis.today_spend,
-        cfg.risk.max_llm_cost_usd_per_day,
+        cost::Budget {
+            journal_spend: budget.spend,
+            cap: budget.cap,
+        },
     )?)
 }
 
@@ -172,14 +187,23 @@ fn note_text(response: &Response) -> io::Result<String> {
     Ok(note)
 }
 
-fn write_note(
-    journal: &Path,
-    id: &str,
-    day: &str,
+/// What lands in the sibling markdown note.
+struct Note<'a> {
+    id: &'a str,
+    day: &'a str,
     actual: f64,
-    evidence: &str,
-    note: &str,
-) -> io::Result<PathBuf> {
+    evidence: &'a str,
+    text: &'a str,
+}
+
+fn write_note(journal: &Path, note: &Note<'_>) -> io::Result<PathBuf> {
+    let Note {
+        id,
+        day,
+        actual,
+        evidence,
+        text,
+    } = note;
     let output = journal.with_file_name(format!(
         "{}.postmortem-{id}.md",
         journal.file_stem().unwrap_or_default().to_string_lossy()
@@ -188,7 +212,7 @@ fn write_note(
         .write(true)
         .create_new(true)
         .open(&output)?;
-    write!(file, "# Journal post-mortem\n\nModel: {MODEL} | UTC day: {day} | LLM cost: ${actual:.6}\n\n{evidence}\n\n## Sonnet note\n\n{note}\n\nNot a research result. No orders placed; never use as training data.\n")?;
+    write!(file, "# Journal post-mortem\n\nModel: {MODEL} | UTC day: {day} | LLM cost: ${actual:.6}\n\n{evidence}\n\n## Sonnet note\n\n{text}\n\nNot a research result. No orders placed; never use as training data.\n")?;
     file.sync_all()?;
     Ok(output)
 }

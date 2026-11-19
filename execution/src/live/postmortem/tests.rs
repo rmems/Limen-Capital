@@ -177,13 +177,40 @@ async fn failures_remain_charged_and_never_retry() {
 fn reservations_are_durable_serialized_and_reset_by_utc_day() {
     let dir = tempfile::tempdir().unwrap();
     let journal = dir.path().join("cost.md");
-    let id = cost::reserve(&journal, "2026-11-09", 0.6, 0.1, 1.0).unwrap();
-    assert!(cost::reserve(&journal, "2026-11-09", 0.4, 0.1, 1.0).is_err());
+    let id = cost::reserve(
+        &journal,
+        "2026-11-09",
+        0.6,
+        cost::Budget {
+            journal_spend: 0.1,
+            cap: 1.0,
+        },
+    )
+    .unwrap();
+    assert!(cost::reserve(
+        &journal,
+        "2026-11-09",
+        0.4,
+        cost::Budget {
+            journal_spend: 0.1,
+            cap: 1.0
+        }
+    )
+    .is_err());
     assert_eq!(cost::spent(&journal, "2026-11-09").unwrap(), 0.6);
     cost::settle(&journal, "2026-11-09", &id, 0.2).unwrap();
     assert_eq!(cost::spent(&journal, "2026-11-09").unwrap(), 0.2);
     assert_eq!(cost::spent(&journal, "2026-11-10").unwrap(), 0.0);
-    cost::reserve(&journal, "2026-11-10", 1.0, 0.0, 1.0).unwrap();
+    cost::reserve(
+        &journal,
+        "2026-11-10",
+        1.0,
+        cost::Budget {
+            journal_spend: 0.0,
+            cap: 1.0,
+        },
+    )
+    .unwrap();
 }
 
 #[test]
@@ -197,7 +224,16 @@ fn overlapping_reservations_cannot_both_spend_the_remaining_budget() {
             let barrier = barrier.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                cost::reserve(&journal, "2026-11-10", 0.6, 0.0, 1.0).is_ok()
+                cost::reserve(
+                    &journal,
+                    "2026-11-10",
+                    0.6,
+                    cost::Budget {
+                        journal_spend: 0.0,
+                        cap: 1.0,
+                    },
+                )
+                .is_ok()
             })
         })
         .collect();
