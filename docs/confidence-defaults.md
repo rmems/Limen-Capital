@@ -18,7 +18,14 @@ separate, train-only calibration study and held-out evaluation.
 
 - `ExecutionEngine::new(0.15, …)` — sub-threshold signals are rejected before sizing.
 - `PositionSizer` uses **0.25× fractional Kelly** and payoff ratio **b = 0.05** by default (`execution/src/kelly.rs`, `execution/src/lib.rs`).
-- With small **b**, positive Kelly only appears at very high implied **p**; treating SNN confidence as **p** without calibration tends to produce **zero** size (fail-closed), which is intentional for research.
+- With **b = 0.05**, positive policy Kelly requires `p > 1 / (1 + b) ≈ 0.952381`.
+  The **0.15** threshold is only the initial gate; passing it does not imply a
+  nonzero policy quantity. SNN confidence is not calibrated as **p**.
+- The accepted policy quantity **is** the fill quantity: `process_signal`
+  passes it (rounded to the ledger's `f32` units) with explicit friction to
+  `apply_ghost_fill`; the ledger's ATP/Kelly-sizing `execute_*` helpers are not
+  used on this path (RM-2439). ADR 0001's one-authority rule is enforced for
+  legacy runs; upstream sizing proposals remain future work.
 - Override via environment: `LIMEN_CONFIDENCE_THRESHOLD` (documented in `README.md`).
 
 ## CPU comparison campaign defaults
