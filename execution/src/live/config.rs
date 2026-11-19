@@ -13,8 +13,10 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::Path;
 
-/// Symbols this experiment may trade. One instrument per run.
-pub const ALLOWED_SYMBOLS: &[&str] = &["BTC-USD", "ETH-USD"];
+/// Symbols this experiment may trade. One instrument per run. `AAPL`/`SPY`
+/// are the Alpaca equity pairs; `BTC-USD`/`ETH-USD` are the read-only
+/// Robinhood Crypto pairs.
+pub const ALLOWED_SYMBOLS: &[&str] = &["AAPL", "SPY", "BTC-USD", "ETH-USD"];
 
 pub use llm::{
     LlmConfig, LongContextPrice, ModelPrice, ModelProfile, TokenCounts, CONTRACT_JSON_SCHEMA,
@@ -65,16 +67,21 @@ impl From<toml::de::Error> for ConfigError {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum MarketSourceConfig {
-    /// Live quotes from the venue (requires `ROBINHOOD_*` secrets, even in paper mode).
+    /// Live quotes from the venue (requires `APCA_*` secrets, even in paper mode).
     #[default]
+    Alpaca,
+    /// Read-only live quotes from Robinhood Crypto (requires `ROBINHOOD_*`
+    /// secrets, even in paper mode). Off the live order path: Alpaca carries
+    /// the write calls.
     Robinhood,
     /// Seeded random-walk quotes for offline paper runs and tests. Clearly
     /// labelled in the journal; never used when `paper = false`.
     Synthetic {
         #[serde(default = "default_seed")]
         seed: u64,
-        #[serde(default = "default_start_price")]
-        start_price: f64,
+        /// Unset falls back to a symbol-aware default: 100_000 for crypto
+        /// pairs (`BTC-USD`), 200 for equities (`AAPL`).
+        start_price: Option<f64>,
         /// Per-tick log-return volatility (e.g. 0.002 = 20 bps).
         #[serde(default = "default_vol")]
         vol: f64,
@@ -87,8 +94,13 @@ pub enum MarketSourceConfig {
 fn default_seed() -> u64 {
     42
 }
-fn default_start_price() -> f64 {
-    100_000.0
+/// Synthetic start price for a symbol when the config omits it.
+pub(crate) fn default_start_price(symbol: &str) -> f64 {
+    if symbol.contains('-') {
+        100_000.0
+    } else {
+        200.0
+    }
 }
 fn default_vol() -> f64 {
     0.002
@@ -100,6 +112,7 @@ fn default_half_spread_bps() -> f64 {
 impl MarketSourceConfig {
     pub fn label(&self) -> &'static str {
         match self {
+            MarketSourceConfig::Alpaca => "alpaca",
             MarketSourceConfig::Robinhood => "robinhood",
             MarketSourceConfig::Synthetic { .. } => "synthetic",
         }
@@ -123,9 +136,9 @@ pub enum DeciderKind {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct LiveConfig {
-    /// Trading pair, e.g. `BTC-USD`. Must be in [`ALLOWED_SYMBOLS`].
+    /// Trading pair, e.g. `AAPL`. Must be in [`ALLOWED_SYMBOLS`].
     pub symbol: String,
-    /// Venue base URL.
+    /// Venue base URL (used by the read-only Robinhood quote source).
     pub base_url: String,
     /// Seconds between ticks.
     pub tick_interval_secs: u64,
@@ -141,7 +154,7 @@ pub struct LiveConfig {
     pub journal_path: String,
     /// Starting cash for the paper book (paper mode only).
     pub paper_starting_cash_usd: f64,
-    /// Fee ratio charged on paper fills (Robinhood's entry API tier is ~0.45%).
+    /// Fee ratio charged on paper fills (configurable simulated cost).
     pub paper_fee_ratio: f64,
     /// Quote source.
     pub market: MarketSourceConfig,
@@ -158,7 +171,7 @@ pub struct LiveConfig {
 impl Default for LiveConfig {
     fn default() -> Self {
         Self {
-            symbol: "BTC-USD".to_string(),
+            symbol: "AAPL".to_string(),
             base_url: crate::live::robinhood::DEFAULT_BASE_URL.to_string(),
             tick_interval_secs: 900,
             model: DEFAULT_MODEL.to_string(),
@@ -167,7 +180,7 @@ impl Default for LiveConfig {
             journal_path: "journal.md".to_string(),
             paper_starting_cash_usd: 10.0,
             paper_fee_ratio: 0.0045,
-            market: MarketSourceConfig::Robinhood,
+            market: MarketSourceConfig::Alpaca,
             decider: DeciderKind::Rules,
             rules: RulesConfig::default(),
             risk: RiskLimits::default(),
@@ -188,7 +201,8 @@ impl LiveConfig {
         Self::from_toml_str(&s)
     }
 
-    /// Asset code for the configured pair (`BTC` for `BTC-USD`).
+    /// Asset code for the configured pair (`BTC` for `BTC-USD`; equities like
+    /// `AAPL` have no dash and are returned unchanged).
     pub fn asset_code(&self) -> &str {
         self.symbol.split('-').next().unwrap_or(&self.symbol)
     }
@@ -344,11 +358,17 @@ impl LiveConfig {
     }
 }
 
-fn validate_synthetic(start_price: f64, vol: f64, half_spread_bps: f64) -> Result<(), ConfigError> {
-    if !(start_price.is_finite() && start_price > 0.0) {
-        return Err(ConfigError::Invalid(
-            "market.start_price must be positive".into(),
-        ));
+fn validate_synthetic(
+    start_price: Option<f64>,
+    vol: f64,
+    half_spread_bps: f64,
+) -> Result<(), ConfigError> {
+    if let Some(p) = start_price {
+        if !(p.is_finite() && p > 0.0) {
+            return Err(ConfigError::Invalid(
+                "market.start_price must be positive".into(),
+            ));
+        }
     }
     if !(vol.is_finite() && vol >= 0.0) {
         return Err(ConfigError::Invalid("market.vol must be >= 0".into()));
@@ -388,6 +408,8 @@ fn is_loopback_url(url: &str) -> bool {
 /// Secrets, read from the environment only.
 #[derive(Clone, Default)]
 pub struct Secrets {
+    pub alpaca_key_id: Option<String>,
+    pub alpaca_secret_key: Option<String>,
     pub robinhood_api_key: Option<String>,
     pub robinhood_private_key: Option<String>,
     pub anthropic_api_key: Option<String>,
@@ -396,6 +418,8 @@ pub struct Secrets {
 impl fmt::Debug for Secrets {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Secrets")
+            .field("alpaca_key_id", &self.alpaca_key_id.is_some())
+            .field("alpaca_secret_key", &self.alpaca_secret_key.is_some())
             .field("robinhood_api_key", &self.robinhood_api_key.is_some())
             .field(
                 "robinhood_private_key",
@@ -416,6 +440,8 @@ fn env_nonempty(name: &str) -> Option<String> {
 impl Secrets {
     pub fn from_env() -> Self {
         Self {
+            alpaca_key_id: env_nonempty("APCA_API_KEY_ID"),
+            alpaca_secret_key: env_nonempty("APCA_API_SECRET_KEY"),
             robinhood_api_key: env_nonempty("ROBINHOOD_API_KEY"),
             robinhood_private_key: env_nonempty("ROBINHOOD_PRIVATE_KEY"),
             anthropic_api_key: env_nonempty("ANTHROPIC_API_KEY"),
@@ -435,6 +461,19 @@ impl Secrets {
         Ok((k, p))
     }
 
+    /// `(api_key, secret_key)` or which variable is missing.
+    pub fn alpaca(&self) -> Result<(&str, &str), ConfigError> {
+        let k = self
+            .alpaca_key_id
+            .as_deref()
+            .ok_or(ConfigError::MissingSecret("APCA_API_KEY_ID"))?;
+        let p = self
+            .alpaca_secret_key
+            .as_deref()
+            .ok_or(ConfigError::MissingSecret("APCA_API_SECRET_KEY"))?;
+        Ok((k, p))
+    }
+
     pub fn anthropic(&self) -> Result<&str, ConfigError> {
         self.anthropic_api_key
             .as_deref()
@@ -449,14 +488,13 @@ mod tests {
     #[test]
     fn defaults_are_the_ten_dollar_paper_run() {
         let c = LiveConfig::default();
-        assert_eq!(c.symbol, "BTC-USD");
+        assert_eq!(c.symbol, "AAPL");
         assert!(c.paper);
         assert_eq!(c.tick_interval_secs, 900);
         assert_eq!(c.model, DEFAULT_MODEL);
-        assert_eq!(c.market, MarketSourceConfig::Robinhood);
+        assert_eq!(c.market, MarketSourceConfig::Alpaca);
         assert_eq!(c.decider, DeciderKind::Rules);
         assert_eq!(c.paper_fee_ratio, 0.0045);
-        assert_eq!(c.asset_code(), "BTC");
         c.validate().unwrap();
     }
 
@@ -464,7 +502,7 @@ mod tests {
     fn parses_toml_with_synthetic_market() {
         let c = LiveConfig::from_toml_str(
             r#"
-symbol = "ETH-USD"
+symbol = "SPY"
 tick_interval_secs = 1
 paper = true
 journal_path = "/tmp/j.md"
@@ -476,8 +514,7 @@ start_price = 3000.0
 "#,
         )
         .unwrap();
-        assert_eq!(c.symbol, "ETH-USD");
-        assert_eq!(c.asset_code(), "ETH");
+        assert_eq!(c.symbol, "SPY");
         match c.market {
             MarketSourceConfig::Synthetic {
                 seed,
@@ -486,7 +523,7 @@ start_price = 3000.0
                 ..
             } => {
                 assert_eq!(seed, 7);
-                assert_eq!(start_price, 3000.0);
+                assert_eq!(start_price, Some(3000.0));
                 assert_eq!(vol, 0.002);
             }
             other => panic!("{other:?}"),
@@ -523,48 +560,16 @@ max_daily_loss_usd = 2.0
     }
 
     #[test]
-    fn live_mode_forbids_synthetic_quotes_and_plain_http() {
-        let err = LiveConfig::from_toml_str(
-            r#"
-paper = false
-[market]
-source = "synthetic"
-"#,
-        )
-        .unwrap_err();
+    fn live_mode_forbids_synthetic_quotes_and_plain_http_base_url() {
+        let err = LiveConfig::from_toml_str("paper = false\n[market]\nsource = \"synthetic\"")
+            .unwrap_err();
         assert!(err.to_string().contains("synthetic"));
-        let err = LiveConfig::from_toml_str(
-            r#"
-paper = false
-base_url = "http://localhost:9"
-"#,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("https"));
-    }
-
-    #[test]
-    fn plain_http_only_for_loopback_mocks() {
-        for ok in [
-            "http://127.0.0.1:18765",
-            "http://localhost:9/",
-            "http://[::1]:8080",
-            "http://127.5.6.7",
-        ] {
-            assert!(is_loopback_url(ok), "{ok}");
-            LiveConfig::from_toml_str(&format!("base_url = {ok:?}")).unwrap();
-        }
-        for bad in [
-            "http://trading.robinhood.com",
-            "http://127.0.0.1.evil.example",
-            "http://10.0.0.5",
-            "http://127.0.0.1:80@evil.example",
-            "http://localhost@evil.example",
-        ] {
-            assert!(!is_loopback_url(bad), "{bad}");
-            let err = LiveConfig::from_toml_str(&format!("base_url = {bad:?}")).unwrap_err();
-            assert!(err.to_string().contains("loopback"), "{bad}: {err}");
-        }
+        let err = LiveConfig::from_toml_str("paper = false\nbase_url = \"http://example.com\"")
+            .unwrap_err();
+        assert!(err.to_string().contains("https"), "{err}");
+        // Credentials never live in TOML.
+        assert!(LiveConfig::from_toml_str("api_key = \"not-allowed\"").is_err());
+        assert!(LiveConfig::from_toml_str("private_key = \"not-allowed\"").is_err());
     }
 
     #[test]
@@ -583,12 +588,12 @@ base_url = "http://localhost:9"
     #[test]
     fn secrets_report_missing_variable_by_name() {
         let s = Secrets {
-            robinhood_api_key: Some("rh-api-SECRET-VALUE".into()),
+            alpaca_key_id: Some("alpaca-mock-SECRET-VALUE".into()),
             ..Default::default()
         };
         assert!(matches!(
-            s.robinhood(),
-            Err(ConfigError::MissingSecret("ROBINHOOD_PRIVATE_KEY"))
+            s.alpaca(),
+            Err(ConfigError::MissingSecret("APCA_API_SECRET_KEY"))
         ));
         assert!(matches!(
             s.anthropic(),

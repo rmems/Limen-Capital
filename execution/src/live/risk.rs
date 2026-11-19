@@ -21,9 +21,9 @@
 //! rejected. Sizes are rounded to the pair's increments and the rounded
 //! notional must still clear the pair's minimum.
 
+use crate::live::alpaca::types::OrderSide;
 use crate::live::decider::{Action, Decision};
 use crate::live::market_state::MarketState;
-use crate::live::robinhood::types::{OrderSide, TradingPair};
 use serde::{Deserialize, Serialize};
 mod increments;
 mod reject;
@@ -97,8 +97,8 @@ pub struct PairRules {
     pub is_api_tradable: bool,
 }
 
-impl From<&TradingPair> for PairRules {
-    fn from(p: &TradingPair) -> Self {
+impl From<&crate::live::robinhood::types::TradingPair> for PairRules {
+    fn from(p: &crate::live::robinhood::types::TradingPair) -> Self {
         Self {
             symbol: p.symbol.clone(),
             asset_increment: p.asset_increment,

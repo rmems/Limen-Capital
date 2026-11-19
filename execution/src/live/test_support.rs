@@ -156,6 +156,10 @@ async fn serve_connection(
         (s, b, delay)
     };
     requests.lock().await.push(request);
+    // Status zero simulates a lost response after the venue accepted the request.
+    if status == 0 {
+        return;
+    }
     if delay_ms > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
     }
@@ -302,7 +306,7 @@ pub mod claude {
             journal_path: dir.join("journal.md").to_string_lossy().into_owned(),
             market: MarketSourceConfig::Synthetic {
                 seed: 1,
-                start_price: 100_000.0,
+                start_price: Some(100_000.0),
                 vol: 0.004,
                 half_spread_bps: 1.0,
             },

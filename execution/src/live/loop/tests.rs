@@ -10,7 +10,7 @@ fn cfg(journal: &std::path::Path, seed: u64) -> LiveConfig {
         journal_path: journal.to_string_lossy().into_owned(),
         market: MarketSourceConfig::Synthetic {
             seed,
-            start_price: 100_000.0,
+            start_price: Some(100_000.0),
             vol: 0.004,
             half_spread_bps: 1.0,
         },
@@ -34,7 +34,7 @@ impl MarketSource for ScriptedMarket {
     }
     fn quote<'a>(&'a mut self, symbol: &'a str) -> crate::live::market::QuoteFuture<'a> {
         let (bid, ask) = self.0.pop_front().unwrap_or((100.0, 100.1));
-        let q = crate::live::robinhood::types::BestBidAsk {
+        let q = crate::live::alpaca::types::BestBidAsk {
             symbol: symbol.to_string(),
             bid,
             ask,
@@ -62,15 +62,13 @@ impl MarketSource for FailingMarket {
         let first = std::mem::replace(&mut self.0, false);
         Box::pin(async move {
             if first {
-                Ok(crate::live::robinhood::types::BestBidAsk {
+                Ok(crate::live::alpaca::types::BestBidAsk {
                     symbol: symbol.into(),
                     bid: 100.0,
                     ask: 100.1,
                 })
             } else {
-                Err(crate::live::robinhood::ClientError::NotFound(
-                    "quote".into(),
-                ))
+                Err(crate::live::alpaca::ClientError::NotFound("quote".into()).into())
             }
         })
     }
@@ -353,7 +351,7 @@ fn assert_claude_journal(text: &str) {
 
 /// A resting buy far below the market: it must go stale and be cancelled.
 fn resting_buy() -> crate::live::risk::ApprovedOrder {
-    use crate::live::robinhood::types::OrderSide;
+    use crate::live::alpaca::types::OrderSide;
     crate::live::risk::ApprovedOrder {
         client_order_id: "c8f53536-d7b4-44fd-8076-cac31e8f3880".into(),
         symbol: "BTC-USD".into(),
@@ -422,6 +420,16 @@ async fn robinhood_source_needs_secrets() {
     c.market = MarketSourceConfig::Robinhood;
     let err = build_parts(&c, &Secrets::default()).await.unwrap_err();
     assert!(err.to_string().contains("ROBINHOOD_API_KEY"), "{err}");
+}
+
+#[tokio::test]
+async fn alpaca_source_needs_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("secrets.md");
+    let mut c = cfg(&p, 1);
+    c.market = MarketSourceConfig::Alpaca;
+    let err = build_parts(&c, &Secrets::default()).await.unwrap_err();
+    assert!(err.to_string().contains("APCA_API_KEY_ID"), "{err}");
 }
 
 #[tokio::test]

@@ -1,6 +1,7 @@
 //! Construct the paper loop's venue, account metadata, and decider.
 
 use super::*;
+use crate::live::robinhood::RobinhoodClient;
 
 struct MarketParts {
     market: Box<dyn MarketSource>,
@@ -49,17 +50,20 @@ async fn build_market(cfg: &LiveConfig, secrets: &Secrets) -> Result<MarketParts
         } => Ok(MarketParts {
             market: Box::new(SyntheticMarket::new(
                 *seed,
-                *start_price,
+                start_price
+                    .unwrap_or_else(|| crate::live::config::default_start_price(&cfg.symbol)),
                 *vol,
                 *half_spread_bps,
             )),
             pair: SyntheticMarket::pair_rules(&cfg.symbol),
             account_line: None,
         }),
+        MarketSourceConfig::Alpaca => build_alpaca_market(cfg, secrets).await,
         MarketSourceConfig::Robinhood => build_robinhood_market(cfg, secrets).await,
     }
 }
 
+/// Read-only Robinhood quote source; order writes stay Alpaca-only.
 async fn build_robinhood_market(
     cfg: &LiveConfig,
     secrets: &Secrets,
@@ -89,6 +93,36 @@ async fn build_robinhood_market(
     Ok(MarketParts {
         market: Box::new(RobinhoodMarket { client }),
         pair: PairRules::from(&pair),
+        account_line: Some(line),
+    })
+}
+
+async fn build_alpaca_market(
+    cfg: &LiveConfig,
+    secrets: &Secrets,
+) -> Result<MarketParts, LoopError> {
+    let (api_key, secret_key) = secrets
+        .alpaca()
+        .map_err(|e| LoopError::Config(e.to_string()))?;
+    let client = AlpacaClient::new(api_key, secret_key)?;
+    let account = client.get_account().await?;
+    let asset = client.get_asset(&cfg.symbol).await?;
+    // Conservative equity rules for the paper book. Live submission remains disabled.
+    let pair = PairRules {
+        symbol: asset.symbol,
+        asset_increment: if asset.fractionable { 1e-9 } else { 1.0 },
+        quote_increment: 0.01,
+        min_order_amount: Some(1.0),
+        max_order_size: None,
+        is_api_tradable: asset.tradable && asset.status == "active",
+    };
+    let line = format!(
+        "Alpaca status={} buying_power={} symbol={} tradable={} fractional={}",
+        account.status, account.buying_power, pair.symbol, pair.is_api_tradable, asset.fractionable
+    );
+    Ok(MarketParts {
+        market: Box::new(AlpacaMarket { client }),
+        pair,
         account_line: Some(line),
     })
 }
