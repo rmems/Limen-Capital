@@ -113,6 +113,10 @@ pub struct Order {
     #[serde(deserialize_with = "de_f64")]
     pub filled_qty: f64,
     pub filled_avg_price: Option<String>,
+    /// Successor order id when `status == Replaced`; poll this id next.
+    pub replaced_by: Option<String>,
+    /// Order id this one replaced, if any.
+    pub replaces: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
