@@ -1,7 +1,8 @@
 //! `RulesDecider` — a deterministic mean-reversion toy.
 //!
-//! Used in tests, as the paper-mode default, and as the fallback when the
-//! LLM decider errors. It is intentionally simple and **not** a strategy:
+//! Used in tests and as the default decider. It is **not** a fallback for the
+//! Claude decider (a failed Claude tick holds). It is intentionally simple
+//! and **not** a strategy:
 //!
 //! * flat and mid is `entry_bps` below the recent-window mean → buy `order_usd`
 //! * long and mid is `exit_bps` above average cost → sell the whole position

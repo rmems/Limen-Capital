@@ -9,7 +9,7 @@ license = "MIT"
 
 [dependencies]
 # Validated git+rev library pins — no sibling path clones
-metabolic-ledger = { git = "https://github.com/rmems/metabolic-ledger", rev = "825d6a9a8683356104e856dd22d31d8cb22dae1b" }
+metabolic-ledger = { git = "https://github.com/rmems/metabolic-ledger", rev = "d7529616cf1f03077c635877053a75a326d91574" }
 # Wire contracts remain in-tree at `src/binary_wire.rs`; IPC migration is separate.
 
 # Optional published packages (enable via features; resolved versions in Cargo.lock)
@@ -50,6 +50,9 @@ toml = "0.8"
 uuid = { version = "1", features = ["v4", "serde"], optional = true }
 # Synthetic paper quotes
 rand = { version = "0.8", optional = true }
+# Robinhood Ed25519 request signing
+ed25519-dalek = { version = "2.1", optional = true }
+base64 = { version = "0.22", optional = true }
 [features]
 default = []
 # Streaming Hawkes / surprise features from kinetic-signals
@@ -62,7 +65,7 @@ axon-encoder = ["dep:axon-encoder"]
 plasticity-lab = ["dep:plasticity-lab"]
 # Live micro-capital experiment: Alpaca equity adapter + decision loop (RM-2436).
 # Off by default so `cargo build` compiles no new dependencies.
-live-alpaca = ["dep:uuid", "dep:rand"]
+live-alpaca = ["dep:uuid", "dep:rand", "dep:ed25519-dalek", "dep:base64"]
 
 [[bin]]
 name = "train_ghost"
@@ -79,6 +82,7 @@ path = "src/bin/limen_live.rs"
 required-features = ["live-alpaca"]
 
 [dev-dependencies]
+hyper = { version = "0.14", features = ["server", "http1", "tcp"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 serial_test = "3"

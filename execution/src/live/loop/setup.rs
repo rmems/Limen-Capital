@@ -1,6 +1,7 @@
 //! Construct the paper loop's venue, account metadata, and decider.
 
 use super::*;
+use crate::live::robinhood::RobinhoodClient;
 
 struct MarketParts {
     market: Box<dyn MarketSource>,
@@ -21,9 +22,10 @@ pub async fn build_parts(cfg: &LiveConfig, secrets: &Secrets) -> Result<LoopPart
     let decider: Box<dyn Decider> = match cfg.decider {
         DeciderKind::Rules => Box::new(RulesDecider::new(cfg.rules.clone())),
         DeciderKind::Claude => {
-            return Err(LoopError::Config(
-                "decider = \"claude\" is not implemented yet; use decider = \"rules\"".into(),
-            ))
+            let key = secrets
+                .anthropic()
+                .map_err(|e| LoopError::Config(e.to_string()))?;
+            Box::new(ClaudeDecider::new(cfg, key).map_err(LoopError::Config)?)
         }
     };
     Ok(LoopParts {
@@ -56,7 +58,42 @@ async fn build_market(cfg: &LiveConfig, secrets: &Secrets) -> Result<MarketParts
             account_line: None,
         }),
         MarketSourceConfig::Alpaca => build_alpaca_market(cfg, secrets).await,
+        MarketSourceConfig::Robinhood => build_robinhood_market(cfg, secrets).await,
     }
+}
+
+/// Read-only Robinhood quote source; order writes stay Alpaca-only.
+async fn build_robinhood_market(
+    cfg: &LiveConfig,
+    secrets: &Secrets,
+) -> Result<MarketParts, LoopError> {
+    let (api_key, priv_key) = secrets
+        .robinhood()
+        .map_err(|e| LoopError::Config(e.to_string()))?;
+    let mut client = RobinhoodClient::new(api_key, priv_key, &cfg.base_url)?;
+    let account = client.get_account().await?;
+    let pair = client.trading_pair(&cfg.symbol).await?;
+    let holding = client.holding(cfg.asset_code()).await?;
+    let line = format!(
+        "account {} status={} buying_power={:.2} {} api_tradable={:?} | holding {}={} | pair {} api_tradable={} asset_inc={} quote_inc={} min_order={:?}",
+        account.account_number,
+        account.status,
+        account.buying_power,
+        account.buying_power_currency,
+        account.is_api_tradable,
+        cfg.asset_code(),
+        holding.map(|h| h.total_quantity).unwrap_or(0.0),
+        pair.symbol,
+        pair.is_api_tradable,
+        pair.asset_increment,
+        pair.quote_increment,
+        pair.min_order_amount,
+    );
+    Ok(MarketParts {
+        market: Box::new(RobinhoodMarket { client }),
+        pair: PairRules::from(&pair),
+        account_line: Some(line),
+    })
 }
 
 async fn build_alpaca_market(

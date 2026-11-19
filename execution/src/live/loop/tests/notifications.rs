@@ -1,7 +1,7 @@
 use super::*;
+use crate::live::alpaca::types::{OrderSide, OrderState};
 use crate::live::notify::{Notifier, NotifyFuture};
 use crate::live::paper::PaperOrder;
-use crate::live::robinhood::types::{OrderSide, OrderState};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Default)]
@@ -91,7 +91,7 @@ async fn each_fill_and_cancel_notifies_once_even_on_the_same_tick() {
     assert_eq!(messages[2].0, "limen-live paper: cancel");
     assert!(messages[2].1.contains("cancelled buy stale after 1 ticks"));
     for (_, body) in messages.iter() {
-        assert!(body.contains("BTC-USD tick 1"));
+        assert!(body.contains("AAPL tick 1"));
         assert!(body.contains(p.to_str().unwrap()));
     }
     assert_eq!(Journal::new(p).row_count().unwrap(), 2);

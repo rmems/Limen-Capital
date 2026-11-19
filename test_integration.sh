@@ -1,6 +1,6 @@
 #!/bin/bash
-# End-to-End Integration Checks for Limen-Capital (experimental SNN-HFT)
-# Structure + dependency presence; does not require full GPU brain init.
+# Structure, dependency pins, and executable wire fixture checks.
+# Full Julia → Rust decisions run in scripts/test_julia_rust_wire.sh.
 
 set -euo pipefail
 
@@ -252,6 +252,16 @@ echo "Test 9: Documentation..."
 
 # Secret scanning is a separate required CI job (Gitleaks), not a structure check.
 
+# Test 11: independent wire oracle plus real Rust writers/decoders/default gates.
+echo ""
+echo "Test 11: Executable wire fixture contracts..."
+if python3 "$ROOT/wire/generate_fixtures.py" &&
+   cargo test --manifest-path "$ROOT/execution/Cargo.toml" --locked --test wire_fixtures; then
+    pass "Wire oracle, writers, decoders, and production golden decision"
+else
+    fail "Executable wire fixture contracts failed"
+fi
+
 # Summary
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
@@ -265,8 +275,8 @@ if [ "$TESTS_FAILED" -eq 0 ]; then
     echo ""
     echo "Next steps:"
     echo "  1. cargo test -p limen-execution  (cd execution)"
-    echo "  2. julia --project=brain test/runtests.jl"
-    echo "  3. research: julia --project=brain research_helm.jl"
+    echo "  2. julia --project=brain brain/test/runtests.jl"
+    echo "  3. synthetic research (CUDA required): julia --project=brain brain/research_helm.jl"
     exit 0
 else
     echo -e "${RED}✗ Some checks failed${NC}"

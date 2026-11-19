@@ -20,6 +20,11 @@ using Statistics
 using SparseArrays
 using LinearAlgebra
 
+# Define bindings and methods before entering the benchmark function.
+include(joinpath(@__DIR__, "naut_core.jl"))
+include(joinpath(@__DIR__, "synapse_conductor.jl"))
+include(joinpath(@__DIR__, "market_encoder.jl"))
+
 const WARMUP_ITERS = 10
 const BENCH_ITERS = 100
 
@@ -87,9 +92,6 @@ function run_sonar_probe()
 
     # ── 3. Full Step Latency (Single Lobe) ───────────────────────────────
     println("\n[3/5] Full step! Latency (Single Lobe)")
-    brain_dir = @__DIR__
-    include(joinpath(brain_dir, "naut_core.jl"))
-
     lobe = SparseBrain(25.0f0; name="bench")
     u = cu(randn(Float32, 28) .* 0.1f0)
 
@@ -98,7 +100,6 @@ function run_sonar_probe()
 
     # ── 4. Ensemble Step (4 Lobes) ───────────────────────────────────────
     println("\n[4/5] Ensemble Step (4 Lobes × 65K)")
-    include(joinpath(brain_dir, "synapse_conductor.jl"))
     ensemble = EnsembleBrain()
 
     stats = bench_ms(() -> ensemble_step!(ensemble, u, 45.0f0, 0.1f0, 0.0f0, 0.0f0, 0.0f0))
@@ -106,7 +107,6 @@ function run_sonar_probe()
 
     # ── 5. End-to-End Pipeline ───────────────────────────────────────────
     println("\n[5/5] End-to-End Pipeline")
-    include(joinpath(brain_dir, "market_encoder.jl"))
     encoder = MarketEncoder(7; delta=0.0005f0)
     nero = NeroOrchestrator()
 

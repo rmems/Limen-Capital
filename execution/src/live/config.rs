@@ -1,7 +1,11 @@
 //! `LiveConfig` (TOML file) + `Secrets` (environment only).
 //!
 //! Caps and venue settings are **configuration**, never constants in the
-//! decider, and the decider never sees them. Secrets never live in TOML.
+//! decider. The Claude decider sees the effective caps only as read-only
+//! facts in its prompt; Rust alone validates and enforces them. Secrets
+//! never live in TOML.
+
+pub mod llm;
 
 use crate::live::decider::rules::RulesConfig;
 use crate::live::risk::RiskLimits;
@@ -9,10 +13,20 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::Path;
 
-/// Symbols this experiment may trade. One instrument per run.
-pub const ALLOWED_SYMBOLS: &[&str] = &["AAPL", "SPY"];
+/// Symbols this experiment may trade. One instrument per run. `AAPL`/`SPY`
+/// are the Alpaca equity pairs; `BTC-USD`/`ETH-USD` are the read-only
+/// Robinhood Crypto pairs.
+pub const ALLOWED_SYMBOLS: &[&str] = &["AAPL", "SPY", "BTC-USD", "ETH-USD"];
 
-pub const DEFAULT_MODEL: &str = "claude-haiku-5-5";
+pub use llm::{
+    LlmConfig, LongContextPrice, ModelPrice, ModelProfile, TokenCounts, CONTRACT_JSON_SCHEMA,
+    CONTRACT_STRICT_TOOL, MAX_CORRECTIONS, MAX_EXPERIMENT_BUDGET_USD, MAX_FALLBACK_MODELS,
+    MAX_OUTPUT_TOKENS, ROLE_DECISION, ROLE_HELPER, THINKING_ADAPTIVE, THINKING_DISABLED,
+    TOOL_CHOICE_ANY, TOOL_CHOICE_AUTO, TOOL_CHOICE_NONE, TOOL_CHOICE_TOOL,
+};
+
+/// Decision-role model (the only role that may propose orders).
+pub const DEFAULT_MODEL: &str = "claude-sonnet-5-5";
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -56,6 +70,10 @@ pub enum MarketSourceConfig {
     /// Live quotes from the venue (requires `APCA_*` secrets, even in paper mode).
     #[default]
     Alpaca,
+    /// Read-only live quotes from Robinhood Crypto (requires `ROBINHOOD_*`
+    /// secrets, even in paper mode). Off the live order path: Alpaca carries
+    /// the write calls.
+    Robinhood,
     /// Seeded random-walk quotes for offline paper runs and tests. Clearly
     /// labelled in the journal; never used when `paper = false`.
     Synthetic {
@@ -89,6 +107,7 @@ impl MarketSourceConfig {
     pub fn label(&self) -> &'static str {
         match self {
             MarketSourceConfig::Alpaca => "alpaca",
+            MarketSourceConfig::Robinhood => "robinhood",
             MarketSourceConfig::Synthetic { .. } => "synthetic",
         }
     }
@@ -98,10 +117,12 @@ impl MarketSourceConfig {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum DeciderKind {
-    /// Deterministic mean-reversion toy (tests, paper default, LLM fallback).
+    /// Deterministic mean-reversion toy (tests and the default). Never a
+    /// fallback for Claude: a failed Claude tick holds.
     #[default]
     Rules,
-    /// Claude API decision loop (later step).
+    /// Claude Messages API: Sonnet decides; an optional Haiku helper only
+    /// writes non-executable notes.
     Claude,
 }
 
@@ -111,10 +132,16 @@ pub enum DeciderKind {
 pub struct LiveConfig {
     /// Trading pair, e.g. `AAPL`. Must be in [`ALLOWED_SYMBOLS`].
     pub symbol: String,
+    /// Venue base URL (used by the read-only Robinhood quote source).
+    pub base_url: String,
     /// Seconds between ticks.
     pub tick_interval_secs: u64,
-    /// LLM model id for the decider.
+    /// Decision-role model id; must have a decision-capable capability
+    /// profile (built-in or `[llm.profiles]`) and a price entry.
     pub model: String,
+    /// Optional helper-role model (disabled by default); must have a
+    /// helper-capable profile and a price. Helpers never propose orders.
+    pub helper_model: Option<String>,
     /// Paper mode: never submit orders; log what would have been sent.
     pub paper: bool,
     /// Markdown journal path.
@@ -131,14 +158,18 @@ pub struct LiveConfig {
     pub rules: RulesConfig,
     /// Hard caps enforced by `risk::check`.
     pub risk: RiskLimits,
+    /// Claude roles, pricing, experiment budget and call bounds.
+    pub llm: LlmConfig,
 }
 
 impl Default for LiveConfig {
     fn default() -> Self {
         Self {
             symbol: "AAPL".to_string(),
+            base_url: crate::live::robinhood::DEFAULT_BASE_URL.to_string(),
             tick_interval_secs: 900,
             model: DEFAULT_MODEL.to_string(),
+            helper_model: None,
             paper: true,
             journal_path: "journal.md".to_string(),
             paper_starting_cash_usd: 10.0,
@@ -147,6 +178,7 @@ impl Default for LiveConfig {
             decider: DeciderKind::Rules,
             rules: RulesConfig::default(),
             risk: RiskLimits::default(),
+            llm: LlmConfig::default(),
         }
     }
 }
@@ -163,7 +195,31 @@ impl LiveConfig {
         Self::from_toml_str(&s)
     }
 
+    /// Asset code for the configured pair (`BTC` for `BTC-USD`; equities like
+    /// `AAPL` have no dash and are returned unchanged).
+    pub fn asset_code(&self) -> &str {
+        self.symbol.split('-').next().unwrap_or(&self.symbol)
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_symbol_and_cadence()?;
+        self.validate_base_url()?;
+        self.validate_market()?;
+        self.validate_paper_book()?;
+        self.validate_rules()?;
+        self.validate_models()?;
+        self.risk.validate().map_err(ConfigError::Invalid)?;
+        self.validate_decider_kind()
+    }
+
+    fn validate_decider_kind(&self) -> Result<(), ConfigError> {
+        if self.decider == DeciderKind::Claude {
+            self.validate_llm()?;
+        }
+        Ok(())
+    }
+
+    fn validate_symbol_and_cadence(&self) -> Result<(), ConfigError> {
         if !ALLOWED_SYMBOLS.contains(&self.symbol.as_str()) {
             return Err(ConfigError::Invalid(format!(
                 "symbol {:?} not allowed; one of {:?}",
@@ -175,13 +231,83 @@ impl LiveConfig {
                 "tick_interval_secs must be > 0".into(),
             ));
         }
-        self.validate_market()?;
-        self.validate_paper_book()?;
-        self.validate_rules()?;
-        if self.model.trim().is_empty() {
-            return Err(ConfigError::Invalid("model must not be empty".into()));
+        Ok(())
+    }
+
+    /// `[llm]` checks needed before any Claude call can be dispatched.
+    pub fn validate_llm(&self) -> Result<(), ConfigError> {
+        self.validate_models()?;
+        self.llm.validate(
+            &self.model,
+            self.helper_model.as_deref(),
+            &self.llm.decision_fallback_models,
+        )
+    }
+
+    /// Role checks that hold for every decider kind: the decision model needs
+    /// a decision-capable profile, the helper a helper-capable one, and every
+    /// fallback candidate a decision-capable one. Claude-only concerns
+    /// (pricing, pacing, bounds) live in [`LlmConfig::validate`].
+    fn validate_models(&self) -> Result<(), ConfigError> {
+        self.llm.role_profile(&self.model, ROLE_DECISION)?;
+        self.validate_helper_model()?;
+        self.validate_fallback_models()?;
+        Ok(())
+    }
+
+    fn validate_helper_model(&self) -> Result<(), ConfigError> {
+        let Some(helper) = &self.helper_model else {
+            return Ok(());
+        };
+        self.llm.role_profile(helper, ROLE_HELPER)?;
+        if self.decider != DeciderKind::Claude {
+            return Err(ConfigError::Invalid(
+                "helper_model requires decider = \"claude\"".into(),
+            ));
         }
-        self.risk.validate().map_err(ConfigError::Invalid)
+        Ok(())
+    }
+
+    fn validate_fallback_models(&self) -> Result<(), ConfigError> {
+        for fb in &self.llm.decision_fallback_models {
+            if fb == &self.model || self.helper_model.as_ref() == Some(fb) {
+                return Err(ConfigError::Invalid(format!(
+                    "decision_fallback_models entry {fb:?} duplicates the decision or helper model"
+                )));
+            }
+            self.llm.role_profile(fb, ROLE_DECISION)?;
+        }
+        if !self.llm.decision_fallback_models.is_empty() && self.decider != DeciderKind::Claude {
+            return Err(ConfigError::Invalid(
+                "decision_fallback_models requires decider = \"claude\"".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_base_url(&self) -> Result<(), ConfigError> {
+        if !(self.base_url.starts_with("https://") || self.base_url.starts_with("http://")) {
+            return Err(ConfigError::Invalid(format!(
+                "base_url must start with http(s)://, got {:?}",
+                self.base_url
+            )));
+        }
+        // Signed headers carry the API key, so plain HTTP is only ever allowed
+        // towards a loopback mock (tests / offline demos), never in live mode.
+        if self.base_url.starts_with("http://") {
+            if !self.paper {
+                return Err(ConfigError::Invalid(
+                    "live mode requires an https:// base_url".into(),
+                ));
+            }
+            if !is_loopback_url(&self.base_url) {
+                return Err(ConfigError::Invalid(format!(
+                    "plain http:// base_url is only allowed for loopback mocks, got {:?}",
+                    self.base_url
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn validate_market(&self) -> Result<(), ConfigError> {
@@ -243,11 +369,37 @@ fn validate_synthetic(start_price: f64, vol: f64, half_spread_bps: f64) -> Resul
     Ok(())
 }
 
+/// `http://` host is a loopback address (`127.x.x.x`, `localhost`, `[::1]`).
+fn is_loopback_url(url: &str) -> bool {
+    let rest = url.trim_start_matches("http://");
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Userinfo (`user:pass@host`) would make the text before `@` look like the host.
+    if authority.contains('@') {
+        return false;
+    }
+    let host = if let Some(stripped) = authority.strip_prefix('[') {
+        stripped.split(']').next().unwrap_or("")
+    } else {
+        authority
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(authority)
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
 /// Secrets, read from the environment only.
 #[derive(Clone, Default)]
 pub struct Secrets {
     pub alpaca_key_id: Option<String>,
     pub alpaca_secret_key: Option<String>,
+    pub robinhood_api_key: Option<String>,
+    pub robinhood_private_key: Option<String>,
     pub anthropic_api_key: Option<String>,
 }
 
@@ -256,6 +408,11 @@ impl fmt::Debug for Secrets {
         f.debug_struct("Secrets")
             .field("alpaca_key_id", &self.alpaca_key_id.is_some())
             .field("alpaca_secret_key", &self.alpaca_secret_key.is_some())
+            .field("robinhood_api_key", &self.robinhood_api_key.is_some())
+            .field(
+                "robinhood_private_key",
+                &self.robinhood_private_key.is_some(),
+            )
             .field("anthropic_api_key", &self.anthropic_api_key.is_some())
             .finish()
     }
@@ -273,8 +430,23 @@ impl Secrets {
         Self {
             alpaca_key_id: env_nonempty("APCA_API_KEY_ID"),
             alpaca_secret_key: env_nonempty("APCA_API_SECRET_KEY"),
+            robinhood_api_key: env_nonempty("ROBINHOOD_API_KEY"),
+            robinhood_private_key: env_nonempty("ROBINHOOD_PRIVATE_KEY"),
             anthropic_api_key: env_nonempty("ANTHROPIC_API_KEY"),
         }
+    }
+
+    /// `(api_key, private_key_b64)` or which variable is missing.
+    pub fn robinhood(&self) -> Result<(&str, &str), ConfigError> {
+        let k = self
+            .robinhood_api_key
+            .as_deref()
+            .ok_or(ConfigError::MissingSecret("ROBINHOOD_API_KEY"))?;
+        let p = self
+            .robinhood_private_key
+            .as_deref()
+            .ok_or(ConfigError::MissingSecret("ROBINHOOD_PRIVATE_KEY"))?;
+        Ok((k, p))
     }
 
     /// `(api_key, secret_key)` or which variable is missing.
@@ -360,10 +532,11 @@ max_daily_loss_usd = 2.0
         assert_eq!(c.risk.max_daily_loss_usd, 2.0);
         assert_eq!(c.risk.max_position_usd, 10.0);
         assert!(LiveConfig::from_toml_str("[risk]\nmax_order_usd = 50.0").is_err());
-        let c =
-            LiveConfig::from_toml_str("decider = \"claude\"\n[rules]\nentry_bps = 25.0").unwrap();
-        assert_eq!(c.decider, DeciderKind::Claude);
+        let c = LiveConfig::from_toml_str("[rules]\nentry_bps = 25.0").unwrap();
         assert_eq!(c.rules.entry_bps, 25.0);
+        // Claude without its budget/expiry/pricing config fails closed.
+        let err = LiveConfig::from_toml_str("decider = \"claude\"").unwrap_err();
+        assert!(err.to_string().contains("llm."), "{err}");
         assert!(LiveConfig::from_toml_str("decider = \"random\"").is_err());
     }
 
@@ -375,12 +548,16 @@ max_daily_loss_usd = 2.0
     }
 
     #[test]
-    fn live_mode_forbids_synthetic_quotes_and_old_venue_fields() {
+    fn live_mode_forbids_synthetic_quotes_and_plain_http_base_url() {
         let err = LiveConfig::from_toml_str("paper = false\n[market]\nsource = \"synthetic\"")
             .unwrap_err();
         assert!(err.to_string().contains("synthetic"));
-        assert!(LiveConfig::from_toml_str("base_url = \"https://example.com\"").is_err());
+        let err = LiveConfig::from_toml_str("paper = false\nbase_url = \"http://example.com\"")
+            .unwrap_err();
+        assert!(err.to_string().contains("https"), "{err}");
+        // Credentials never live in TOML.
         assert!(LiveConfig::from_toml_str("api_key = \"not-allowed\"").is_err());
+        assert!(LiveConfig::from_toml_str("private_key = \"not-allowed\"").is_err());
     }
 
     #[test]
@@ -411,5 +588,224 @@ max_daily_loss_usd = 2.0
             Err(ConfigError::MissingSecret("ANTHROPIC_API_KEY"))
         ));
         assert!(!format!("{s:?}").contains("SECRET-VALUE"));
+    }
+
+    fn claude_toml(extra_top: &str, extra_llm: &str) -> String {
+        format!(
+            r#"
+decider = "claude"
+{extra_top}
+[llm]
+max_llm_cost_usd_total = 200.0
+max_llm_cost_usd_per_day = 60.0
+credit_expiry = "2026-11-12T23:59:59-08:00"
+{extra_llm}
+[llm.pricing."claude-sonnet-5-5"]
+input_usd_per_mtok = 2.0
+output_usd_per_mtok = 10.0
+cache_read_usd_per_mtok = 0.2
+cache_write_usd_per_mtok = 2.5
+[llm.pricing."claude-haiku-5-5"]
+input_usd_per_mtok = 0.1
+output_usd_per_mtok = 0.5
+cache_read_usd_per_mtok = 0.01
+cache_write_usd_per_mtok = 0.125
+"#
+        )
+    }
+
+    fn err_of(toml: &str) -> String {
+        LiveConfig::from_toml_str(toml).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn example_config_is_valid_and_seeded() {
+        let c =
+            LiveConfig::from_toml_str(include_str!("../../../config/live.example.toml")).unwrap();
+        assert_eq!(c.decider, DeciderKind::Claude);
+        assert_eq!(c.model, "claude-sonnet-5-5");
+        assert_eq!(c.helper_model, None);
+        assert_eq!(c.llm.max_llm_cost_usd_total, Some(200.0));
+        assert_eq!(c.llm.pricing["claude-sonnet-5-5"].input_usd_per_mtok, 2.0);
+        assert_eq!(c.llm.pricing["claude-haiku-5-5"].output_usd_per_mtok, 0.5);
+    }
+
+    #[test]
+    fn model_roles_are_profile_driven() {
+        LiveConfig::from_toml_str(&claude_toml("", "")).unwrap();
+        // No maintained profile: rejected before any pricing lookup.
+        let e = err_of(&claude_toml("model = \"claude-opus-9\"", ""));
+        assert!(e.contains("no capability profile"), "{e}");
+        // Haiku's built-in profile is helper-only.
+        let e = err_of(&claude_toml("model = \"claude-haiku-5-5\"", ""));
+        assert!(e.contains("does not allow the decision role"), "{e}");
+        let e = err_of(&claude_toml("helper_model = \"claude-sonnet-5-5\"", ""));
+        assert!(e.contains("does not allow the helper role"), "{e}");
+        let e = err_of(&claude_toml("helper_model = \"gpt-x\"", ""));
+        assert!(e.contains("no capability profile"), "{e}");
+        // Rules decider: model ids are still checked, and helpers need claude.
+        assert!(LiveConfig::from_toml_str("model = \"claude-haiku-5-5\"").is_err());
+        let e = err_of("helper_model = \"claude-haiku-5-5\"");
+        assert!(e.contains("requires decider"), "{e}");
+    }
+
+    /// Operator profile + price for `acme-think-1` plus a fallback list.
+    fn acme_decision_toml(fallbacks: &str) -> String {
+        claude_toml(
+            "model = \"acme-think-1\"",
+            &format!(
+                r#"
+decision_fallback_models = [{fallbacks}]
+[llm.profiles."acme-think-1"]
+roles = ["decision"]
+context_tokens = 100000
+efforts = ["low", "high"]
+default_effort = "high"
+response_contracts = ["strict_tool"]
+tool_choice = ["auto"]
+thinking = "adaptive"
+[llm.pricing."acme-think-1"]
+input_usd_per_mtok = 3.0
+output_usd_per_mtok = 15.0
+cache_read_usd_per_mtok = 0.3
+cache_write_usd_per_mtok = 3.75
+"#
+            ),
+        )
+    }
+
+    #[test]
+    fn operator_profile_and_price_make_a_model_decision_capable() {
+        let ok = acme_decision_toml("\"claude-sonnet-5-5\"");
+        let c = LiveConfig::from_toml_str(&ok).unwrap();
+        assert_eq!(c.llm.decision_fallback_models, ["claude-sonnet-5-5"]);
+        assert_eq!(c.llm.role_effort(None, "acme-think-1").unwrap(), "high");
+        // An effort the profile does not list is refused.
+        let bad_effort = ok.replacen(
+            "decision_fallback_models",
+            "decider_effort = \"medium\"\ndecision_fallback_models",
+            1,
+        );
+        assert!(err_of(&bad_effort).contains("not supported"));
+    }
+
+    #[test]
+    fn fallback_candidates_must_be_decision_capable_and_need_claude() {
+        // claude-haiku-5-5 cannot be a decision fallback: helper-only profile.
+        let e = err_of(&acme_decision_toml("\"claude-haiku-5-5\""));
+        assert!(e.contains("does not allow the decision role"), "{e}");
+        // Fallbacks require the claude decider.
+        let ok = acme_decision_toml("\"claude-sonnet-5-5\"");
+        let rules = ok.replace("decider = \"claude\"", "decider = \"rules\"");
+        assert!(err_of(&rules).contains("requires decider"));
+    }
+
+    #[test]
+    fn cumulative_budget_is_required_positive_and_at_most_200() {
+        let base = claude_toml("", "");
+        let e = err_of(&base.replace("max_llm_cost_usd_total = 200.0\n", ""));
+        assert!(e.contains("max_llm_cost_usd_total is required"), "{e}");
+        for bad in ["0.0", "-1.0", "200.01", "1000.0", "nan"] {
+            let e = err_of(&base.replace("= 200.0", &format!("= {bad}")));
+            assert!(e.contains("max_llm_cost_usd_total"), "{bad}: {e}");
+        }
+        // The daily pacing cap must be strictly smaller than the total.
+        let base = claude_toml("", "");
+        let with_day = |v: &str| base.replace("max_llm_cost_usd_per_day = 60.0", v);
+        let e = err_of(&with_day("max_llm_cost_usd_per_day = 200.0"));
+        assert!(e.contains("pacing sub-cap"), "{e}");
+        LiveConfig::from_toml_str(&with_day("max_llm_cost_usd_per_day = 199.0")).unwrap();
+        // Pacing is explicit operator configuration, not derived.
+        let e = err_of(&base.replace("max_llm_cost_usd_per_day = 60.0\n", ""));
+        assert!(e.contains("max_llm_cost_usd_per_day is required"), "{e}");
+    }
+
+    #[test]
+    fn credit_expiry_must_be_explicit_and_not_after_2026_11_12() {
+        let base = claude_toml("", "");
+        let with = |v: &str| base.replace("\"2026-11-12T23:59:59-08:00\"", v);
+        let e = err_of(&base.replace("credit_expiry = \"2026-11-12T23:59:59-08:00\"\n", ""));
+        assert!(e.contains("credit_expiry is required"), "{e}");
+        for bad in [
+            "\"2026-11-12T23:59:59\"",
+            "\"tomorrow\"",
+            "\"\"",
+            "\"2026-11-13T00:00:00Z\"",
+            "\"2026-11-13T00:30:00+14:00\"",
+        ] {
+            let e = err_of(&with(bad));
+            assert!(e.contains("credit_expiry"), "{bad}: {e}");
+        }
+        for ok in [
+            "\"2026-11-12T23:59:59Z\"",
+            "\"2026-11-12T23:59:59+09:00\"",
+            "\"2026-11-11T12:00:00Z\"",
+        ] {
+            LiveConfig::from_toml_str(&with(ok)).unwrap();
+        }
+    }
+
+    #[test]
+    fn pricing_endpoint_and_bounds_fail_closed() {
+        let base = claude_toml("", "");
+        let no_sonnet = base.replace(
+            "[llm.pricing.\"claude-sonnet-5-5\"]",
+            "[llm.pricing.\"other\"]",
+        );
+        assert!(err_of(&no_sonnet).contains("no entry for \"claude-sonnet-5-5\""));
+        let e = err_of(&base.replace("input_usd_per_mtok = 2.0", "input_usd_per_mtok = 0.0"));
+        assert!(e.contains("input_usd_per_mtok"), "{e}");
+        let e = err_of(&base.replace("cache_write_usd_per_mtok = 2.5\n", ""));
+        assert!(e.contains("cache_write_usd_per_mtok"), "{e}");
+        let e = err_of(&claude_toml(
+            "",
+            "api_base_url = \"http://api.anthropic.com\"",
+        ));
+        assert!(e.contains("loopback"), "{e}");
+        LiveConfig::from_toml_str(&claude_toml("", "api_base_url = \"http://127.0.0.1:9\""))
+            .unwrap();
+        for (k, v) in [
+            // Above every maintained context window (200k tokens).
+            ("max_input_tokens", "200001"),
+            ("max_input_tokens", "0"),
+            ("decider_max_output_tokens", "0"),
+            ("request_timeout_secs", "0"),
+            ("decision_deadline_secs", "0"),
+            ("max_retries", "9"),
+            ("max_response_bytes", "10"),
+            ("max_corrections", "4"),
+        ] {
+            let e = err_of(&claude_toml("", &format!("{k} = {v}")));
+            assert!(e.contains(k), "{k}={v}: {e}");
+        }
+    }
+
+    #[test]
+    fn helper_needs_a_smaller_carved_out_share() {
+        // Pacing day cap of 10 makes the helper share comparisons meaningful.
+        let h = "helper_model = \"claude-haiku-5-5\"";
+        let day10 = |extra_llm: &str| {
+            claude_toml(h, extra_llm).replace(
+                "max_llm_cost_usd_per_day = 60.0",
+                "max_llm_cost_usd_per_day = 10.0",
+            )
+        };
+        let e = err_of(&day10(""));
+        assert!(e.contains("helper_max_cost_usd_total is required"), "{e}");
+        let e = err_of(&day10(
+            "helper_max_cost_usd_total = 200.0\nhelper_max_cost_usd_per_day = 1.0",
+        ));
+        assert!(e.contains("smaller than llm.max_llm_cost_usd_total"), "{e}");
+        let e = err_of(&day10(
+            "helper_max_cost_usd_total = 5.0\nhelper_max_cost_usd_per_day = 10.0",
+        ));
+        assert!(
+            e.contains("smaller than llm.max_llm_cost_usd_per_day"),
+            "{e}"
+        );
+        LiveConfig::from_toml_str(&day10(
+            "helper_max_cost_usd_total = 5.0\nhelper_max_cost_usd_per_day = 1.0",
+        ))
+        .unwrap();
     }
 }

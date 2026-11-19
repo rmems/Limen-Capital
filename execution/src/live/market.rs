@@ -1,15 +1,19 @@
 //! Quote sources: the venue, or a seeded synthetic walk for offline paper runs.
 
 use crate::live::alpaca::types::BestBidAsk;
-use crate::live::alpaca::{AlpacaClient, ClientError};
+use crate::live::alpaca::AlpacaClient;
 use crate::live::risk::PairRules;
+use crate::live::robinhood::RobinhoodClient;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::future::Future;
 use std::pin::Pin;
 
+/// Quote fetch failure, from whichever venue the market source wraps.
+pub type QuoteError = Box<dyn std::error::Error + Send + Sync>;
+
 pub type QuoteFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<BestBidAsk, ClientError>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<BestBidAsk, QuoteError>> + Send + 'a>>;
 
 pub trait MarketSource: Send {
     fn label(&self) -> String;
@@ -27,7 +31,38 @@ impl MarketSource for AlpacaMarket {
     }
 
     fn quote<'a>(&'a mut self, symbol: &'a str) -> QuoteFuture<'a> {
-        Box::pin(async move { self.client.best_bid_ask(symbol).await })
+        Box::pin(async move {
+            self.client
+                .best_bid_ask(symbol)
+                .await
+                .map_err(QuoteError::from)
+        })
+    }
+}
+
+/// Read-only live quotes from Robinhood. Order writes are Alpaca-only, so
+/// this source feeds quotes only; the client's signed requests stay intact.
+pub struct RobinhoodMarket {
+    pub client: RobinhoodClient,
+}
+
+impl MarketSource for RobinhoodMarket {
+    fn label(&self) -> String {
+        format!("robinhood ({})", self.client.base_url())
+    }
+
+    fn quote<'a>(&'a mut self, symbol: &'a str) -> QuoteFuture<'a> {
+        Box::pin(async move {
+            self.client
+                .best_bid_ask(symbol)
+                .await
+                .map(|q| BestBidAsk {
+                    symbol: q.symbol,
+                    bid: q.bid,
+                    ask: q.ask,
+                })
+                .map_err(QuoteError::from)
+        })
     }
 }
 

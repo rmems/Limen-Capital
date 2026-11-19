@@ -1,6 +1,7 @@
 //! Hard limits, enforced in code, **before** any HTTP call to the venue.
 //!
-//! The decider never sees or edits these caps. `check` is a pure function of
+//! The decider never edits these caps; the Claude decider sees them only as
+//! read-only facts in its prompt. `check` is a pure function of
 //! (decision, state, pair rules, limits, timing inputs) and either approves a
 //! fully-specified limit order or rejects with a typed reason.
 //!
@@ -94,6 +95,19 @@ pub struct PairRules {
     pub min_order_amount: Option<f64>,
     pub max_order_size: Option<f64>,
     pub is_api_tradable: bool,
+}
+
+impl From<&crate::live::robinhood::types::TradingPair> for PairRules {
+    fn from(p: &crate::live::robinhood::types::TradingPair) -> Self {
+        Self {
+            symbol: p.symbol.clone(),
+            asset_increment: p.asset_increment,
+            quote_increment: p.quote_increment,
+            min_order_amount: p.min_order_amount,
+            max_order_size: p.max_order_size,
+            is_api_tradable: p.is_api_tradable,
+        }
+    }
 }
 
 impl PairRules {
