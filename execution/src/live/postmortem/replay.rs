@@ -61,8 +61,15 @@ impl Stats {
     }
 }
 
+/// A journal row's cells and the UTC day it is billed against.
+struct Row<'a> {
+    cells: &'a [String],
+    day: &'a str,
+}
+
 /// Validated LLM cost and whether the row's UTC day is `day`.
-fn checked_cost(c: &[String], day: &str) -> io::Result<(f64, bool)> {
+fn checked_cost(r: &Row<'_>) -> io::Result<(f64, bool)> {
+    let c = r.cells;
     // Unknown costs cannot be allowed to bypass the daily cap. Journals from
     // before the `llm calls` audit column are one cell shorter; `llm $` stays
     // at index 19 in both schemas.
@@ -81,21 +88,22 @@ fn checked_cost(c: &[String], day: &str) -> io::Result<(f64, bool)> {
         ts.with_timezone(&chrono::Utc)
             .format("%Y-%m-%d")
             .to_string()
-            == day,
+            == r.day,
     ))
 }
 
 /// Numeric fields a replayable row needs.
 fn wellformed(c: &[String]) -> bool {
-    number(&c[3]).is_some()
-        && number(&c[4]).is_some()
-        && c[1].parse::<u64>().is_ok()
-        && [7, 9, 10].iter().all(|i| number(&c[*i]).is_some())
+    c[1].parse::<u64>().is_ok()
+        && [3usize, 4, 7, 9, 10]
+            .iter()
+            .all(|i| number(&c[*i]).is_some())
 }
 
 /// Classify one journal row; returns whether it is usable for replay.
-fn row_stats(c: &[String], day: &str, s: &mut Stats) -> io::Result<bool> {
-    let (cost, today) = checked_cost(c, day)?;
+fn row_stats(r: &Row<'_>, s: &mut Stats) -> io::Result<bool> {
+    let c = r.cells;
+    let (cost, today) = checked_cost(r)?;
     if today {
         s.today_spend += cost;
     }
@@ -131,7 +139,8 @@ fn usable_rows(text: &str, day: &str, s: &mut Stats) -> io::Result<Vec<Vec<Strin
         if c.first().map(String::as_str) == Some(COLUMNS[0]) {
             continue;
         }
-        if row_stats(&c, day, s)? {
+        let r = Row { cells: &c, day };
+        if row_stats(&r, s)? {
             rows.push(c);
         }
     }
@@ -188,20 +197,26 @@ impl Sim<'_> {
     }
 
     /// One recorded sane quote: mark, roll the day, then act unless halted.
-    fn tick(&mut self, tick: u64, ts: DateTime<chrono::FixedOffset>, bid: f64, ask: f64) {
+    fn tick(&mut self, quote: &Tick) {
+        let Tick {
+            n: tick,
+            ts,
+            bid,
+            ask,
+        } = quote;
         self.last_mid = (bid + ask) / 2.0;
-        self.roll_day(ts);
+        self.roll_day(*ts);
         if self.halted {
             return;
         }
         self.book
-            .on_tick(bid, ask, tick, self.cfg.risk.stale_order_ticks);
+            .on_tick(*bid, *ask, *tick, self.cfg.risk.stale_order_ticks);
         let state = MarketState::new(
             ts.timestamp(),
-            tick,
+            *tick,
             &self.cfg.symbol,
-            bid,
-            ask,
+            *bid,
+            *ask,
             AccountState {
                 position_qty: self.book.free_position_qty(),
                 avg_cost_usd: self.book.avg_cost_usd,
@@ -231,22 +246,22 @@ impl Sim<'_> {
             &self.cfg.risk,
             &inputs,
         ) {
-            self.book.place(&order, tick);
+            self.book.place(&order, *tick);
             self.last_order = Some(state.ts);
         }
     }
 
     /// Returns an inconclusive reason, or None when the row was stepped.
     fn step(&mut self, row: &[String]) -> Option<&'static str> {
-        let tick: u64 = row[1].parse().unwrap();
+        let n: u64 = row[1].parse().unwrap();
         let ts = DateTime::parse_from_rfc3339(&row[0]).unwrap();
-        if tick != self.prev_tick + 1 || ts.timestamp() < self.prev_ts {
+        if n != self.prev_tick + 1 || ts.timestamp() < self.prev_ts {
             return Some("tick ordering or symbol mismatch");
         }
         if row[2] != self.cfg.symbol {
             return Some("tick ordering or symbol mismatch");
         }
-        self.prev_tick = tick;
+        self.prev_tick = n;
         self.prev_ts = ts.timestamp();
         let bid = number(&row[3]).unwrap();
         let ask = number(&row[4]).unwrap();
@@ -255,14 +270,33 @@ impl Sim<'_> {
         }
         self.observed_equity =
             number(&row[9]).unwrap() + number(&row[7]).unwrap() * (bid + ask) / 2.0;
-        self.tick(tick, ts, bid, ask);
+        self.tick(&Tick { n, ts, bid, ask });
         None
     }
 }
 
+/// One recorded tick's quote fields.
+struct Tick {
+    n: u64,
+    ts: DateTime<chrono::FixedOffset>,
+    bid: f64,
+    ask: f64,
+}
+
+/// A reconstructable run starts flat: no holdings, no resting orders, no fills.
+fn starts_flat(first: &[String]) -> bool {
+    [
+        number(&first[7]) == Some(0.0),
+        first[16] == "-",
+        first[17] == "-",
+    ]
+    .into_iter()
+    .all(|v| v)
+}
+
 fn replay(rows: &[Vec<String>], cfg: &LiveConfig) -> io::Result<String> {
     let first = &rows[0];
-    if number(&first[7]) != Some(0.0) || first[16] != "-" || first[17] != "-" {
+    if !starts_flat(first) {
         return Ok("Rules comparison: inconclusive (initial holdings or resting orders cannot be reconstructed).".into());
     }
     let book = PaperBook::new(number(&first[9]).unwrap(), cfg.paper_fee_ratio);
