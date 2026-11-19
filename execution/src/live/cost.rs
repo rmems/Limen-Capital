@@ -18,21 +18,13 @@ fn path(journal: &Path) -> PathBuf {
     p.into()
 }
 
-fn update<T>(journal: &Path, f: impl FnOnce(&mut Ledger) -> io::Result<T>) -> io::Result<T> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path(journal))?;
-    file.lock()?;
+fn read_ledger(file: &mut std::fs::File) -> io::Result<Ledger> {
     let mut text = String::new();
     file.read_to_string(&mut text)?;
-    let mut ledger: Ledger = if text.is_empty() {
-        Ledger::default()
-    } else {
-        serde_json::from_str(&text).map_err(io::Error::other)?
-    };
+    if text.is_empty() {
+        return Ok(Ledger::default());
+    }
+    let ledger: Ledger = serde_json::from_str(&text).map_err(io::Error::other)?;
     if ledger
         .days
         .values()
@@ -41,12 +33,28 @@ fn update<T>(journal: &Path, f: impl FnOnce(&mut Ledger) -> io::Result<T>) -> io
     {
         return Err(io::Error::other("invalid LLM cost ledger"));
     }
-    let value = f(&mut ledger)?;
-    let bytes = serde_json::to_vec(&ledger)?;
+    Ok(ledger)
+}
+
+fn write_ledger(file: &mut std::fs::File, ledger: &Ledger) -> io::Result<()> {
+    let bytes = serde_json::to_vec(ledger)?;
     file.rewind()?;
     file.write_all(&bytes)?;
     file.set_len(bytes.len() as u64)?;
-    file.sync_all()?;
+    file.sync_all()
+}
+
+fn update<T>(journal: &Path, f: impl FnOnce(&mut Ledger) -> io::Result<T>) -> io::Result<T> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path(journal))?;
+    file.lock()?;
+    let mut ledger = read_ledger(&mut file)?;
+    let value = f(&mut ledger)?;
+    write_ledger(&mut file, &ledger)?;
     Ok(value)
 }
 

@@ -1,4 +1,4 @@
-#![cfg(feature = "live-robinhood")]
+#![cfg(feature = "live-alpaca")]
 
 use std::process::Command;
 

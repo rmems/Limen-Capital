@@ -8,6 +8,7 @@ fn config(dir: &Path) -> LiveConfig {
     fs::write(&path, FIXTURE).unwrap();
     LiveConfig {
         journal_path: path.to_string_lossy().into(),
+        symbol: "BTC-USD".into(),
         ..LiveConfig::default()
     }
 }
@@ -85,6 +86,7 @@ async fn fixture_produces_note_with_sonnet_only_and_no_venue_requests() {
 fn replay_has_independent_equity_and_fee_expectations() {
     let cfg = LiveConfig {
         paper_fee_ratio: 0.0,
+        symbol: "BTC-USD".into(),
         ..LiveConfig::default()
     };
     let a = replay::analyze(FIXTURE, &cfg, "2026-11-09").unwrap();

@@ -47,26 +47,37 @@ fn parse_args(it: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut tick_limit_given = false;
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--paper" => args.paper = true,
-            "--once" => args.once = true,
-            "--postmortem" => args.postmortem = true,
-            "--max-ticks" => {
-                tick_limit_given = true;
-                args.set_value(&a, &mut it)?;
+            "--paper" | "--once" | "--postmortem" | "-h" | "--help" => args.set_flag(&a)?,
+            other => {
+                tick_limit_given |= other == "--max-ticks";
+                args.set_value(other, &mut it)?;
             }
-            "-h" | "--help" => return Err(USAGE.to_string()),
-            other => args.set_value(other, &mut it)?,
         }
     }
-    if args.postmortem && (args.once || tick_limit_given || args.model.is_some()) {
-        return Err(
-            "--postmortem cannot use --once, --max-ticks, or --model (Sonnet 5.5 only)".into(),
-        );
-    }
-    Ok(args)
+    args.check_postmortem(tick_limit_given)
 }
 
 impl Args {
+    fn set_flag(&mut self, flag: &str) -> Result<(), String> {
+        match flag {
+            "--paper" => self.paper = true,
+            "--once" => self.once = true,
+            "--postmortem" => self.postmortem = true,
+            "-h" | "--help" => return Err(USAGE.to_string()),
+            _ => unreachable!("flag validated by parse_args"),
+        }
+        Ok(())
+    }
+
+    fn check_postmortem(self, tick_limit_given: bool) -> Result<Self, String> {
+        if self.postmortem && (self.once || tick_limit_given || self.model.is_some()) {
+            return Err(
+                "--postmortem cannot use --once, --max-ticks, or --model (Sonnet 5.5 only)".into(),
+            );
+        }
+        Ok(self)
+    }
+
     fn set_value(
         &mut self,
         flag: &str,
