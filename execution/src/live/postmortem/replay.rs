@@ -276,7 +276,9 @@ impl Sim<'_> {
     fn step(&mut self, row: &[String]) -> Option<&'static str> {
         let n: u64 = row[1].parse().unwrap();
         let ts = DateTime::parse_from_rfc3339(&row[0]).unwrap();
-        if n != self.prev_tick + 1 || ts.timestamp() < self.prev_ts {
+        // Ticks are recorded sparsely: a failed quote writes no row, and the
+        // shutdown row reuses the last tick number.
+        if n < self.prev_tick || ts.timestamp() < self.prev_ts {
             return Some("tick ordering or symbol mismatch");
         }
         if row[2] != self.cfg.symbol {
@@ -304,15 +306,12 @@ struct Tick {
     ask: f64,
 }
 
-/// A reconstructable run starts flat: no holdings, no resting orders, no fills.
+/// A reconstructable run starts flat: no holdings and no fills. An order
+/// placed on tick 1 is replayed by the sim itself, not reconstructed.
 fn starts_flat(first: &[String]) -> bool {
-    [
-        number(&first[7]) == Some(0.0),
-        first[16] == "-",
-        first[17] == "-",
-    ]
-    .into_iter()
-    .all(|v| v)
+    [number(&first[7]) == Some(0.0), first[17] == "-"]
+        .into_iter()
+        .all(|v| v)
 }
 
 fn replay(rows: &[Vec<String>], cfg: &LiveConfig) -> io::Result<String> {
