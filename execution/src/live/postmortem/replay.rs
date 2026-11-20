@@ -313,7 +313,8 @@ fn starts_flat(first: &[String]) -> bool {
     [
         number(&first[7]) == Some(0.0),
         first[17] == "-",
-        !first[16].contains("cancelled"),
+        // OrderState displays as `canceled`; match the stem to cover both.
+        !first[16].contains("cancel"),
     ]
     .into_iter()
     .all(|v| v)
