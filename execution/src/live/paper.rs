@@ -146,6 +146,22 @@ impl PaperBook {
         events
     }
 
+    /// Cancel every resting order (halt, Ctrl-C, exit).
+    pub fn cancel_all(&mut self, tick: u64) -> Vec<PaperEvent> {
+        let orders = std::mem::take(&mut self.open_orders);
+        self.cancels += orders.len() as u64;
+        orders
+            .into_iter()
+            .map(|mut order| {
+                order.state = OrderState::Canceled;
+                PaperEvent::Cancelled {
+                    age_ticks: tick.saturating_sub(order.placed_tick),
+                    order,
+                }
+            })
+            .collect()
+    }
+
     fn fill(&mut self, mut order: PaperOrder) -> PaperEvent {
         let price = order.limit_price;
         let qty = order.asset_qty;
@@ -262,6 +278,20 @@ mod tests {
         assert!(b.open_orders.is_empty());
         assert_eq!(b.cancels, 1);
         assert_eq!(b.cash_usd, 10.0);
+    }
+
+    #[test]
+    fn cancel_all_releases_every_reservation() {
+        let mut b = PaperBook::new(10.0, 0.0);
+        b.place(&approved(OrderSide::Buy, 100.0, 0.05), 3);
+        let ev = b.cancel_all(4);
+        assert!(
+            matches!(&ev[..], [PaperEvent::Cancelled { age_ticks: 1, order }] if order.state == OrderState::Canceled)
+        );
+        assert!(b.open_orders.is_empty());
+        assert_eq!(b.free_cash_usd(), 10.0);
+        assert_eq!(b.cancels, 1);
+        assert!(b.cancel_all(5).is_empty());
     }
 
     #[test]

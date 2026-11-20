@@ -24,7 +24,11 @@ pub mod alpaca;
 pub mod config;
 pub mod cost;
 pub mod decider;
+pub mod durable;
 pub mod journal;
+pub mod kill;
+pub mod ledger_bridge;
+pub mod live_book;
 pub mod r#loop;
 pub mod market;
 pub mod market_state;
@@ -35,6 +39,7 @@ pub mod risk;
 pub mod robinhood;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub mod venue;
 
 pub use alpaca::AlpacaClient;
 pub use config::{LiveConfig, Secrets};

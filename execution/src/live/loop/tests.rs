@@ -2,12 +2,15 @@ use super::*;
 use crate::live::config::MarketSourceConfig;
 use chrono::TimeZone;
 
+mod halt;
 mod notifications;
 
 fn cfg(journal: &std::path::Path, seed: u64) -> LiveConfig {
+    let state_dir = journal.with_extension("state");
     LiveConfig {
         tick_interval_secs: 1,
         journal_path: journal.to_string_lossy().into_owned(),
+        state_dir: state_dir.to_string_lossy().into_owned(),
         market: MarketSourceConfig::Synthetic {
             seed,
             start_price: Some(100_000.0),

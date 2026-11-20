@@ -8,10 +8,11 @@
 pub mod llm;
 
 use crate::live::decider::rules::RulesConfig;
+use crate::live::live_book::{LiveBookConfig, DEFAULT_UNCONFIRMED_GRACE_SECS};
 use crate::live::risk::RiskLimits;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Symbols this experiment may trade. One instrument per run. `AAPL`/`SPY`
 /// are the Alpaca equity pairs; `BTC-USD`/`ETH-USD` are the read-only
@@ -164,6 +165,14 @@ pub struct LiveConfig {
     pub rules: RulesConfig,
     /// Hard caps enforced by `risk::check`.
     pub risk: RiskLimits,
+    /// Directory holding the instance lock, the operator halt file
+    /// (`HALT`), the durable live state and the ledger audit log. Use one
+    /// directory per venue account: the lock inside it is what keeps two
+    /// processes from trading the same account.
+    pub state_dir: String,
+    /// Fee charged per live fill as a fraction of notional (Alpaca equities
+    /// are commission-free).
+    pub live_fee_ratio: f64,
     /// Claude roles, pricing, experiment budget and call bounds.
     pub llm: LlmConfig,
 }
@@ -184,6 +193,8 @@ impl Default for LiveConfig {
             decider: DeciderKind::Rules,
             rules: RulesConfig::default(),
             risk: RiskLimits::default(),
+            state_dir: "limen-state".to_string(),
+            live_fee_ratio: 0.0,
             llm: LlmConfig::default(),
         }
     }
@@ -199,6 +210,27 @@ impl LiveConfig {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let s = std::fs::read_to_string(path)?;
         Self::from_toml_str(&s)
+    }
+
+    pub fn lock_path(&self) -> PathBuf {
+        Path::new(&self.state_dir).join("limen-live.lock")
+    }
+
+    /// Touch this file to cancel resting orders and stop the loop.
+    pub fn halt_path(&self) -> PathBuf {
+        Path::new(&self.state_dir).join("HALT")
+    }
+
+    /// Durable book settings for live mode.
+    pub fn live_book_config(&self) -> LiveBookConfig {
+        let dir = Path::new(&self.state_dir);
+        LiveBookConfig {
+            symbol: self.symbol.clone(),
+            state_path: dir.join("live-state.json"),
+            ledger_path: dir.join("ledger-audit.jsonl"),
+            fee_ratio: self.live_fee_ratio,
+            unconfirmed_grace_secs: DEFAULT_UNCONFIRMED_GRACE_SECS,
+        }
     }
 
     /// Asset code for the configured pair (`BTC` for `BTC-USD`; equities like
@@ -236,6 +268,17 @@ impl LiveConfig {
             return Err(ConfigError::Invalid(
                 "tick_interval_secs must be > 0".into(),
             ));
+        }
+        if self.state_dir.trim().is_empty() {
+            return Err(ConfigError::Invalid("state_dir must not be empty".into()));
+        }
+        if !(self.live_fee_ratio.is_finite() && (0.0..0.1).contains(&self.live_fee_ratio)) {
+            return Err(ConfigError::Invalid(
+                "live_fee_ratio must be in [0, 0.1)".into(),
+            ));
+        }
+        if self.model.trim().is_empty() {
+            return Err(ConfigError::Invalid("model must not be empty".into()));
         }
         Ok(())
     }
@@ -495,7 +538,16 @@ mod tests {
         assert_eq!(c.market, MarketSourceConfig::Alpaca);
         assert_eq!(c.decider, DeciderKind::Rules);
         assert_eq!(c.paper_fee_ratio, 0.0045);
+        assert_eq!(c.asset_code(), "AAPL");
+        assert_eq!(c.state_dir, "limen-state");
+        assert_eq!(c.halt_path(), Path::new("limen-state/HALT"));
+        assert_eq!(c.lock_path(), Path::new("limen-state/limen-live.lock"));
+        let book = c.live_book_config();
+        assert_eq!(book.state_path, Path::new("limen-state/live-state.json"));
+        assert_eq!(book.fee_ratio, 0.0);
         c.validate().unwrap();
+        assert!(LiveConfig::from_toml_str("state_dir = \" \"").is_err());
+        assert!(LiveConfig::from_toml_str("live_fee_ratio = 0.5").is_err());
     }
 
     #[test]
