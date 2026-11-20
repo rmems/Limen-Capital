@@ -28,7 +28,7 @@ impl ConfidenceStats {
             self.min = Some(self.min.map_or(confidence, |v| v.min(confidence)));
             self.max = Some(self.max.map_or(confidence, |v| v.max(confidence)));
             self.mean += (confidence as f64 - self.mean) / (self.count - self.invalid) as f64;
-            self.deciles[((confidence * 10.0) as usize).min(9)] += 1;
+            self.deciles[((confidence * 10.0).floor() as usize).min(9)] += 1;
         } else {
             self.invalid += 1;
         }
