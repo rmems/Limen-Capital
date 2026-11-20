@@ -192,7 +192,10 @@ impl LlmCaller {
         ledger: SharedLedger,
         clock: Clock,
     ) -> Result<Self, String> {
-        let journal = PathBuf::from(&cfg.journal_path);
+        // Post-mortems resolve the journal before writing the sidecar, so the
+        // caller must too when the configured path is a symlink.
+        let journal = std::fs::canonicalize(&cfg.journal_path)
+            .unwrap_or_else(|_| PathBuf::from(&cfg.journal_path));
         let cfg = &cfg.llm;
         let http = reqwest::Client::builder()
             // The key header must never follow a redirect to another host.

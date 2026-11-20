@@ -306,12 +306,17 @@ struct Tick {
     ask: f64,
 }
 
-/// A reconstructable run starts flat: no holdings and no fills. An order
-/// placed on tick 1 is replayed by the sim itself, not reconstructed.
+/// A reconstructable run starts flat: no holdings, no fills, and no order
+/// cancelled before the journal's first row (a split mid-run journal). An
+/// order placed on tick 1 is replayed by the sim itself, not reconstructed.
 fn starts_flat(first: &[String]) -> bool {
-    [number(&first[7]) == Some(0.0), first[17] == "-"]
-        .into_iter()
-        .all(|v| v)
+    [
+        number(&first[7]) == Some(0.0),
+        first[17] == "-",
+        !first[16].contains("cancelled"),
+    ]
+    .into_iter()
+    .all(|v| v)
 }
 
 fn replay(rows: &[Vec<String>], cfg: &LiveConfig) -> io::Result<String> {
