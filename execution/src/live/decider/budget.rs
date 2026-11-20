@@ -332,7 +332,7 @@ impl Inner {
             s.day_committed(day).get(role) + s.reserved(|r| r.day == day && r.role == role);
         Self::check_limit(
             "cumulative".into(),
-            s.used_total_usd() + req.external_day_usd,
+            s.used_total_usd(),
             amount,
             s.cap_total_usd,
         )?;
@@ -406,7 +406,7 @@ pub struct ReserveRequest<'a> {
     /// Latest instant the call could still be running.
     pub call_end: DateTime<Utc>,
     /// Same-day spend held outside this ledger (the journal's post-mortem
-    /// sidecar); it counts against the cumulative and daily caps.
+    /// sidecar); it counts against the daily cap only.
     pub external_day_usd: f64,
 }
 
