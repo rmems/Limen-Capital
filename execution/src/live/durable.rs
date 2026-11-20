@@ -205,6 +205,12 @@ impl StateStore {
             .unwrap_or(Path::new("."));
         fs::create_dir_all(dir)?;
         let body = serde_json::to_vec_pretty(state).map_err(io::Error::other)?;
+        self.commit(dir, &body)
+    }
+
+    /// Write the body to `path.tmp`, fsync, rename over `path`, then fsync
+    /// the directory so the rename itself is durable (POSIX).
+    fn commit(&self, dir: &Path, body: &[u8]) -> io::Result<()> {
         let mut tmp_name = self.path.as_os_str().to_owned();
         tmp_name.push(".tmp");
         let tmp = PathBuf::from(tmp_name);
@@ -214,11 +220,10 @@ impl StateStore {
                 .write(true)
                 .truncate(true)
                 .open(&tmp)?;
-            f.write_all(&body)?;
+            f.write_all(body)?;
             f.sync_all()?;
         }
         fs::rename(&tmp, &self.path)?;
-        // Directory fsync makes the rename itself durable (POSIX).
         #[cfg(unix)]
         File::open(dir)?.sync_all()?;
         Ok(())

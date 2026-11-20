@@ -121,6 +121,21 @@ impl LiveBook {
         cfg: LiveBookConfig,
         now: i64,
     ) -> Result<Self, BookError> {
+        let mut book = Self::load(venue, cfg, now)?;
+        book.reconcile(now).await?;
+        info!(
+            "live book: account reconciled; {} open order(s), position {} {}, day baseline {:+.4}",
+            book.state.open_orders.len(),
+            book.basis.position_qty,
+            book.cfg.symbol,
+            book.state.day_start_realized_usd,
+        );
+        Ok(book)
+    }
+
+    /// Load persisted state (or a fresh day state), rebuild the cost basis
+    /// and the ledger bridge.
+    fn load(venue: Box<dyn Venue>, cfg: LiveBookConfig, now: i64) -> Result<Self, BookError> {
         let store = StateStore::new(&cfg.state_path);
         let state = store
             .load()?
@@ -135,7 +150,7 @@ impl LiveBook {
         }
         let basis = CostBasis::from_fills(&state.fills).map_err(BookError::Refused)?;
         let ledger = LedgerBridge::open(&cfg.ledger_path)?;
-        let mut book = Self {
+        Ok(Self {
             venue,
             cfg,
             store,
@@ -145,21 +160,17 @@ impl LiveBook {
             ledger_cursor: 0,
             cash_usd: 0.0,
             buying_power_usd: 0.0,
-        };
-        book.bind_account().await?;
-        book.roll_day(now)?;
-        book.refresh_tracked(now).await?;
-        book.refuse_foreign_orders().await?;
-        book.sync_account().await?;
-        book.persist()?;
-        info!(
-            "live book: account reconciled; {} open order(s), position {} {}, day baseline {:+.4}",
-            book.state.open_orders.len(),
-            book.basis.position_qty,
-            book.cfg.symbol,
-            book.state.day_start_realized_usd,
-        );
-        Ok(book)
+        })
+    }
+
+    /// The ordered startup reconciliation steps.
+    async fn reconcile(&mut self, now: i64) -> Result<(), BookError> {
+        self.bind_account().await?;
+        self.roll_day(now)?;
+        self.refresh_tracked(now).await?;
+        self.refuse_foreign_orders().await?;
+        self.sync_account().await?;
+        self.persist()
     }
 
     async fn bind_account(&mut self) -> Result<(), BookError> {
@@ -266,38 +277,53 @@ impl LiveBook {
     async fn refresh_tracked(&mut self, now: i64) -> Result<(), BookError> {
         let mut idx = 0;
         while idx < self.state.open_orders.len() {
-            let tracked = self.state.open_orders[idx].clone();
-            let keep = match self
-                .venue
-                .order_by_client_id(&tracked.client_order_id)
-                .await?
-            {
-                Some(order) => self.adopt(idx, &order, now)?,
-                None if tracked.status == IntentStatus::Acknowledged => {
-                    return Err(BookError::Refused(format!(
-                        "acknowledged order {} is missing at the venue",
-                        tracked.client_order_id
-                    )))
-                }
-                None if now - tracked.submitted_secs >= self.cfg.unconfirmed_grace_secs => {
-                    warn!(
-                        "intent {} never reached the venue; dropping it (not resubmitting)",
-                        tracked.client_order_id
-                    );
-                    false
-                }
-                None => {
-                    self.state.open_orders[idx].status = IntentStatus::Unconfirmed;
-                    true
-                }
-            };
-            if keep {
+            if self.refresh_one(idx, now).await? {
                 idx += 1;
             } else {
                 self.state.open_orders.remove(idx);
             }
         }
         Ok(())
+    }
+
+    /// One lookup: adopt the venue order, or classify its absence. Returns
+    /// whether the tracked intent stays in `open_orders`.
+    async fn refresh_one(&mut self, idx: usize, now: i64) -> Result<bool, BookError> {
+        let tracked = self.state.open_orders[idx].clone();
+        match self
+            .venue
+            .order_by_client_id(&tracked.client_order_id)
+            .await?
+        {
+            Some(order) => self.adopt(idx, &order, now),
+            None => self.classify_missing(idx, &tracked, now),
+        }
+    }
+
+    /// The venue has no order under `client_order_id`: an acknowledged one
+    /// is corruption, an expired grace period drops the intent, otherwise
+    /// mark it unconfirmed and keep it.
+    fn classify_missing(
+        &mut self,
+        idx: usize,
+        tracked: &TrackedOrder,
+        now: i64,
+    ) -> Result<bool, BookError> {
+        if tracked.status == IntentStatus::Acknowledged {
+            return Err(BookError::Refused(format!(
+                "acknowledged order {} is missing at the venue",
+                tracked.client_order_id
+            )));
+        }
+        if now - tracked.submitted_secs >= self.cfg.unconfirmed_grace_secs {
+            warn!(
+                "intent {} never reached the venue; dropping it (not resubmitting)",
+                tracked.client_order_id
+            );
+            return Ok(false);
+        }
+        self.state.open_orders[idx].status = IntentStatus::Unconfirmed;
+        Ok(true)
     }
 
     async fn refuse_foreign_orders(&self) -> Result<(), BookError> {
@@ -345,28 +371,7 @@ impl LiveBook {
         order: &ApprovedOrder,
         now: i64,
     ) -> Result<PlaceOutcome, BookError> {
-        if order.symbol != self.cfg.symbol {
-            return Err(BookError::Refused(format!(
-                "order for {} on a {} book",
-                order.symbol, self.cfg.symbol
-            )));
-        }
-        if self
-            .state
-            .open_orders
-            .iter()
-            .any(|t| t.client_order_id == order.client_order_id)
-            || self
-                .state
-                .fills
-                .iter()
-                .any(|f| f.client_order_id == order.client_order_id)
-        {
-            return Err(BookError::Refused(format!(
-                "client_order_id {} was already submitted",
-                order.client_order_id
-            )));
-        }
+        self.check_placeable(order)?;
         self.state.open_orders.push(TrackedOrder {
             client_order_id: order.client_order_id.clone(),
             venue_order_id: None,
@@ -379,6 +384,38 @@ impl LiveBook {
         });
         self.state.last_order_secs = Some(now);
         self.persist()?;
+        self.submit(order, now).await
+    }
+
+    /// Symbol must match the book's pair and `client_order_id` must be new.
+    fn check_placeable(&self, order: &ApprovedOrder) -> Result<(), BookError> {
+        if order.symbol != self.cfg.symbol {
+            return Err(BookError::Refused(format!(
+                "order for {} on a {} book",
+                order.symbol, self.cfg.symbol
+            )));
+        }
+        let seen = self
+            .state
+            .open_orders
+            .iter()
+            .any(|t| t.client_order_id == order.client_order_id)
+            || self
+                .state
+                .fills
+                .iter()
+                .any(|f| f.client_order_id == order.client_order_id);
+        if seen {
+            return Err(BookError::Refused(format!(
+                "client_order_id {} was already submitted",
+                order.client_order_id
+            )));
+        }
+        Ok(())
+    }
+
+    /// POST the persisted intent; a failed POST is resolved by lookup.
+    async fn submit(&mut self, order: &ApprovedOrder, now: i64) -> Result<PlaceOutcome, BookError> {
         let idx = self.state.open_orders.len() - 1;
         let outcome = match self.venue.place_limit(order).await {
             Ok(venue_order) => {
@@ -442,21 +479,9 @@ impl LiveBook {
         let mut sent = 0;
         let mut first_err = None;
         for tracked in self.state.open_orders.clone() {
-            let id = match tracked.venue_order_id {
-                Some(id) => Some(id),
-                None => match self
-                    .venue
-                    .order_by_client_id(&tracked.client_order_id)
-                    .await
-                {
-                    Ok(found) => found.filter(|o| !o.status.is_terminal()).map(|o| o.id),
-                    Err(e) => {
-                        first_err.get_or_insert(BookError::Venue(e));
-                        None
-                    }
-                },
+            let Some(id) = self.venue_id_for(&tracked, &mut first_err).await else {
+                continue;
             };
-            let Some(id) = id else { continue };
             sent += 1;
             match self.venue.cancel(&id).await {
                 Ok(()) => info!("CANCEL {id} ({})", tracked.client_order_id),
@@ -472,6 +497,30 @@ impl LiveBook {
         match first_err {
             Some(e) => Err(e),
             None => Ok(sent),
+        }
+    }
+
+    /// The venue order id to cancel: the bound id, or a `client_order_id`
+    /// lookup for an intent whose POST never returned. Lookup failures are
+    /// collected, not fatal.
+    async fn venue_id_for(
+        &mut self,
+        tracked: &TrackedOrder,
+        first_err: &mut Option<BookError>,
+    ) -> Option<String> {
+        match tracked.venue_order_id.clone() {
+            Some(id) => Some(id),
+            None => match self
+                .venue
+                .order_by_client_id(&tracked.client_order_id)
+                .await
+            {
+                Ok(found) => found.filter(|o| !o.status.is_terminal()).map(|o| o.id),
+                Err(e) => {
+                    first_err.get_or_insert(BookError::Venue(e));
+                    None
+                }
+            },
         }
     }
 

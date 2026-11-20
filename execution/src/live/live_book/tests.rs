@@ -91,8 +91,18 @@ async fn kill_and_restart_mid_order_adopts_one_order_keeps_baseline_and_halts() 
     assert_eq!(outcome, PlaceOutcome::Unconfirmed);
     drop(book); // kill -9: no cleanup runs
 
-    // Session 2 (same UTC day): one venue order for the intent, adopted.
-    let mut book = open(&venue, dir.path(), T0 + 60).await.unwrap();
+    let mut book = reopen_and_check_adoption(&venue, dir.path(), hand).await;
+    daily_loss_halt_cancels(&mut book, &venue).await;
+    check_ledger_rows(dir.path(), hand);
+    // Cash is the venue's, not a seeded paper balance.
+    assert!((book.cash_usd() - venue.cash()).abs() < 1e-12);
+    assert!((book.cash_usd() - (100.0 + hand)).abs() < 1e-9);
+}
+
+/// Session 2 (same UTC day): one venue order for the intent, adopted; the
+/// daily-loss baseline survives the restart.
+async fn reopen_and_check_adoption(venue: &MockVenue, dir: &Path, hand: f64) -> LiveBook {
+    let book = open(venue, dir, T0 + 60).await.unwrap();
     assert_eq!(venue.post_count(), 3, "no POST is resent on restart");
     let buy2: Vec<_> = venue
         .orders()
@@ -109,8 +119,11 @@ async fn kill_and_restart_mid_order_adopts_one_order_keeps_baseline_and_halts() 
     assert_eq!(book.day_start_realized_usd(), 0.0);
     assert!((book.daily_pnl_usd() - hand).abs() < 1e-12);
     assert_eq!(book.last_order_secs(), Some(T0 + 10));
+    book
+}
 
-    // The daily-loss gate halts the day; the halt cancels the resting order.
+/// The daily-loss gate halts the day; the halt cancels the resting order.
+async fn daily_loss_halt_cancels(book: &mut LiveBook, venue: &MockVenue) {
     let limits = RiskLimits {
         max_daily_loss_usd: 0.5,
         ..RiskLimits::default()
@@ -135,10 +148,12 @@ async fn kill_and_restart_mid_order_adopts_one_order_keeps_baseline_and_halts() 
         .unwrap();
     assert_eq!(buy2.status, VenueOrderStatus::Canceled);
     assert!(book.open_orders().is_empty());
+}
 
-    // Ledger audit: one row per fill, never duplicated by the restart, and
-    // the sell row's realized PnL is the hand computation.
-    let rows = ledger_rows(dir.path());
+/// Ledger audit: one row per fill, never duplicated by the restart, and the
+/// sell row's realized PnL is the hand computation.
+fn check_ledger_rows(dir: &Path, hand: f64) {
+    let rows = ledger_rows(dir);
     assert_eq!(rows.len(), 2, "{rows:?}");
     assert_eq!(rows[0]["action"], "buy");
     assert_eq!(rows[1]["action"], "sell");
@@ -148,9 +163,6 @@ async fn kill_and_restart_mid_order_adopts_one_order_keeps_baseline_and_halts() 
         .as_str()
         .unwrap()
         .contains("realized_usd=-0.50950000"));
-    // Cash is the venue's, not a seeded paper balance.
-    assert!((book.cash_usd() - venue.cash()).abs() < 1e-12);
-    assert!((book.cash_usd() - (100.0 + hand)).abs() < 1e-9);
 }
 
 #[tokio::test]

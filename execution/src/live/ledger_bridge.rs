@@ -80,6 +80,20 @@ impl LedgerBridge {
         let realized = self.basis.apply(fill)?;
         self.steps += 1;
         let notional = fill.qty * fill.price;
+        self.apply_to_wallet(fill, notional, realized);
+        self.wallet.trade_count += 1;
+        if self.recorded.contains(&fill.fill_id) {
+            return Ok(());
+        }
+        let row = self.audit_row(fill, notional, realized);
+        // The ghost log is an audit aid; a write failure must not undo a
+        // venue fill that already happened.
+        let _ = append_ghost_log(&row, &self.path.to_string_lossy());
+        self.recorded.insert(fill.fill_id.clone());
+        Ok(())
+    }
+
+    fn apply_to_wallet(&mut self, fill: &FillRecord, notional: f64, realized: f64) {
         let asset = fill.symbol.as_str();
         match fill.side {
             OrderSide::Buy => {
@@ -91,36 +105,37 @@ impl LedgerBridge {
                 }
                 self.wallet.balance_atp -= (notional + fill.fee_usd) as f32;
             }
-            OrderSide::Sell => {
-                if self.basis.position_qty > 0.0 {
-                    self.wallet
-                        .balances
-                        .insert(asset.to_string(), self.basis.position_qty as f32);
-                } else {
-                    self.wallet.balances.remove(asset);
-                    self.wallet.entry_prices.remove(asset);
-                }
-                self.wallet.balance_atp += (notional - fill.fee_usd) as f32;
-                self.wallet.cumulative_pnl += realized as f32;
-                *self
-                    .wallet
-                    .realized_pnls
-                    .entry(asset.to_string())
-                    .or_insert(0.0) += realized as f32;
-                self.wallet.record_pnl_and_update_kelly(realized as f32);
-            }
+            OrderSide::Sell => self.apply_sell_to_wallet(asset, notional, fill.fee_usd, realized),
         }
-        self.wallet.trade_count += 1;
-        if self.recorded.contains(&fill.fill_id) {
-            return Ok(());
+    }
+
+    fn apply_sell_to_wallet(&mut self, asset: &str, notional: f64, fee: f64, realized: f64) {
+        if self.basis.position_qty > 0.0 {
+            self.wallet
+                .balances
+                .insert(asset.to_string(), self.basis.position_qty as f32);
+        } else {
+            self.wallet.balances.remove(asset);
+            self.wallet.entry_prices.remove(asset);
         }
-        let row = GhostTradeLog {
+        self.wallet.balance_atp += (notional - fee) as f32;
+        self.wallet.cumulative_pnl += realized as f32;
+        *self
+            .wallet
+            .realized_pnls
+            .entry(asset.to_string())
+            .or_insert(0.0) += realized as f32;
+        self.wallet.record_pnl_and_update_kelly(realized as f32);
+    }
+
+    fn audit_row(&self, fill: &FillRecord, notional: f64, realized: f64) -> GhostTradeLog {
+        GhostTradeLog {
             timestamp: DateTime::<Utc>::from_timestamp(fill.ts_secs, 0)
                 .unwrap_or_default()
                 .to_rfc3339(),
             step: self.steps,
             action: fill.side.to_string(),
-            asset: asset.to_string(),
+            asset: fill.symbol.clone(),
             price_usd: fill.price as f32,
             quantity: fill.qty as f32,
             trade_value_usdt: notional as f32,
@@ -135,12 +150,7 @@ impl LedgerBridge {
                 realized,
                 self.observed_kelly_fraction(),
             ),
-        };
-        // The ghost log is an audit aid; a write failure must not undo a
-        // venue fill that already happened.
-        let _ = append_ghost_log(&row, &self.path.to_string_lossy());
-        self.recorded.insert(fill.fill_id.clone());
-        Ok(())
+        }
     }
 }
 
