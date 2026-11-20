@@ -167,8 +167,6 @@ impl ExecutionEngine {
             };
         }
 
-        if !signal.price.is_finite()
-            || signal.price <= 0.0
         let (mut sizing, quantity) = match self.size(&signal, latency) {
             Ok(pair) => pair,
             Err(decision) => return decision,
@@ -210,6 +208,127 @@ impl ExecutionEngine {
             latency_ns: latency,
             sizing,
         }
+    }
+
+    /// Policy sizing: fractional Kelly from ATP, reject no-edge/zero sizes,
+    /// then cap the order's quote notional (oversize is capped, not rejected).
+    fn size(
+        &mut self,
+        signal: &TradeSignal,
+        latency: i64,
+    ) -> Result<(PositionSizingDecision, f64), ExecutionDecision> {
+        if !signal.price.is_finite()
+            || signal.price <= 0.0
+            || !(signal.price as f32).is_finite()
+            || (signal.price as f32) <= 0.0
+            || !self.max_order_notional.is_finite()
+            || self.max_order_notional <= 0.0
+        {
+            return Err(ExecutionDecision::RejectedPositionLimit {
+                reason: "invalid price or notional limit".into(),
+                latency_ns: latency,
+            });
+        }
+        self.sync_sizer_balance();
+        let sizing = self
+            .sizer
+            .size_position(signal.confidence, signal.price, &signal.ticker);
+        let quantity = if self.use_kelly_sizing {
+            sizing.position_units
+        } else {
+            signal.quantity
+        };
+        if self.use_kelly_sizing && sizing.kelly_fraction <= 0.0 {
+            warn!(
+                "[{}] No edge under Kelly (conf={}, b={})",
+                signal.ticker,
+                signal.confidence,
+                self.sizer.expected_payoff_ratio()
+            );
+            return Err(ExecutionDecision::RejectedNoEdge {
+                reason: format!(
+                    "Kelly fraction 0 for confidence {} (need higher conf or larger b)",
+                    signal.confidence
+                ),
+                latency_ns: latency,
+                kelly_fraction: sizing.kelly_fraction,
+            });
+        }
+        if !quantity.is_finite() || quantity <= 0.0 {
+            return Err(ExecutionDecision::RejectedNoEdge {
+                reason: "position size is zero".into(),
+                latency_ns: latency,
+                kelly_fraction: sizing.kelly_fraction,
+            });
+        }
+        Ok((sizing, quantity.min(self.max_order_notional / signal.price)))
+    }
+
+    /// Commit the capped quantity to the legacy f32 ghost ledger once.
+    /// Returns the actual filled quantity and price.
+    fn fill(
+        &mut self,
+        signal: &TradeSignal,
+        quantity: f64,
+        reason: &str,
+        latency: i64,
+    ) -> Result<(f64, f64), ExecutionDecision> {
+        let fill_price = signal.price as f32;
+        // Clamp to what the ledger can commit: sells to held units, buys to
+        // affordable notional (notional plus fee against balance_atp).
+        let available = match signal.side {
+            TradeSide::Sell => self.ghost_wallet.balance(&signal.ticker) as f64,
+            TradeSide::Buy => {
+                self.ghost_wallet.balance_atp as f64
+                    / (signal.price * (1.0 + METABOLIC_COST as f64))
+            }
+            TradeSide::Neutral => quantity,
+        };
+        let fill_quantity = (quantity.min(available)) as f32;
+        if !fill_quantity.is_finite() || fill_quantity <= 0.0 {
+            return Err(ExecutionDecision::RejectedFill {
+                reason: "insufficient holdings or funds for a positive fill".into(),
+                latency_ns: latency,
+            });
+        }
+        let Some(step) = self.step_counter.checked_add(1) else {
+            return Err(ExecutionDecision::RejectedFill {
+                reason: "execution step counter exhausted".into(),
+                latency_ns: latency,
+            });
+        };
+        self.step_counter = step;
+        let trades_before = self.ghost_wallet.trade_count;
+        let fill = GhostFill {
+            asset: &signal.ticker,
+            side: match signal.side {
+                TradeSide::Buy => Side::Buy,
+                TradeSide::Sell => Side::Sell,
+                TradeSide::Neutral => unreachable!("neutral signals return before sizing"),
+            },
+            price: fill_price,
+            quantity: fill_quantity,
+            fee: fill_price * fill_quantity * METABOLIC_COST,
+            step,
+            reason,
+        };
+        let record = match apply_ghost_fill(&mut self.ghost_wallet, fill, Some(&self.log_path)) {
+            Ok(record) if self.ghost_wallet.trade_count > trades_before => record,
+            Ok(_) => {
+                return Err(ExecutionDecision::RejectedFill {
+                    reason: "ledger did not commit a fill".into(),
+                    latency_ns: latency,
+                });
+            }
+            Err(err) => {
+                warn!("[{}] Fill rejected: {}", signal.ticker, err);
+                return Err(ExecutionDecision::RejectedFill {
+                    reason: err.to_string(),
+                    latency_ns: latency,
+                });
+            }
+        };
+        Ok((record.quantity as f64, record.price_usd as f64))
     }
 }
 
@@ -516,7 +635,9 @@ mod tests {
                                 (engine.ghost_wallet.balance("TESTSYM") as f64 - before_qty).abs();
                             assert!((delta - quantity).abs() < quantity * 1e-6);
                             if side == TradeSide::Buy {
-                                assert!(before_atp - engine.ghost_wallet.balance_atp as f64 <= 5.0);
+                                // Notional is capped; ATP spend adds friction.
+                                let spent = before_atp - engine.ghost_wallet.balance_atp as f64;
+                                assert!(spent <= quantity * price * 1.001 + 0.0005);
                             }
                         }
                         other => panic!("expected capped execution, got {other:?}"),

@@ -65,9 +65,7 @@ fn number(
 ) -> Result<f64, String> {
     let Some(raw) = lookup(name)? else {
         return default.ok_or_else(|| {
-            format!(
-                "{name} is required: expected gain / expected loss, not a return percentage"
-            )
+            format!("{name} is required: expected gain / expected loss, not a return percentage")
         });
     };
     let value = raw

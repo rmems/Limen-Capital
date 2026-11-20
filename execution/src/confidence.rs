@@ -17,6 +17,8 @@ pub struct ConfidenceStats {
     pub no_edge: u64,
     pub neutral: u64,
     pub position_limit: u64,
+    /// No fill committed: insufficient holdings/funds or log I/O failure.
+    pub fill: u64,
 }
 
 impl ConfidenceStats {
@@ -36,6 +38,7 @@ impl ConfidenceStats {
             ExecutionDecision::RejectedNoEdge { .. } => self.no_edge += 1,
             ExecutionDecision::Neutral { .. } => self.neutral += 1,
             ExecutionDecision::RejectedPositionLimit { .. } => self.position_limit += 1,
+            ExecutionDecision::RejectedFill { .. } => self.fill += 1,
         }
     }
 

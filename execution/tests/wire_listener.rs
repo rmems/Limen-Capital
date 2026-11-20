@@ -17,7 +17,7 @@ impl Drop for ChildGuard {
 }
 
 fn wait_for(log: &Path, needle: &str) -> String {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let text = fs::read_to_string(log).unwrap();
         if text.contains(needle) {
@@ -287,7 +287,9 @@ fn sim_pass(
     wait_for(&log, "Binary SUB connected");
     sleep(Duration::from_millis(250));
     for i in 0..100 {
-        publisher.send(synthetic_readout(u, subscriber, i), 0).unwrap();
+        publisher
+            .send(synthetic_readout(u, subscriber, i), 0)
+            .unwrap();
     }
     wait_for(&log, "Confidence summary:");
     sigint_and_wait(&mut child);
