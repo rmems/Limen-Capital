@@ -74,11 +74,16 @@ impl KellyCriterion {
     /// Risk-adjusted Kelly (fractional Kelly)
     /// Most professionals use 0.5x or 0.25x Kelly for safety
     pub fn fractional_kelly(kelly_frac: f64, fraction: f64) -> f64 {
-        if !kelly_frac.is_finite()
-            || !(0.0..=1.0).contains(&kelly_frac)
-            || !fraction.is_finite()
-            || !(0.0 < fraction && fraction <= 1.0)
-        {
+        if !kelly_frac.is_finite() {
+            return 0.0;
+        }
+        if !(0.0..=1.0).contains(&kelly_frac) {
+            return 0.0;
+        }
+        if !fraction.is_finite() {
+            return 0.0;
+        }
+        if !(0.0 < fraction && fraction <= 1.0) {
             return 0.0;
         }
         (kelly_frac * fraction).min(1.0)

@@ -228,17 +228,15 @@ fn market_sim_has_nontrivial_executions_and_logs_confidence_distribution() {
             .spawn()
             .unwrap(),
     );
+    let io = SimIo {
+        market_ep: &market_ep,
+        readout_ep: &readout_ep,
+        subscriber: &subscriber,
+        publisher: &publisher,
+    };
     // Run the identical fixture at the old odds and explicit synthetic odds.
     for (b, expected_executed, expected_no_edge) in [("0.05", 0, 70), ("5", 60, 10)] {
-        let summary = sim_pass(
-            &u,
-            tmp.path().join(b).as_path(),
-            &market_ep,
-            &readout_ep,
-            &subscriber,
-            &publisher,
-            b,
-        );
+        let summary = sim_pass(&u, tmp.path().join(b).as_path(), &io, b);
         assert_summary(&summary, expected_executed, expected_no_edge);
         if expected_executed > 0 {
             let fills = fs::read_to_string(tmp.path().join(b).join("ghost_trades.jsonl")).unwrap();
@@ -253,24 +251,24 @@ fn market_sim_has_nontrivial_executions_and_logs_confidence_distribution() {
     }
 }
 
+/// ZMQ endpoints and sockets shared by both sim passes.
+struct SimIo<'a> {
+    market_ep: &'a str,
+    readout_ep: &'a str,
+    subscriber: &'a zmq::Socket,
+    publisher: &'a zmq::Socket,
+}
+
 /// One listener pass over 100 synthetic readouts against the live market_sim
 /// feed; returns the final `Confidence summary:` JSON.
-fn sim_pass(
-    u: &TradeUniverse,
-    dir: &Path,
-    market_ep: &str,
-    readout_ep: &str,
-    subscriber: &zmq::Socket,
-    publisher: &zmq::Socket,
-    b: &str,
-) -> serde_json::Value {
+fn sim_pass(u: &TradeUniverse, dir: &Path, io: &SimIo, b: &str) -> serde_json::Value {
     fs::create_dir(dir).unwrap();
     let log = dir.join("listener.log");
     let mut child = ChildGuard(
         Command::new(env!("CARGO_BIN_EXE_limen-execution"))
             .current_dir(dir)
-            .env("LIMEN_IPC_SUB", market_ep)
-            .env("LIMEN_IPC_PUB", readout_ep)
+            .env("LIMEN_IPC_SUB", io.market_ep)
+            .env("LIMEN_IPC_PUB", io.readout_ep)
             .env("LIMEN_WIRE", "binary")
             .env_remove("LIMEN_UNIVERSE")
             .env("ZMQ_CURVE", "0")
@@ -287,8 +285,8 @@ fn sim_pass(
     wait_for(&log, "Binary SUB connected");
     sleep(Duration::from_millis(250));
     for i in 0..100 {
-        publisher
-            .send(synthetic_readout(u, subscriber, i), 0)
+        io.publisher
+            .send(synthetic_readout(u, io.subscriber, i), 0)
             .unwrap();
     }
     wait_for(&log, "Confidence summary:");

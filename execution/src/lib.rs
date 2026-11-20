@@ -138,33 +138,37 @@ impl ExecutionEngine {
         decision
     }
 
-    fn decide(&mut self, signal: TradeSignal) -> ExecutionDecision {
-        let latency = signal.latency_ns();
-
-        // Gate 1: Confidence
+    /// Entry gates: confidence floor, then the neutral pass-through.
+    fn entry_gate(&self, signal: &TradeSignal, latency: i64) -> Option<ExecutionDecision> {
         if !signal.passes_gate(self.confidence_threshold) {
             warn!(
                 "Signal rejected: confidence {} < threshold {}",
                 signal.confidence, self.confidence_threshold
             );
-            return ExecutionDecision::RejectedLowConfidence {
+            return Some(ExecutionDecision::RejectedLowConfidence {
                 reason: format!(
                     "Confidence {} below threshold {}",
                     signal.confidence, self.confidence_threshold
                 ),
                 latency_ns: latency,
-            };
+            });
         }
-
-        // Gate 2: Neutral
         if signal.side == TradeSide::Neutral {
             info!(
                 "[{}] Neutral (confidence: {}, latency: {}ns)",
                 signal.ticker, signal.confidence, latency
             );
-            return ExecutionDecision::Neutral {
+            return Some(ExecutionDecision::Neutral {
                 latency_ns: latency,
-            };
+            });
+        }
+        None
+    }
+
+    fn decide(&mut self, signal: TradeSignal) -> ExecutionDecision {
+        let latency = signal.latency_ns();
+        if let Some(decision) = self.entry_gate(&signal, latency) {
+            return decision;
         }
 
         let (mut sizing, quantity) = match self.size(&signal, latency) {
@@ -175,7 +179,7 @@ impl ExecutionEngine {
             "snn_conf={:.3};kelly_frac={:.4};policy_qty={:.6};tier={:?}",
             signal.confidence, sizing.kelly_fraction, quantity, sizing.risk_tier
         );
-        let (quantity, price) = match self.fill(&signal, quantity, &reason, latency) {
+        let (quantity, price) = match self.fill(&signal, quantity, &reason) {
             Ok(pair) => pair,
             Err(decision) => return decision,
         };
@@ -217,13 +221,7 @@ impl ExecutionEngine {
         signal: &TradeSignal,
         latency: i64,
     ) -> Result<(PositionSizingDecision, f64), ExecutionDecision> {
-        if !signal.price.is_finite()
-            || signal.price <= 0.0
-            || !(signal.price as f32).is_finite()
-            || (signal.price as f32) <= 0.0
-            || !self.max_order_notional.is_finite()
-            || self.max_order_notional <= 0.0
-        {
+        if !valid_pricing(signal.price, self.max_order_notional) {
             return Err(ExecutionDecision::RejectedPositionLimit {
                 reason: "invalid price or notional limit".into(),
                 latency_ns: latency,
@@ -271,9 +269,8 @@ impl ExecutionEngine {
         signal: &TradeSignal,
         quantity: f64,
         reason: &str,
-        latency: i64,
     ) -> Result<(f64, f64), ExecutionDecision> {
-        let fill_price = signal.price as f32;
+        let latency = signal.latency_ns();
         // Clamp to what the ledger can commit: sells to held units, buys to
         // affordable notional (notional plus fee against balance_atp).
         let available = match signal.side {
@@ -291,6 +288,19 @@ impl ExecutionEngine {
                 latency_ns: latency,
             });
         }
+        self.commit(signal, fill_quantity, signal.price as f32, reason)
+    }
+
+    /// One ledger step: reserve the step counter, apply the fill, require a
+    /// committed trade or surface RejectedFill.
+    fn commit(
+        &mut self,
+        signal: &TradeSignal,
+        fill_quantity: f32,
+        fill_price: f32,
+        reason: &str,
+    ) -> Result<(f64, f64), ExecutionDecision> {
+        let latency = signal.latency_ns();
         let Some(step) = self.step_counter.checked_add(1) else {
             return Err(ExecutionDecision::RejectedFill {
                 reason: "execution step counter exhausted".into(),
@@ -299,13 +309,14 @@ impl ExecutionEngine {
         };
         self.step_counter = step;
         let trades_before = self.ghost_wallet.trade_count;
+        let side = if signal.side == TradeSide::Buy {
+            Side::Buy
+        } else {
+            Side::Sell
+        };
         let fill = GhostFill {
             asset: &signal.ticker,
-            side: match signal.side {
-                TradeSide::Buy => Side::Buy,
-                TradeSide::Sell => Side::Sell,
-                TradeSide::Neutral => unreachable!("neutral signals return before sizing"),
-            },
+            side,
             price: fill_price,
             quantity: fill_quantity,
             fee: fill_price * fill_quantity * METABOLIC_COST,
@@ -330,6 +341,17 @@ impl ExecutionEngine {
         };
         Ok((record.quantity as f64, record.price_usd as f64))
     }
+}
+
+/// Price and per-order notional cap must be finite, positive, and
+/// representable in the f32 ghost ledger.
+fn valid_pricing(price: f64, max_order_notional: f64) -> bool {
+    price.is_finite()
+        && price > 0.0
+        && (price as f32).is_finite()
+        && (price as f32) > 0.0
+        && max_order_notional.is_finite()
+        && max_order_notional > 0.0
 }
 
 impl Drop for ExecutionEngine {
@@ -608,6 +630,42 @@ mod tests {
         }
     }
 
+    fn check_capped_fill(
+        engine: &mut ExecutionEngine,
+        price: f64,
+        side: TradeSide,
+        confidence: f32,
+    ) {
+        let before_qty = engine.ghost_wallet.balance("TESTSYM") as f64;
+        let before_atp = engine.ghost_wallet.balance_atp as f64;
+        match engine.process_signal(signal(price, side, confidence)) {
+            ExecutionDecision::Executed {
+                quantity, sizing, ..
+            } => {
+                assert!(quantity > 0.0 && quantity * price <= 5.0);
+                assert_eq!(quantity, sizing.position_units);
+                let delta = (engine.ghost_wallet.balance("TESTSYM") as f64 - before_qty).abs();
+                assert!((delta - quantity).abs() < quantity * 1e-6);
+                if side == TradeSide::Buy {
+                    // Notional is capped; ATP spend adds friction.
+                    let spent = before_atp - engine.ghost_wallet.balance_atp as f64;
+                    assert!(spent <= quantity * price * 1.001 + 0.0005);
+                }
+            }
+            other => panic!("expected capped execution, got {other:?}"),
+        }
+    }
+
+    fn check_capped_log(log: &std::path::Path, price: f64) {
+        let fills = std::fs::read_to_string(log).unwrap();
+        assert_eq!(fills.lines().count(), 4);
+        for line in fills.lines() {
+            let fill: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert!(fill["trade_value_usdt"].as_f64().unwrap() <= 5.0);
+            assert!(fill["quantity"].as_f64().unwrap() * price <= 5.0);
+        }
+    }
+
     #[test]
     fn cap_applies_to_wallet_audit_and_decision_at_different_prices_and_edges() {
         for price in [0.01, 1.0, 3500.0] {
@@ -623,33 +681,9 @@ mod tests {
                     TradeSide::Buy,
                     TradeSide::Sell,
                 ] {
-                    let before_qty = engine.ghost_wallet.balance("TESTSYM") as f64;
-                    let before_atp = engine.ghost_wallet.balance_atp as f64;
-                    match engine.process_signal(signal(price, side, confidence)) {
-                        ExecutionDecision::Executed {
-                            quantity, sizing, ..
-                        } => {
-                            assert!(quantity > 0.0 && quantity * price <= 5.0);
-                            assert_eq!(quantity, sizing.position_units);
-                            let delta =
-                                (engine.ghost_wallet.balance("TESTSYM") as f64 - before_qty).abs();
-                            assert!((delta - quantity).abs() < quantity * 1e-6);
-                            if side == TradeSide::Buy {
-                                // Notional is capped; ATP spend adds friction.
-                                let spent = before_atp - engine.ghost_wallet.balance_atp as f64;
-                                assert!(spent <= quantity * price * 1.001 + 0.0005);
-                            }
-                        }
-                        other => panic!("expected capped execution, got {other:?}"),
-                    }
+                    check_capped_fill(&mut engine, price, side, confidence);
                 }
-                let fills = std::fs::read_to_string(log).unwrap();
-                assert_eq!(fills.lines().count(), 4);
-                for line in fills.lines() {
-                    let fill: serde_json::Value = serde_json::from_str(line).unwrap();
-                    assert!(fill["trade_value_usdt"].as_f64().unwrap() <= 5.0);
-                    assert!(fill["quantity"].as_f64().unwrap() * price <= 5.0);
-                }
+                check_capped_log(&log, price);
                 assert_eq!(engine.ghost_wallet.trade_count, 4);
                 assert_eq!(engine.ghost_wallet.closed_trade_count, 2);
                 let realized: f32 = engine.ghost_wallet.realized_pnls.values().sum();
