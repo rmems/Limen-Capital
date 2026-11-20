@@ -62,7 +62,10 @@ function FeatureStream(;
             if !@isdefined(FastReflex)
                 include(joinpath(_MATH_DIR, "market_lsm.jl"))
             end
-            reflex = FastReflex()
+            # include introduces both a binding and constructor methods.
+            reflex = Base.invokelatest() do
+                FastReflex()
+            end
         catch e
             @warn "FastReflex unavailable; continuing Hawkes-only" exception = e
             use_r = false
@@ -101,7 +104,9 @@ function update_features!(
     feats = nothing
     if fs.use_reflex && fs.reflex !== nothing && spikes_cpu !== nothing
         if length(spikes_cpu) == 28
-            feats = step_cpu(fs.reflex, Vector{Float32}(spikes_cpu))
+            feats = Base.invokelatest() do
+                step_cpu(fs.reflex, Vector{Float32}(spikes_cpu))
+            end
         end
     end
 

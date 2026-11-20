@@ -11,8 +11,8 @@
 
 pub mod mock;
 
+use crate::live::alpaca::types::OrderSide;
 use crate::live::risk::ApprovedOrder;
-use crate::live::robinhood::types::OrderSide;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use std::fmt;

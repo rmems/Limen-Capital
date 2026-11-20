@@ -17,7 +17,7 @@ impl Drop for ChildGuard {
 }
 
 fn wait_for(log: &Path, needle: &str) -> String {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let text = fs::read_to_string(log).unwrap();
         if text.contains(needle) {
@@ -68,6 +68,7 @@ fn spawn_listener(dir: &Path, ep: &str, log: &Path) -> ChildGuard {
             .env_remove("LIMEN_UNIVERSE")
             .env("ZMQ_CURVE", "0")
             .env("LIMEN_CONFIDENCE_THRESHOLD", "0.15")
+            .env("LIMEN_KELLY_B", "5")
             .env("LIMEN_PULSE_MAX_AGE_MS", "2000")
             .stdout(fs::File::create(log).unwrap())
             .stderr(Stdio::null())
@@ -161,10 +162,174 @@ fn real_listener_rejects_replay_stale_restart_and_bad_headers_then_stops_on_sigi
 fn real_binary_refuses_remote_endpoint_without_opt_in() {
     let output = Command::new(env!("CARGO_BIN_EXE_limen-execution"))
         .env("LIMEN_WIRE", "binary")
+        .env("LIMEN_KELLY_B", "5")
         .env("LIMEN_IPC_PUB", "tcp://192.0.2.1:5556")
         .env_remove("LIMEN_ALLOW_REMOTE_WIRE")
         .output()
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("LIMEN_ALLOW_REMOTE_WIRE=1"));
+}
+
+#[test]
+fn bad_sizing_environment_fails_before_connecting() {
+    for name in [
+        "LIMEN_CONFIDENCE_THRESHOLD",
+        "LIMEN_KELLY_B",
+        "LIMEN_KELLY_SCALAR",
+        "LIMEN_MAX_ORDER_NOTIONAL",
+    ] {
+        for value in ["oops", "", "NaN", "inf", "-1"] {
+            let output = Command::new(env!("CARGO_BIN_EXE_limen-execution"))
+                .env("LIMEN_CONFIDENCE_THRESHOLD", "0.15")
+                .env("LIMEN_KELLY_B", "5")
+                .env("LIMEN_KELLY_SCALAR", "0.25")
+                .env("LIMEN_MAX_ORDER_NOTIONAL", "10")
+                .env(name, value)
+                .output()
+                .unwrap();
+            assert!(!output.status.success(), "{name}={value}");
+            assert!(String::from_utf8_lossy(&output.stderr).contains(name));
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("SUB connected"));
+        }
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_limen-execution"))
+        .env_remove("LIMEN_KELLY_B")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("LIMEN_KELLY_B is required"));
+}
+
+/// An execution plumbing fixture, NOT a sample of the Julia brain distribution.
+/// Receives prices/timestamps from the real market_sim binary; publishes
+/// hand-built v2 readouts targeting ten known confidence levels.
+#[test]
+fn market_sim_has_nontrivial_executions_and_logs_confidence_distribution() {
+    let u = TradeUniverse::load(&TradeUniverse::default_config_path()).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = zmq::Context::new();
+    let market_ep = format!("ipc://{}/market", tmp.path().display());
+    let readout_ep = format!("ipc://{}/readout", tmp.path().display());
+    let subscriber = ctx.socket(zmq::SUB).unwrap();
+    subscriber.set_subscribe(b"").unwrap();
+    subscriber.set_rcvtimeo(5000).unwrap();
+    subscriber.connect(&market_ep).unwrap();
+    let publisher = ctx.socket(zmq::PUB).unwrap();
+    publisher.bind(&readout_ep).unwrap();
+    let _sim = ChildGuard(
+        Command::new(env!("CARGO_BIN_EXE_market_sim"))
+            .env("LIMEN_IPC_SUB", &market_ep)
+            .env("LIMEN_SIM_HZ", "50")
+            .env_remove("LIMEN_UNIVERSE")
+            .env("ZMQ_CURVE", "0")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let io = SimIo {
+        market_ep: &market_ep,
+        readout_ep: &readout_ep,
+        subscriber: &subscriber,
+        publisher: &publisher,
+    };
+    // Run the identical fixture at the old odds and explicit synthetic odds.
+    for (b, expected_executed, expected_no_edge) in [("0.05", 0, 70), ("5", 60, 10)] {
+        let summary = sim_pass(&u, tmp.path().join(b).as_path(), &io, b);
+        assert_summary(&summary, expected_executed, expected_no_edge);
+        if expected_executed > 0 {
+            let fills = fs::read_to_string(tmp.path().join(b).join("ghost_trades.jsonl")).unwrap();
+            assert_eq!(fills.lines().count(), expected_executed as usize);
+            for line in fills.lines() {
+                let fill: serde_json::Value = serde_json::from_str(line).unwrap();
+                assert!(fill["trade_value_usdt"].as_f64().unwrap() <= 10.0);
+                assert!(fill["quantity"].as_f64().unwrap() > 0.0);
+            }
+        }
+        println!("market_sim b={b}: {summary}");
+    }
+}
+
+/// ZMQ endpoints and sockets shared by both sim passes.
+struct SimIo<'a> {
+    market_ep: &'a str,
+    readout_ep: &'a str,
+    subscriber: &'a zmq::Socket,
+    publisher: &'a zmq::Socket,
+}
+
+/// One listener pass over 100 synthetic readouts against the live market_sim
+/// feed; returns the final `Confidence summary:` JSON.
+fn sim_pass(u: &TradeUniverse, dir: &Path, io: &SimIo, b: &str) -> serde_json::Value {
+    fs::create_dir(dir).unwrap();
+    let log = dir.join("listener.log");
+    let mut child = ChildGuard(
+        Command::new(env!("CARGO_BIN_EXE_limen-execution"))
+            .current_dir(dir)
+            .env("LIMEN_IPC_SUB", io.market_ep)
+            .env("LIMEN_IPC_PUB", io.readout_ep)
+            .env("LIMEN_WIRE", "binary")
+            .env_remove("LIMEN_UNIVERSE")
+            .env("ZMQ_CURVE", "0")
+            .env("LIMEN_CONFIDENCE_THRESHOLD", "0.15")
+            .env("LIMEN_KELLY_B", b)
+            .env("LIMEN_KELLY_SCALAR", "0.25")
+            .env("LIMEN_MAX_ORDER_NOTIONAL", "10")
+            .env("LIMEN_PULSE_MAX_AGE_MS", "2000")
+            .stdout(fs::File::create(&log).unwrap())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    wait_for(&log, "Binary SUB connected");
+    sleep(Duration::from_millis(250));
+    for i in 0..100 {
+        io.publisher
+            .send(synthetic_readout(u, io.subscriber, i), 0)
+            .unwrap();
+    }
+    wait_for(&log, "Confidence summary:");
+    sigint_and_wait(&mut child);
+    let text = fs::read_to_string(&log).unwrap();
+    assert!(!text.contains("unpriced"));
+    text.lines()
+        .rev()
+        .find_map(|line| {
+            line.split_once("Confidence summary: ")
+                .map(|(_, json)| serde_json::from_str::<serde_json::Value>(json).unwrap())
+        })
+        .unwrap()
+}
+
+/// Fresh market_sim tick plus a v2 readout at one of ten target confidences.
+fn synthetic_readout(u: &TradeUniverse, subscriber: &zmq::Socket, i: usize) -> Vec<u8> {
+    // Drain queued old pulses, then use the next fresh source tick.
+    while subscriber.recv_bytes(zmq::DONTWAIT).is_ok() {}
+    let pulse = subscriber.recv_bytes(0).unwrap();
+    let tick = i64::from_le_bytes(pulse[8..16].try_into().unwrap());
+    let target = [
+        0.05_f32, 0.10, 0.14, 0.16, 0.18, 0.22, 0.26, 0.30, 0.34, 0.38,
+    ][i % 10];
+    let magnitude = (target / 0.4).atanh();
+    let mut frame = v2_prefix(2, tick.to_le_bytes(), u.hash, u.n_pairs() as u16);
+    let mut values = vec![0.0_f32; u.n_out()];
+    values[i % 2] = magnitude; // alternating buy/sell on the first asset
+    for value in values.into_iter().chain([0.4, 0.2, 0.2, 0.2]) {
+        frame.extend_from_slice(&value.to_le_bytes());
+    }
+    frame
+}
+
+fn assert_summary(summary: &serde_json::Value, executed: u64, no_edge: u64) {
+    assert_eq!(summary["count"], 100);
+    assert_eq!(summary["invalid"], 0);
+    assert_eq!(summary["executed"], executed);
+    assert_eq!(summary["no_edge"], no_edge);
+    assert_eq!(summary["low_confidence"], 30);
+    assert_eq!(summary["position_limit"], 0);
+    assert_eq!(summary["neutral"], 0);
+    assert!((summary["mean"].as_f64().unwrap() - 0.213).abs() < 1e-6);
+    assert!((summary["min"].as_f64().unwrap() - 0.05).abs() < 1e-6);
+    assert!((summary["max"].as_f64().unwrap() - 0.38).abs() < 1e-6);
 }

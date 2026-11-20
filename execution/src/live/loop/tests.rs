@@ -1,5 +1,8 @@
 use super::*;
 use crate::live::config::MarketSourceConfig;
+use chrono::TimeZone;
+
+mod notifications;
 
 fn cfg(journal: &std::path::Path, seed: u64) -> LiveConfig {
     let state_dir = journal.with_extension("state");
@@ -9,7 +12,7 @@ fn cfg(journal: &std::path::Path, seed: u64) -> LiveConfig {
         state_dir: state_dir.to_string_lossy().into_owned(),
         market: MarketSourceConfig::Synthetic {
             seed,
-            start_price: 100_000.0,
+            start_price: Some(100_000.0),
             vol: 0.004,
             half_spread_bps: 1.0,
         },
@@ -24,6 +27,54 @@ fn short_id_never_panics() {
     assert_eq!(short_id(""), "");
 }
 
+#[tokio::test]
+async fn tick_counts_offline_spend_without_calling_postmortem() {
+    struct MustNotDecide;
+    impl Decider for MustNotDecide {
+        fn name(&self) -> &str {
+            "zero-cost-must-not-decide"
+        }
+        fn decide<'a>(
+            &'a mut self,
+            _: &'a MarketState,
+            _: &'a [String],
+        ) -> crate::live::decider::DecideFuture<'a> {
+            panic!("offline spend must stop decision calls");
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("offline-budget.md");
+    let c = cfg(&p, 1);
+    crate::live::cost::reserve(
+        &p,
+        &Utc::now().format("%Y-%m-%d").to_string(),
+        1.0,
+        crate::live::cost::Budget {
+            journal_spend: 0.0,
+            cap: 1.0,
+        },
+    )
+    .unwrap();
+    let mut parts = build_parts(&c, &Secrets::default()).await.unwrap();
+    // Any decision call would panic. No Anthropic credentials or server exist.
+    parts.decider = Box::new(MustNotDecide);
+    let result = run_with_parts(
+        &c,
+        &RunOptions {
+            once: true,
+            max_ticks: 0,
+        },
+        parts,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.ticks, 1);
+    assert_eq!(result.orders_placed, 0);
+    assert!(std::fs::read_to_string(p)
+        .unwrap()
+        .contains("llm_budget_exhausted"));
+}
+
 /// Scripted quotes for deterministic loop tests.
 struct ScriptedMarket(std::collections::VecDeque<(f64, f64)>);
 
@@ -33,7 +84,7 @@ impl MarketSource for ScriptedMarket {
     }
     fn quote<'a>(&'a mut self, symbol: &'a str) -> crate::live::market::QuoteFuture<'a> {
         let (bid, ask) = self.0.pop_front().unwrap_or((100.0, 100.1));
-        let q = crate::live::robinhood::types::BestBidAsk {
+        let q = crate::live::alpaca::types::BestBidAsk {
             symbol: symbol.to_string(),
             bid,
             ask,
@@ -61,15 +112,13 @@ impl MarketSource for FailingMarket {
         let first = std::mem::replace(&mut self.0, false);
         Box::pin(async move {
             if first {
-                Ok(crate::live::robinhood::types::BestBidAsk {
+                Ok(crate::live::alpaca::types::BestBidAsk {
                     symbol: symbol.into(),
                     bid: 100.0,
                     ask: 100.1,
                 })
             } else {
-                Err(crate::live::robinhood::ClientError::NotFound(
-                    "quote".into(),
-                ))
+                Err(crate::live::alpaca::ClientError::NotFound("quote".into()).into())
             }
         })
     }
@@ -240,20 +289,179 @@ async fn max_size_buy_never_drives_paper_cash_negative() {
 }
 
 #[tokio::test]
-async fn refuses_live_mode_and_claude_decider_for_now() {
+async fn live_mode_stays_refused_even_with_a_valid_claude_decider() {
+    use crate::live::test_support::claude::{claude_cfg, TEST_KEY};
     let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("refuse.md");
-    let mut c = cfg(&p, 1);
+    let mut c = claude_cfg("http://127.0.0.1:9", dir.path());
     c.paper = false;
     c.market = MarketSourceConfig::Robinhood;
-    let err = build_parts(&c, &Secrets::default()).await.unwrap_err();
+    let secrets = Secrets {
+        anthropic_api_key: Some(TEST_KEY.into()),
+        ..Default::default()
+    };
+    let err = build_parts(&c, &secrets).await.unwrap_err();
     assert!(err.to_string().contains("not implemented"), "{err}");
-    let mut c = cfg(&p, 1);
-    c.decider = DeciderKind::Claude;
-    let err = build_parts(&c, &Secrets::default()).await.unwrap_err();
-    assert!(err.to_string().contains("claude"), "{err}");
+    // The ledger is not even opened when live mode is refused.
+    assert!(!std::path::Path::new(&c.llm.ledger_path).exists());
 }
 
+#[tokio::test]
+async fn claude_decider_needs_its_key_and_budget_config() {
+    use crate::live::test_support::claude::{claude_cfg, TEST_KEY};
+    let dir = tempfile::tempdir().unwrap();
+    let c = claude_cfg("http://127.0.0.1:9", dir.path());
+    let err = build_parts(&c, &Secrets::default()).await.unwrap_err();
+    assert!(err.to_string().contains("ANTHROPIC_API_KEY"), "{err}");
+    let secrets = Secrets {
+        anthropic_api_key: Some(TEST_KEY.into()),
+        ..Default::default()
+    };
+    let parts = build_parts(&c, &secrets).await.unwrap();
+    assert_eq!(parts.decider.name(), "claude");
+    drop(parts);
+    let mut c = claude_cfg("http://127.0.0.1:9", dir.path());
+    c.llm.max_llm_cost_usd_total = None;
+    let err = build_parts(&c, &secrets).await.unwrap_err();
+    assert!(err.to_string().contains("max_llm_cost_usd_total"), "{err}");
+}
+
+async fn claude_parts(
+    c: &LiveConfig,
+    clock: &crate::live::test_support::claude::TestClock,
+    quotes: &[(f64, f64)],
+) -> LoopParts {
+    use crate::live::decider::budget::FileStore;
+    use crate::live::test_support::claude::TEST_KEY;
+    let mut rules_cfg = c.clone();
+    rules_cfg.decider = DeciderKind::Rules;
+    let mut parts = scripted_parts(&rules_cfg, quotes, 10.0).await;
+    let store = FileStore::open(&c.llm.ledger_path).unwrap();
+    parts.decider =
+        Box::new(ClaudeDecider::with_store(c, TEST_KEY, Box::new(store), clock.clock()).unwrap());
+    parts
+}
+
+#[tokio::test]
+async fn claude_decisions_are_risk_gated_and_journaled_with_usage_and_cost() {
+    use crate::live::test_support::claude::*;
+    use crate::live::test_support::MockServer;
+    let server = MockServer::start(vec![messages_route(vec![
+        (200, decision("buy", 2.0, "dip, small entry")),
+        (200, decision("buy", 50.0, "oversized")),
+        (500, "{}".into()),
+    ])])
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = claude_cfg(&server.base_url(), dir.path());
+    c.risk.min_tick_interval_secs = 1;
+    c.llm.max_retries = 0;
+    let clock = TestClock::new();
+    let parts = claude_parts(
+        &c,
+        &clock,
+        &[(100.0, 100.1), (100.0, 100.1), (100.0, 100.1)],
+    )
+    .await;
+    let opts = RunOptions {
+        once: false,
+        max_ticks: 3,
+    };
+    let s = run_with_parts(&c, &opts, parts).await.unwrap();
+    assert_eq!(s.ticks, 3);
+    assert_eq!(s.orders_placed, 1, "{s:?}");
+    assert_claude_journal(&std::fs::read_to_string(&c.journal_path).unwrap());
+}
+
+fn assert_claude_journal(text: &str) {
+    use crate::live::test_support::claude::TEST_KEY;
+    assert!(
+        text.contains("decision_model=claude-sonnet-5-5 fallbacks=0 helper_model=off effort=high"),
+        "{text}"
+    );
+    assert!(text.contains("dip, small entry"));
+    assert!(text.contains("approved buy"));
+    assert!(
+        text.contains("rejected:"),
+        "oversized buy is refused by risk: {text}"
+    );
+    assert!(
+        text.contains("decider claude-sonnet-5-5 ok in=1000 out=200 cache_r=0 cache_w=0 $0.004000"),
+        "{text}"
+    );
+    assert!(text.contains("| 0.004000 |"));
+    // The failed tick holds with the error, with no rules fallback.
+    let last = text.lines().last().unwrap();
+    assert!(
+        last.contains("| hold |") && last.contains("decider_error"),
+        "{last}"
+    );
+    assert!(!text.contains("warming_up") && !text.contains("flat,"));
+    assert!(!text.contains("PRIVATE-THOUGHT") && !text.contains(TEST_KEY));
+}
+
+/// A resting buy far below the market: it must go stale and be cancelled.
+fn resting_buy() -> crate::live::risk::ApprovedOrder {
+    use crate::live::alpaca::types::OrderSide;
+    crate::live::risk::ApprovedOrder {
+        client_order_id: "c8f53536-d7b4-44fd-8076-cac31e8f3880".into(),
+        symbol: "BTC-USD".into(),
+        side: OrderSide::Buy,
+        limit_price: 50.0,
+        asset_qty: 0.02,
+        notional_usd: 1.0,
+        limit_price_str: "50.00".into(),
+        asset_qty_str: "0.02".into(),
+    }
+}
+
+fn expired_clock() -> crate::live::test_support::claude::TestClock {
+    crate::live::test_support::claude::TestClock::at(
+        chrono::Utc.with_ymd_and_hms(2026, 11, 14, 0, 0, 0).unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn stale_orders_cancel_even_after_credit_expiry() {
+    use crate::live::test_support::claude::*;
+    use crate::live::test_support::MockServer;
+    let server = MockServer::start(vec![]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let c = claude_cfg(&server.base_url(), dir.path());
+    let clock = expired_clock();
+    let mut parts = claude_parts(&c, &clock, &[(100.0, 100.1); 4]).await;
+    parts.book.place(&resting_buy(), 0);
+    let opts = RunOptions {
+        once: false,
+        max_ticks: 4,
+    };
+    let s = run_with_parts(&c, &opts, parts).await.unwrap();
+    assert!(s.cancels >= 1, "{s:?}");
+    assert!(
+        server.requests().await.is_empty(),
+        "no paid call after expiry"
+    );
+    let text = std::fs::read_to_string(&c.journal_path).unwrap();
+    assert!(text.contains("no new paid calls"), "{text}");
+}
+
+#[tokio::test]
+async fn daily_loss_halt_works_after_credit_expiry() {
+    use crate::live::test_support::claude::*;
+    use crate::live::test_support::MockServer;
+    let server = MockServer::start(vec![]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let c = claude_cfg(&server.base_url(), dir.path());
+    let clock = expired_clock();
+    let mut parts = claude_parts(&c, &clock, &[(100.0, 100.1)]).await;
+    parts.book.realized_pnl_usd = -5.0;
+    parts.day_start_realized = Some(0.0);
+    let opts = RunOptions {
+        once: false,
+        max_ticks: 3,
+    };
+    let s = run_with_parts(&c, &opts, parts).await.unwrap();
+    assert_eq!(s.halted_reason.as_deref(), Some("daily_loss_breached"));
+}
 #[tokio::test]
 async fn robinhood_source_needs_secrets() {
     let dir = tempfile::tempdir().unwrap();
@@ -262,6 +470,16 @@ async fn robinhood_source_needs_secrets() {
     c.market = MarketSourceConfig::Robinhood;
     let err = build_parts(&c, &Secrets::default()).await.unwrap_err();
     assert!(err.to_string().contains("ROBINHOOD_API_KEY"), "{err}");
+}
+
+#[tokio::test]
+async fn alpaca_source_needs_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("secrets.md");
+    let mut c = cfg(&p, 1);
+    c.market = MarketSourceConfig::Alpaca;
+    let err = build_parts(&c, &Secrets::default()).await.unwrap_err();
+    assert!(err.to_string().contains("APCA_API_KEY_ID"), "{err}");
 }
 
 #[tokio::test]
@@ -415,7 +633,7 @@ impl MarketSource for HaltingMarket {
             std::fs::write(&self.halt, "").unwrap();
         }
         let (bid, ask) = self.quotes.pop_front().unwrap_or((99.5, 99.6));
-        let q = crate::live::robinhood::types::BestBidAsk {
+        let q = crate::live::alpaca::types::BestBidAsk {
             symbol: symbol.to_string(),
             bid,
             ask,
@@ -467,7 +685,7 @@ async fn daily_loss_halt_cancels_the_resting_order() {
     let order = crate::live::risk::ApprovedOrder {
         client_order_id: "resting".into(),
         symbol: c.symbol.clone(),
-        side: crate::live::robinhood::types::OrderSide::Buy,
+        side: crate::live::alpaca::types::OrderSide::Buy,
         limit_price: 90.0,
         asset_qty: 0.01,
         notional_usd: 0.9,

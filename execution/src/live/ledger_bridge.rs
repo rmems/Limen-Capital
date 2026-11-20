@@ -9,8 +9,8 @@
 //! Every row carries `fill=<fill_id>` in its reason, so a restart can tell
 //! which fills already have a row and append only the missing ones.
 
+use crate::live::alpaca::types::OrderSide;
 use crate::live::durable::{CostBasis, FillRecord};
-use crate::live::robinhood::types::OrderSide;
 use chrono::{DateTime, Utc};
 use metabolic_ledger::log::{append_ghost_log, GhostTradeLog};
 use metabolic_ledger::GhostWallet;
@@ -119,7 +119,7 @@ impl LedgerBridge {
                 .unwrap_or_default()
                 .to_rfc3339(),
             step: self.steps,
-            action: fill.side.as_str().to_string(),
+            action: fill.side.to_string(),
             asset: asset.to_string(),
             price_usd: fill.price as f32,
             quantity: fill.qty as f32,
@@ -136,7 +136,9 @@ impl LedgerBridge {
                 self.observed_kelly_fraction(),
             ),
         };
-        append_ghost_log(&row, &self.path.to_string_lossy());
+        // The ghost log is an audit aid; a write failure must not undo a
+        // venue fill that already happened.
+        let _ = append_ghost_log(&row, &self.path.to_string_lossy());
         self.recorded.insert(fill.fill_id.clone());
         Ok(())
     }
