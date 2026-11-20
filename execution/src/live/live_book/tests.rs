@@ -109,16 +109,26 @@ async fn reopen_and_check_adoption(venue: &MockVenue, dir: &Path, hand: f64) -> 
         .into_iter()
         .filter(|o| o.client_order_id.as_deref() == Some("buy-2"))
         .collect();
-    assert_eq!(buy2.len(), 1);
-    assert_eq!(book.open_orders().len(), 1);
+    assert_eq!((buy2.len(), book.open_orders().len()), (1, 1));
     let tracked = &book.open_orders()[0];
-    assert_eq!(tracked.client_order_id, "buy-2");
-    assert_eq!(tracked.venue_order_id.as_deref(), Some(buy2[0].id.as_str()));
-    assert_eq!(tracked.status, IntentStatus::Acknowledged);
+    assert_eq!(
+        (
+            tracked.client_order_id.as_str(),
+            tracked.venue_order_id.as_deref(),
+            tracked.status,
+        ),
+        (
+            "buy-2",
+            Some(buy2[0].id.as_str()),
+            IntentStatus::Acknowledged
+        ),
+    );
     // Same daily-loss baseline: the restart did not reset the counter.
-    assert_eq!(book.day_start_realized_usd(), 0.0);
+    assert_eq!(
+        (book.day_start_realized_usd(), book.last_order_secs()),
+        (0.0, Some(T0 + 10)),
+    );
     assert!((book.daily_pnl_usd() - hand).abs() < 1e-12);
-    assert_eq!(book.last_order_secs(), Some(T0 + 10));
     book
 }
 
@@ -137,17 +147,21 @@ async fn daily_loss_halt_cancels(book: &mut LiveBook, venue: &MockVenue) {
         resting_notional_usd: book.resting_notional_usd(),
     };
     let reason = risk::pre_tick_check(&limits, &inputs).unwrap();
-    assert!(matches!(reason, RiskReject::DailyLossBreached { .. }));
-    assert!(reason.halts_day());
+    assert!(matches!(reason, RiskReject::DailyLossBreached { .. }) && reason.halts_day());
     assert_eq!(book.cancel_all(T0 + 61).await.unwrap(), 1);
-    assert_eq!(venue.delete_count(), 1);
     let buy2 = venue
         .orders()
         .into_iter()
         .find(|o| o.client_order_id.as_deref() == Some("buy-2"))
         .unwrap();
-    assert_eq!(buy2.status, VenueOrderStatus::Canceled);
-    assert!(book.open_orders().is_empty());
+    assert_eq!(
+        (
+            venue.delete_count(),
+            buy2.status == VenueOrderStatus::Canceled,
+            book.open_orders().is_empty(),
+        ),
+        (1, true, true),
+    );
 }
 
 /// Ledger audit: one row per fill, never duplicated by the restart, and the
@@ -155,14 +169,19 @@ async fn daily_loss_halt_cancels(book: &mut LiveBook, venue: &MockVenue) {
 fn check_ledger_rows(dir: &Path, hand: f64) {
     let rows = ledger_rows(dir);
     assert_eq!(rows.len(), 2, "{rows:?}");
-    assert_eq!(rows[0]["action"], "buy");
-    assert_eq!(rows[1]["action"], "sell");
+    assert_eq!(
+        [rows[0]["action"].as_str(), rows[1]["action"].as_str()],
+        [Some("buy"), Some("sell")],
+    );
     let realized = rows[1]["realized_pnl_usdt"].as_f64().unwrap();
-    assert!((realized - hand).abs() < 1e-5, "{realized} vs {hand}");
-    assert!(rows[1]["reason"]
-        .as_str()
-        .unwrap()
-        .contains("realized_usd=-0.50950000"));
+    assert!(
+        (realized - hand).abs() < 1e-5
+            && rows[1]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("realized_usd=-0.50950000"),
+        "{realized} vs {hand}",
+    );
 }
 
 #[tokio::test]

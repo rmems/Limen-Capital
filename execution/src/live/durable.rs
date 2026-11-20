@@ -234,7 +234,9 @@ impl StateStore {
 mod tests {
     use super::*;
 
-    fn fill(id: &str, side: OrderSide, qty: f64, price: f64, fee: f64) -> FillRecord {
+    /// `legs` is (qty, price, fee_usd).
+    fn fill(id: &str, side: OrderSide, legs: (f64, f64, f64)) -> FillRecord {
+        let (qty, price, fee) = legs;
         FillRecord {
             fill_id: id.into(),
             client_order_id: id.split('#').next().unwrap().into(),
@@ -253,9 +255,9 @@ mod tests {
         // Buy 0.05 @ 110 fee 0.0055 → cost 10.5105, avg 105.105.
         // Sell 0.1 @ 90 fee 0.009 → realized 9 − 10.5105 − 0.009 = −1.5195.
         let fills = [
-            fill("a#1", OrderSide::Buy, 0.05, 100.0, 0.005),
-            fill("b#1", OrderSide::Buy, 0.05, 110.0, 0.0055),
-            fill("c#1", OrderSide::Sell, 0.1, 90.0, 0.009),
+            fill("a#1", OrderSide::Buy, (0.05, 100.0, 0.005)),
+            fill("b#1", OrderSide::Buy, (0.05, 110.0, 0.0055)),
+            fill("c#1", OrderSide::Sell, (0.1, 90.0, 0.009)),
         ];
         let mut basis = CostBasis::default();
         basis.apply(&fills[0]).unwrap();
@@ -273,8 +275,8 @@ mod tests {
     #[test]
     fn oversell_cannot_be_explained() {
         let fills = [
-            fill("a#1", OrderSide::Buy, 0.05, 100.0, 0.0),
-            fill("b#1", OrderSide::Sell, 0.06, 100.0, 0.0),
+            fill("a#1", OrderSide::Buy, (0.05, 100.0, 0.0)),
+            fill("b#1", OrderSide::Sell, (0.06, 100.0, 0.0)),
         ];
         assert!(CostBasis::from_fills(&fills).unwrap_err().contains("b#1"));
     }
@@ -288,7 +290,8 @@ mod tests {
         s.account_id = Some("ACC".into());
         s.day_start_realized_usd = -0.25;
         s.last_order_secs = Some(17);
-        s.fills.push(fill("a#1", OrderSide::Buy, 0.05, 100.0, 0.0));
+        s.fills
+            .push(fill("a#1", OrderSide::Buy, (0.05, 100.0, 0.0)));
         store.save(&s).unwrap();
         assert_eq!(store.load().unwrap(), Some(s.clone()));
         assert!(!dir.path().join("nested/state.json.tmp").exists());

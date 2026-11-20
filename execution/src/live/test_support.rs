@@ -304,6 +304,7 @@ pub mod claude {
             decider: DeciderKind::Claude,
             tick_interval_secs: 1,
             journal_path: dir.join("journal.md").to_string_lossy().into_owned(),
+            state_dir: dir.join("state").to_string_lossy().into_owned(),
             market: MarketSourceConfig::Synthetic {
                 seed: 1,
                 start_price: Some(100_000.0),

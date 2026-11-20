@@ -105,11 +105,12 @@ impl LedgerBridge {
                 }
                 self.wallet.balance_atp -= (notional + fill.fee_usd) as f32;
             }
-            OrderSide::Sell => self.apply_sell_to_wallet(asset, notional, fill.fee_usd, realized),
+            OrderSide::Sell => self.apply_sell_to_wallet(fill, notional, realized),
         }
     }
 
-    fn apply_sell_to_wallet(&mut self, asset: &str, notional: f64, fee: f64, realized: f64) {
+    fn apply_sell_to_wallet(&mut self, fill: &FillRecord, notional: f64, realized: f64) {
+        let asset = fill.symbol.as_str();
         if self.basis.position_qty > 0.0 {
             self.wallet
                 .balances
@@ -118,7 +119,7 @@ impl LedgerBridge {
             self.wallet.balances.remove(asset);
             self.wallet.entry_prices.remove(asset);
         }
-        self.wallet.balance_atp += (notional - fee) as f32;
+        self.wallet.balance_atp += (notional - fill.fee_usd) as f32;
         self.wallet.cumulative_pnl += realized as f32;
         *self
             .wallet
@@ -158,7 +159,9 @@ impl LedgerBridge {
 mod tests {
     use super::*;
 
-    fn fill(id: &str, side: OrderSide, qty: f64, price: f64, fee: f64) -> FillRecord {
+    /// `legs` is (qty, price, fee_usd).
+    fn fill(id: &str, side: OrderSide, legs: (f64, f64, f64)) -> FillRecord {
+        let (qty, price, fee) = legs;
         FillRecord {
             fill_id: id.into(),
             client_order_id: id.split('#').next().unwrap().into(),
@@ -184,8 +187,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ledger.jsonl");
         let fills = [
-            fill("a#1", OrderSide::Buy, 0.05, 100.0, 0.005),
-            fill("b#1", OrderSide::Sell, 0.05, 90.0, 0.0045),
+            fill("a#1", OrderSide::Buy, (0.05, 100.0, 0.005)),
+            fill("b#1", OrderSide::Sell, (0.05, 90.0, 0.0045)),
         ];
         let mut bridge = LedgerBridge::open(&path).unwrap();
         bridge.record(&fills[0]).unwrap();
