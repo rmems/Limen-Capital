@@ -6,7 +6,7 @@
 
 use super::budget::{day_key, BudgetError, Clock, ReserveRequest, Role, SharedLedger};
 use super::{DeciderError, LlmCallReport};
-use crate::live::config::{LlmConfig, ModelPrice, TokenCounts};
+use crate::live::config::{LiveConfig, LlmConfig, ModelPrice, TokenCounts};
 use crate::live::cost;
 use serde::Serialize;
 use serde_json::Value;
@@ -184,13 +184,16 @@ fn api_error_type(bytes: &[u8]) -> String {
 }
 
 impl LlmCaller {
+    /// `cfg` supplies both the LLM limits and the journal whose cost sidecar
+    /// shares the daily cap.
     pub fn new(
-        cfg: &LlmConfig,
+        cfg: &LiveConfig,
         api_key: &str,
         ledger: SharedLedger,
-        journal: PathBuf,
         clock: Clock,
     ) -> Result<Self, String> {
+        let journal = PathBuf::from(&cfg.journal_path);
+        let cfg = &cfg.llm;
         let http = reqwest::Client::builder()
             // The key header must never follow a redirect to another host.
             .redirect(reqwest::redirect::Policy::none())

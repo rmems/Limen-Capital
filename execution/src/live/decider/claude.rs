@@ -208,13 +208,7 @@ impl ClaudeDecider {
         cfg.validate_llm().map_err(|e| e.to_string())?;
         let policy = BudgetPolicy::from_config(cfg).map_err(|e| e.to_string())?;
         let ledger = Arc::new(BudgetLedger::open(policy, store).map_err(|e| e.to_string())?);
-        let caller = LlmCaller::new(
-            &cfg.llm,
-            api_key,
-            ledger,
-            std::path::PathBuf::from(&cfg.journal_path),
-            clock,
-        )?;
+        let caller = LlmCaller::new(cfg, api_key, ledger, clock)?;
         let helper_effort = cfg
             .helper_model
             .as_deref()
