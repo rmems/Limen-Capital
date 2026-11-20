@@ -144,9 +144,13 @@ cd execution/
 cargo run --release --bin market_sim
 
 # Terminal B: muscle — SUBs to readouts on :5556 and pulses on :5555
-cargo run --release
+# Set LIMEN_KELLY_B to the experiment's expected gain / expected loss first.
+# Example ONLY for synthetic smoke testing, NOT a calibrated market estimate:
+LIMEN_KELLY_B=5 cargo run --release --bin limen-execution
 # LIMEN_WIRE=json for legacy IPC
-# LIMEN_CONFIDENCE_THRESHOLD=0.15  (initial research gate only, not the effective Kelly floor)
+# LIMEN_CONFIDENCE_THRESHOLD=0.15
+# LIMEN_KELLY_SCALAR=0.25
+# LIMEN_MAX_ORDER_NOTIONAL=10     (quote units per order, NOT asset units)
 # LIMEN_PULSE_MAX_AGE_MS=2000      (readouts are refused when the last pulse is older)
 ```
 
@@ -154,19 +158,36 @@ Fills are priced from the last `MarketPulse`. A readout that arrives before the
 first pulse, after the pulse goes stale, or whose primary pair is RESIDUAL is
 refused and logged — never filled at a placeholder price.
 
-`ExecutionEngine::process_signal`: confidence gate → Neutral filter →
-**0.25× Kelly policy quantity** (from ATP bankroll, b=0.05) → max-quantity/holdings
-gate → `apply_ghost_fill` with that quantity and explicit simulated friction.
-With default Kelly enabled, positive policy size requires
-`p > 1 / (1 + 0.05) ≈ 0.952381`; passing 0.15 alone is insufficient.
-The limit bounds each fill and total long holdings per asset. Prices and
-quantities are rounded to the legacy ledger's `f32` units; `Executed` reports
-those actual fill values. Zero Kelly → `RejectedNoEdge`. Insufficient holdings
-(including selling while flat), insufficient ATP for quantity plus friction,
-invalid fills, or JSONL write failures → `RejectedFill`, with no wallet mutation.
-Buy friction enters cost basis and is realized on sale, so round-trip PnL and
-win-rate statistics include both sides' friction exactly once. SNN confidence is
-not a calibrated win probability.
+`ExecutionEngine::process_signal`: confidence gate → Neutral → fractional Kelly
+from ATP bankroll → **cap order notional** → ghost fill. Oversized proposals are
+capped, not rejected. The decision quantity, wallet mutation, and JSONL describe
+the actual fill (buy ATP friction reduces units; sells cannot exceed inventory).
+This is a per-order limit, not a cap on accumulated holdings.
+
+`LIMEN_KELLY_B` is **required** and means expected gain / expected loss, not
+percentage price movement (e.g. +2% versus −1% means `b=2`, not `0.02`).
+No payoff estimate can be recovered from confidence alone or the current pulse
+schema. All four sizing env values above fail startup on malformed, non-finite,
+or out-of-range values. Threshold must be in `[0,1]`, scalar in `(0,1]`, and
+payoff ratio and notional must be positive (notional must fit `f32`).
+
+The **effective gate** is `p >= LIMEN_CONFIDENCE_THRESHOLD` **and**
+`p > 1/(1+b)`, with non-neutral direction, valid price, sufficient ATP/inventory,
+and a non-dust size. Zero Kelly gives `RejectedNoEdge`. Thus `b=0.05` still
+requires `p > 0.952381`; the synthetic `b=5` example requires `p > 0.166667`
+despite the 0.15 confidence threshold. Changing the fractional scalar does not
+change the Kelly breakeven. SNN confidence is **not a calibrated win probability**.
+Library-only `ExecutionEngine::new` uses symmetric `b=1`; the listener never
+silently adopts that assumption.
+
+The listener logs `Confidence summary:` JSON every 100 priced signals and on
+graceful shutdown, including rejected/neutral signals: count, invalid count,
+min/max/mean, ten confidence bins, and decision counts. Unpriced readouts and
+invalid wire frames are excluded. Capture stdout over a sim run, then Ctrl+C to
+include its final partial interval. The former “typical 0.2–0.4” claim was not
+measured. See [the reproducible synthetic sim check](docs/results/rm-2440/README.md):
+60/100 executions versus 0/100 at the old odds, **not** evidence about the real
+brain's distribution or profitability.
 
 **The accepted quantity is the filled quantity.** `process_signal` passes its
 sized quantity — Kelly policy size by default, or `signal.quantity` under

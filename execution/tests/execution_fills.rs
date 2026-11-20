@@ -1,4 +1,6 @@
-use limen_execution::{ExecutionDecision, ExecutionEngine, TradeSide, TradeSignal};
+use limen_execution::{
+    kelly::PositionSizer, ExecutionDecision, ExecutionEngine, TradeSide, TradeSignal,
+};
 
 fn signal(side: TradeSide, price: f64, quantity: f64, confidence: f32) -> TradeSignal {
     TradeSignal {
@@ -29,7 +31,7 @@ fn executed(decision: ExecutionDecision) -> (f64, f64) {
 #[test]
 fn known_confidence_fills_policy_quantity_not_wallet_kelly() {
     let dir = tempfile::tempdir().unwrap();
-    let mut engine = engine(&dir, 10.0, true);
+    let mut engine = engine(&dir, 10.0, true).with_sizer(PositionSizer::new(500.0, 0.05, 0.25));
     let confidence = 0.953_f32;
     // Independent Kelly formula: ((p*b - (1-p))/b) * quarter-Kelly * ATP / price.
     let p = confidence as f64;
@@ -67,7 +69,7 @@ fn disabling_kelly_honors_buy_and_partial_sell_quantities() {
 }
 
 #[test]
-fn flat_sell_and_oversell_are_rejected_without_fills() {
+fn flat_sell_rejected_and_oversell_clamps_to_holdings() {
     let dir = tempfile::tempdir().unwrap();
     let mut engine = engine(&dir, 10.0, true);
     assert!(matches!(
@@ -79,43 +81,50 @@ fn flat_sell_and_oversell_are_rejected_without_fills() {
     assert!(!dir.path().join("trades.jsonl").exists());
     engine.use_kelly_sizing = false;
     executed(engine.process_signal(signal(TradeSide::Buy, 1.0, 2.0, 0.5)));
-    let before = engine.ghost_wallet.balance_atp;
+    // An over-sell commits what is actually held, not a rejection.
+    assert_eq!(
+        executed(engine.process_signal(signal(TradeSide::Sell, 1.0, 3.0, 0.5))).0,
+        2.0
+    );
+    assert_eq!(engine.ghost_wallet.balance("TEST"), 0.0);
+    assert_eq!(engine.ghost_wallet.trade_count, 2);
+    // Once flat again, further sells reject without a fill.
     assert!(matches!(
-        engine.process_signal(signal(TradeSide::Sell, 1.0, 3.0, 0.5)),
+        engine.process_signal(signal(TradeSide::Sell, 1.0, 1.0, 0.5)),
         ExecutionDecision::RejectedFill { .. }
     ));
-    assert_eq!(engine.ghost_wallet.balance_atp, before);
-    assert_eq!(engine.ghost_wallet.balance("TEST"), 2.0);
-    assert_eq!(engine.ghost_wallet.trade_count, 1);
+    assert_eq!(engine.ghost_wallet.trade_count, 2);
 }
 
 #[test]
-fn position_limit_covers_individual_and_accumulated_fills() {
+fn notional_cap_limits_each_order_not_accumulated_holdings() {
     let dir = tempfile::tempdir().unwrap();
     let mut engine = engine(&dir, 10.0, false);
-    assert!(matches!(
-        engine.process_signal(signal(TradeSide::Buy, 1.0, 10.1, 0.5)),
-        ExecutionDecision::RejectedPositionLimit { .. }
-    ));
-    executed(engine.process_signal(signal(TradeSide::Buy, 1.0, 6.0, 0.5)));
-    assert!(matches!(
-        engine.process_signal(signal(TradeSide::Buy, 1.0, 6.0, 0.5)),
-        ExecutionDecision::RejectedPositionLimit { .. }
-    ));
-    executed(engine.process_signal(signal(TradeSide::Buy, 1.0, 4.0, 0.5)));
-    assert_eq!(engine.ghost_wallet.balance("TEST"), 10.0);
-    assert!(matches!(
-        engine.process_signal(signal(TradeSide::Buy, 1.0, 1.0, 0.5)),
-        ExecutionDecision::RejectedPositionLimit { .. }
-    ));
-    executed(engine.process_signal(signal(TradeSide::Sell, 1.0, 10.0, 0.5)));
+    // Each oversized order is capped to 10 quote units, never rejected.
+    assert_eq!(
+        executed(engine.process_signal(signal(TradeSide::Buy, 1.0, 10.1, 0.5))).0,
+        10.0
+    );
+    assert_eq!(
+        executed(engine.process_signal(signal(TradeSide::Buy, 1.0, 12.0, 0.5))).0,
+        10.0
+    );
+    assert_eq!(engine.ghost_wallet.balance("TEST"), 20.0);
+    assert_eq!(
+        executed(engine.process_signal(signal(TradeSide::Sell, 1.0, 20.0, 0.5))).0,
+        10.0
+    );
+    assert_eq!(
+        executed(engine.process_signal(signal(TradeSide::Sell, 1.0, 15.0, 0.5))).0,
+        10.0
+    );
     assert_eq!(engine.ghost_wallet.balance("TEST"), 0.0);
 }
 
 #[test]
 fn flat_round_trip_pnl_equals_both_fees_and_cash_loss() {
     let dir = tempfile::tempdir().unwrap();
-    let mut engine = engine(&dir, 10.0, false);
+    let mut engine = engine(&dir, 100.0, false);
     executed(engine.process_signal(signal(TradeSide::Buy, 10.0, 4.0, 0.5)));
     assert_eq!(engine.ghost_wallet.cumulative_pnl, 0.0); // fee held in basis
     executed(engine.process_signal(signal(TradeSide::Sell, 10.0, 1.0, 0.5)));
@@ -148,11 +157,13 @@ fn flat_round_trip_pnl_equals_both_fees_and_cash_loss() {
 fn fee_and_log_failures_do_not_report_execution_or_mutate_wallet() {
     let dir = tempfile::tempdir().unwrap();
     let mut engine = engine(&dir, 10.0, false);
-    // Notional alone fits, but not notional plus fee.
+    // Nothing affordable at all: the clamp leaves no positive fill.
+    engine.ghost_wallet.balance_atp = 0.0;
     assert!(matches!(
         engine.process_signal(signal(TradeSide::Buy, 500.0, 1.0, 0.5)),
         ExecutionDecision::RejectedFill { .. }
     ));
+    engine.ghost_wallet.balance_atp = 500.0;
     engine.log_path = dir.path().to_str().unwrap().into(); // a directory cannot be appended
     assert!(matches!(
         engine.process_signal(signal(TradeSide::Buy, 1.0, 1.0, 0.5)),

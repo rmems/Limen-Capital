@@ -19,7 +19,8 @@ fn close(actual: f64, expected: f64) {
 }
 
 fn policy_fraction(confidence: f64) -> f64 {
-    ((confidence * 0.05 - (1.0 - confidence)) / 0.05) * 0.25
+    // Production default sizer: symmetric odds b=1.0, quarter-Kelly.
+    ((confidence * 1.0 - (1.0 - confidence)) / 1.0) * 0.25
 }
 
 fn assert_pulse_contract(pulse: &MarketPulse) {
@@ -33,8 +34,8 @@ fn assert_pulse_contract(pulse: &MarketPulse) {
 
 fn assert_default_engine(engine: &ExecutionEngine) {
     assert_eq!(engine.confidence_threshold, 0.15);
-    assert_eq!(engine.max_position_size, 10.0);
-    assert_eq!(engine.sizer.expected_payoff_ratio(), 0.05);
+    assert_eq!(engine.max_order_notional, 10.0);
+    assert_eq!(engine.sizer.expected_payoff_ratio(), 1.0);
 }
 
 fn assert_packet_contract(packet: &ReadoutPacket, tick: i64, side: TradeSide) {
@@ -53,22 +54,25 @@ fn assert_signal_ids(signal: &TradeSignal, universe: &TradeUniverse, side: Trade
 
 fn assert_fill_sizing(quantity: f64, kelly_fraction: f64, atp: f64, fraction: f64) {
     close(kelly_fraction, fraction);
-    close(quantity, atp * fraction / 100.0);
+    // Policy quantity capped to 10 notional at price 100 (0.1 units).
+    close(quantity, (atp * fraction / 100.0).min(0.1));
 }
 
 fn assert_buy_wallet(engine: &ExecutionEngine, universe: &TradeUniverse) {
-    close(engine.ghost_wallet.balance_atp as f64, 387.86917);
+    // Capped 10-notional buy: 0.1 units at 100, spend 10 notional + 0.001 fee.
+    assert!((engine.ghost_wallet.balance_atp as f64 - 489.99).abs() < 1e-3);
     close(
         engine.ghost_wallet.balance(&universe.symbols[0]) as f64,
-        1.120188,
+        0.1,
     );
 }
 
 fn assert_sell_wallet(engine: &ExecutionEngine, universe: &TradeUniverse) {
-    close(engine.ghost_wallet.balance_atp as f64, 474.67957);
+    // The sell clamps to held units: 0.1 back out at 100, minus its fee.
+    assert!((engine.ghost_wallet.balance_atp as f64 - 499.98).abs() < 1e-3);
     close(
         engine.ghost_wallet.balance(&universe.symbols[0]) as f64,
-        0.25121522,
+        0.0,
     );
 }
 
@@ -174,8 +178,8 @@ fn assert_log_records(log: &Path, universe: &TradeUniverse) {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert_eq!(records.len(), 2);
-    assert_record(&records[0], "buy", 1.120188, universe);
-    assert_record(&records[1], "sell", 0.8689728, universe);
+    assert_record(&records[0], "buy", 0.1, universe);
+    assert_record(&records[1], "sell", 0.1, universe);
 }
 
 #[test]
