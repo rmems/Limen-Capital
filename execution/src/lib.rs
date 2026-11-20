@@ -7,22 +7,23 @@
 //!   → per-order notional cap → quantity-aware ATP ghost trade → JSONL
 //! ```
 //!
-//! The policy size is capped once, then applied to the legacy GhostWallet.
+//! PositionSizer owns confidence→quantity. The capped policy size is applied
+//! once to the legacy GhostWallet with explicit simulated friction.
 
 pub mod binary_wire;
 pub mod confidence;
 pub mod config;
 pub mod dydx;
-mod ghost;
 pub mod kelly;
-/// Live micro-capital experiment (RM-2436): Robinhood Crypto adapter + decision loop.
+/// Live micro-capital experiment (RM-2436): Alpaca Crypto adapter + decision loop.
 /// Feature-gated; **not** part of the research path and not a research result.
-#[cfg(feature = "live-robinhood")]
+#[cfg(feature = "live-alpaca")]
 pub mod live;
 pub mod universe;
 pub mod wire;
 pub mod zmq_curve;
 
+use metabolic_ledger::{apply_ghost_fill, GhostFill, Side, METABOLIC_COST};
 pub use metabolic_ledger::{execute_buy, execute_sell, GhostWallet, MarketPrices};
 
 use crate::kelly::{PositionSizer, PositionSizingDecision};
@@ -168,77 +169,17 @@ impl ExecutionEngine {
 
         if !signal.price.is_finite()
             || signal.price <= 0.0
-            || !(signal.price as f32).is_finite()
-            || (signal.price as f32) <= 0.0
-            || !self.max_order_notional.is_finite()
-            || self.max_order_notional <= 0.0
-        {
-            return ExecutionDecision::RejectedPositionLimit {
-                reason: "invalid price or notional limit".into(),
-                latency_ns: latency,
-            };
-        }
-
-        // Size: fractional Kelly from ATP bankroll (policy)
-        self.sync_sizer_balance();
-        let mut sizing = self
-            .sizer
-            .size_position(signal.confidence, signal.price, &signal.ticker);
-
-        let quantity = if self.use_kelly_sizing {
-            sizing.position_units
-        } else {
-            signal.quantity
+        let (mut sizing, quantity) = match self.size(&signal, latency) {
+            Ok(pair) => pair,
+            Err(decision) => return decision,
         };
-
-        if self.use_kelly_sizing && sizing.kelly_fraction <= 0.0 {
-            warn!(
-                "[{}] No edge under Kelly (conf={}, b={})",
-                signal.ticker,
-                signal.confidence,
-                self.sizer.expected_payoff_ratio()
-            );
-            return ExecutionDecision::RejectedNoEdge {
-                reason: format!(
-                    "Kelly fraction 0 for confidence {} (need higher conf or larger b)",
-                    signal.confidence
-                ),
-                latency_ns: latency,
-                kelly_fraction: sizing.kelly_fraction,
-            };
-        }
-
-        if !quantity.is_finite() || quantity <= 0.0 {
-            return ExecutionDecision::RejectedNoEdge {
-                reason: "position size is zero".into(),
-                latency_ns: latency,
-                kelly_fraction: sizing.kelly_fraction,
-            };
-        }
-
-        // Cap in quote units, then convert back to asset units. High edge must
-        // not turn a valid signal into a rejection.
-        let quantity = quantity.min(self.max_order_notional / signal.price);
-
-        // Apply this size to GhostWallet, without the ledger helper re-sizing it.
-        self.step_counter += 1;
         let reason = format!(
             "snn_conf={:.3};kelly_frac={:.4};policy_qty={:.6};tier={:?}",
             signal.confidence, sizing.kelly_fraction, quantity, sizing.risk_tier
         );
-
-        let Some(quantity) = ghost::execute_sized(
-            &mut self.ghost_wallet,
-            &signal,
-            quantity,
-            self.step_counter,
-            &reason,
-            &self.log_path,
-        ) else {
-            return ExecutionDecision::RejectedPositionLimit {
-                reason: "insufficient ATP, inventory, or below ghost minimum".into(),
-                latency_ns: latency,
-            };
+        let (quantity, price) = match self.fill(&signal, quantity, &reason, latency) {
+            Ok(pair) => pair,
+            Err(decision) => return decision,
         };
         sizing.position_units = quantity;
         sizing.account_risk_percent = if self.sizer.account_balance() > 0.0 {
@@ -251,7 +192,7 @@ impl ExecutionEngine {
             "[{}] EXECUTE {:?} @ ${:.4} qty≈{:.6} kelly={:.3} conf={:.2} lat={}ns ATP={:.2}",
             signal.ticker,
             signal.side,
-            signal.price,
+            price,
             quantity,
             sizing.kelly_fraction,
             signal.confidence,
@@ -263,7 +204,7 @@ impl ExecutionEngine {
             ticker: signal.ticker,
             side: signal.side,
             quantity,
-            price: signal.price,
+            price,
             confidence: signal.confidence,
             kelly_fraction: sizing.kelly_fraction,
             latency_ns: latency,
@@ -307,11 +248,35 @@ pub enum ExecutionDecision {
         latency_ns: i64,
         kelly_fraction: f64,
     },
+    /// No fill committed, including insufficient holdings/funds or log I/O failure.
+    RejectedFill {
+        reason: String,
+        latency_ns: i64,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_engine() -> (tempfile::TempDir, ExecutionEngine) {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("ghost_trades.jsonl");
+        let engine = ExecutionEngine::default().with_log_path(log.to_str().unwrap().into());
+        (dir, engine)
+    }
+
+    fn assert_no_fill(engine: &ExecutionEngine) {
+        assert_eq!(engine.ghost_wallet.balance_atp, 500.0);
+        assert!(engine.ghost_wallet.balances.is_empty());
+        assert_untouched_fill_counts(engine);
+    }
+
+    fn assert_untouched_fill_counts(engine: &ExecutionEngine) {
+        assert_eq!(engine.ghost_wallet.trade_count, 0);
+        assert_eq!(engine.step_counter, 0);
+        assert!(!std::path::Path::new(&engine.log_path).exists());
+    }
 
     fn ts_now() -> i64 {
         SystemTime::now()
@@ -322,19 +287,20 @@ mod tests {
 
     #[test]
     fn test_confidence_gate() {
-        let mut engine = ExecutionEngine::new(0.90, 10.0);
+        let (_logs, mut engine) = test_engine();
         let signal = TradeSignal {
             ticker: "TESTSYM".into(),
             side: TradeSide::Buy,
             price: 1.0,
             quantity: 1.0,
-            confidence: 0.85,
+            confidence: 0.10,
             timestamp_ns: ts_now(),
         };
         assert!(matches!(
             engine.process_signal(signal),
             ExecutionDecision::RejectedLowConfidence { .. }
         ));
+        assert_no_fill(&engine);
     }
 
     #[test]
@@ -354,6 +320,7 @@ mod tests {
             engine.process_signal(signal),
             ExecutionDecision::RejectedNoEdge { .. }
         ));
+        assert_no_fill(&engine);
     }
 
     #[test]
@@ -371,7 +338,7 @@ mod tests {
             ticker: "ETH".into(),
             side: TradeSide::Buy,
             price: 3500.0,
-            quantity: 10.0,
+            quantity: 11.0,
             confidence: 0.95,
             timestamp_ns: ts_now(),
         };
@@ -392,35 +359,116 @@ mod tests {
     }
 
     #[test]
-    fn test_execution_with_kelly() {
-        let mut engine = ExecutionEngine::new(0.80, 100.0).with_log_path(
-            std::env::temp_dir()
-                .join("limen_capital_ghost_c6.jsonl")
-                .to_string_lossy()
-                .into_owned(),
-        );
+    fn test_default_kelly_capped_at_low_price() {
+        let (_logs, mut engine) = test_engine();
         let signal = TradeSignal {
             ticker: "TESTSYM".into(),
             side: TradeSide::Buy,
             price: 1.0,
+            quantity: 0.0,
+            confidence: 0.98,
+            timestamp_ns: ts_now(),
+        };
+        // Policy size ≈120 units exceeds the 10-quote notional cap → capped.
+        match engine.process_signal(signal) {
+            ExecutionDecision::Executed { quantity, .. } => {
+                assert!((quantity - 10.0).abs() < 1e-4);
+            }
+            other => panic!("expected capped execution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_execution_with_kelly() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("ghost_trades.jsonl");
+        let mut engine = ExecutionEngine::new(0.15, 100.0)
+            .with_sizer(PositionSizer::new(500.0, 0.05, 0.25))
+            .with_log_path(log.to_str().unwrap().into());
+        let signal = TradeSignal {
+            ticker: "TESTSYM".into(),
+            side: TradeSide::Buy,
+            price: 10.0,
             quantity: 0.0, // ignored under Kelly
             confidence: 0.98,
             timestamp_ns: ts_now(),
         };
 
-        let decision = engine.process_signal(signal);
-        match decision {
+        let (quantity, kelly_fraction) = match engine.process_signal(signal) {
             ExecutionDecision::Executed {
                 quantity,
                 kelly_fraction,
                 ..
-            } => {
-                assert!(quantity > 0.0);
-                assert!(kelly_fraction > 0.0);
-                assert!(engine.ghost_wallet.balance("TESTSYM") > 0.0);
-            }
+            } => (quantity, kelly_fraction),
             other => panic!("expected Executed, got {other:?}"),
-        }
+        };
+        assert!((quantity - 7.25).abs() < 1e-5);
+        assert!((kelly_fraction - 0.145).abs() < 1e-6);
+        assert_buy_fill(&engine);
+
+        let sell = TradeSignal {
+            ticker: "TESTSYM".into(),
+            side: TradeSide::Sell,
+            price: 12.0,
+            quantity: 999.0, // ignored by policy sizing
+            confidence: 0.98,
+            timestamp_ns: ts_now(),
+        };
+        let (side, sell_quantity) = match engine.process_signal(sell) {
+            ExecutionDecision::Executed { side, quantity, .. } => (side, quantity),
+            other => panic!("expected Sell execution, got {other:?}"),
+        };
+        assert_eq!(side, TradeSide::Sell);
+        assert!((sell_quantity - 5.1647515).abs() < 1e-5);
+        // Pin real ledger deltas, not just the advisory policy quantity.
+        assert_sell_fill(&engine);
+        assert_two_step_counts(&engine);
+
+        let records = read_ghost_records(&log);
+        assert_record_actions(&records);
+        assert_record_quantities(&records);
+    }
+
+    fn assert_buy_fill(engine: &ExecutionEngine) {
+        assert!((engine.ghost_wallet.balance("TESTSYM") - 7.2500052).abs() < 1e-6);
+        assert!((engine.ghost_wallet.balance_atp - 427.42743).abs() < 1e-4);
+        assert_single_fill_counts(engine);
+    }
+
+    fn assert_single_fill_counts(engine: &ExecutionEngine) {
+        assert_eq!(engine.ghost_wallet.trade_count, 1);
+        assert_eq!(engine.step_counter, 1);
+    }
+
+    fn assert_sell_fill(engine: &ExecutionEngine) {
+        assert!((engine.ghost_wallet.balance("TESTSYM") - 2.0852537).abs() < 1e-5);
+        assert!((engine.ghost_wallet.balance_atp - 489.34247).abs() < 1e-3);
+        assert!((engine.ghost_wallet.cumulative_pnl - 10.215877).abs() < 1e-4);
+    }
+
+    fn assert_two_step_counts(engine: &ExecutionEngine) {
+        assert_eq!(engine.ghost_wallet.trade_count, 2);
+        assert_eq!(engine.ghost_wallet.closed_trade_count, 1);
+        assert_eq!(engine.step_counter, 2);
+    }
+
+    fn read_ghost_records(log: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn assert_record_actions(records: &[serde_json::Value]) {
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["action"], "buy");
+        assert_eq!(records[1]["action"], "sell");
+    }
+
+    fn assert_record_quantities(records: &[serde_json::Value]) {
+        assert!((records[0]["quantity"].as_f64().unwrap() - 7.2500052).abs() < 1e-5);
+        assert!((records[1]["quantity"].as_f64().unwrap() - 5.1647515).abs() < 1e-5);
     }
 
     #[test]
@@ -513,7 +561,7 @@ mod tests {
         }
         assert!(matches!(
             engine.process_signal(signal(1.0, TradeSide::Sell, 1.0)),
-            ExecutionDecision::RejectedPositionLimit { .. }
+            ExecutionDecision::RejectedFill { .. }
         ));
         engine.ghost_wallet.balance_atp = 0.0;
         assert!(matches!(
@@ -526,7 +574,7 @@ mod tests {
 
     #[test]
     fn test_neutral() {
-        let mut engine = ExecutionEngine::new(0.1, 10.0);
+        let (_logs, mut engine) = test_engine();
         let signal = TradeSignal {
             ticker: "TESTSYM".into(),
             side: TradeSide::Neutral,
@@ -539,5 +587,6 @@ mod tests {
             engine.process_signal(signal),
             ExecutionDecision::Neutral { .. }
         ));
+        assert_no_fill(&engine);
     }
 }

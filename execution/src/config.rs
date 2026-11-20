@@ -24,48 +24,64 @@ impl ExecutionConfig {
     fn from_lookup(
         mut lookup: impl FnMut(&str) -> Result<Option<String>, String>,
     ) -> Result<Self, String> {
-        let mut number = |name: &str, default: Option<f64>| -> Result<f64, String> {
-            let value = match lookup(name)? {
-                Some(raw) => raw
-                    .parse::<f64>()
-                    .map_err(|_| format!("{name} must be a number"))?,
-                None => default.ok_or_else(|| {
-                    format!("{name} is required: expected gain / expected loss, not a return percentage")
-                })?,
-            };
-            if !value.is_finite() {
-                return Err(format!("{name} must be finite"));
-            }
-            Ok(value)
+        let mut read = |name: &str, default: Option<f64>| number(&mut lookup, name, default);
+        let config = Self {
+            confidence_threshold: read("LIMEN_CONFIDENCE_THRESHOLD", Some(0.15))? as f32,
+            kelly_b: read("LIMEN_KELLY_B", None)?,
+            kelly_scalar: read("LIMEN_KELLY_SCALAR", Some(0.25))?,
+            max_order_notional: read("LIMEN_MAX_ORDER_NOTIONAL", Some(10.0))?,
         };
-        let threshold = number("LIMEN_CONFIDENCE_THRESHOLD", Some(0.15))?;
-        let kelly_b = number("LIMEN_KELLY_B", None)?;
-        let kelly_scalar = number("LIMEN_KELLY_SCALAR", Some(0.25))?;
-        let max_order_notional = number("LIMEN_MAX_ORDER_NOTIONAL", Some(10.0))?;
-        if !(0.0..=1.0).contains(&threshold) {
-            return Err("LIMEN_CONFIDENCE_THRESHOLD must be in [0, 1]".into());
-        }
-        if kelly_b <= 0.0 {
-            return Err("LIMEN_KELLY_B must be > 0".into());
-        }
-        if !(0.0 < kelly_scalar && kelly_scalar <= 1.0) {
-            return Err("LIMEN_KELLY_SCALAR must be in (0, 1]".into());
-        }
-        if max_order_notional <= 0.0 || max_order_notional > f32::MAX as f64 {
-            return Err("LIMEN_MAX_ORDER_NOTIONAL must be in (0, f32::MAX]".into());
-        }
-        Ok(Self {
-            confidence_threshold: threshold as f32,
-            kelly_b,
-            kelly_scalar,
-            max_order_notional,
-        })
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        ensure(
+            (0.0..=1.0).contains(&self.confidence_threshold),
+            "LIMEN_CONFIDENCE_THRESHOLD must be in [0, 1]",
+        )?;
+        ensure(self.kelly_b > 0.0, "LIMEN_KELLY_B must be > 0")?;
+        ensure(
+            self.kelly_scalar > 0.0 && self.kelly_scalar <= 1.0,
+            "LIMEN_KELLY_SCALAR must be in (0, 1]",
+        )?;
+        ensure(
+            self.max_order_notional > 0.0 && self.max_order_notional <= f32::MAX as f64,
+            "LIMEN_MAX_ORDER_NOTIONAL must be in (0, f32::MAX]",
+        )
     }
 
     pub fn engine(&self) -> ExecutionEngine {
         let engine = ExecutionEngine::new(self.confidence_threshold, self.max_order_notional);
         let balance = engine.ghost_wallet.balance_atp as f64;
         engine.with_sizer(PositionSizer::new(balance, self.kelly_b, self.kelly_scalar))
+    }
+}
+
+fn number(
+    lookup: &mut impl FnMut(&str) -> Result<Option<String>, String>,
+    name: &str,
+    default: Option<f64>,
+) -> Result<f64, String> {
+    let Some(raw) = lookup(name)? else {
+        return default.ok_or_else(|| {
+            format!(
+                "{name} is required: expected gain / expected loss, not a return percentage"
+            )
+        });
+    };
+    let value = raw
+        .parse::<f64>()
+        .map_err(|_| format!("{name} must be a number"))?;
+    ensure(value.is_finite(), &format!("{name} must be finite"))?;
+    Ok(value)
+}
+
+fn ensure(ok: bool, message: &str) -> Result<(), String> {
+    if ok {
+        Ok(())
+    } else {
+        Err(message.to_string())
     }
 }
 
