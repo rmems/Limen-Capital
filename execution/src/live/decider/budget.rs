@@ -316,10 +316,18 @@ impl Inner {
         Ok(())
     }
 
-    fn check_affordable(&self, role: Role, day: &str, amount: f64) -> Result<(), BudgetError> {
+    fn check_affordable(&self, req: &ReserveRequest<'_>, day: &str) -> Result<(), BudgetError> {
+        if !(req.external_day_usd.is_finite() && req.external_day_usd >= 0.0) {
+            return Err(BudgetError::Invalid(format!(
+                "external day spend {}",
+                req.external_day_usd
+            )));
+        }
         let s = &self.state;
         let p = &self.policy;
-        let (role_total, role_day) = p.role_caps(role);
+        let (role_total, role_day) = p.role_caps(req.role);
+        let amount = req.amount_usd;
+        let role = req.role;
         let day_role =
             s.day_committed(day).get(role) + s.reserved(|r| r.day == day && r.role == role);
         Self::check_limit(
@@ -336,7 +344,7 @@ impl Inner {
         )?;
         Self::check_limit(
             format!("daily {day}"),
-            s.used_day_usd(day),
+            s.used_day_usd(day) + req.external_day_usd,
             amount,
             p.cap_per_day_usd,
         )?;
@@ -397,6 +405,9 @@ pub struct ReserveRequest<'a> {
     pub now: DateTime<Utc>,
     /// Latest instant the call could still be running.
     pub call_end: DateTime<Utc>,
+    /// Same-day spend held outside this ledger (the journal's post-mortem
+    /// sidecar); it counts against the daily cap only.
+    pub external_day_usd: f64,
 }
 
 impl BudgetLedger {
@@ -485,7 +496,7 @@ impl BudgetLedger {
             return Err(BudgetError::Invalid(format!("amount {}", req.amount_usd)));
         }
         let day = day_key(req.now);
-        g.check_affordable(req.role, &day, req.amount_usd)?;
+        g.check_affordable(req, &day)?;
         let id = g.state.next_id;
         g.state.next_id += 1;
         g.state.reservations.push(Reservation {

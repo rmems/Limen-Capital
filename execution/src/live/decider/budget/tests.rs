@@ -53,6 +53,7 @@ fn reserve(l: &BudgetLedger, role: Role, usd: f64, t: DateTime<Utc>) -> Result<u
         amount_usd: usd,
         now: t,
         call_end: t,
+        external_day_usd: 0.0,
     })
 }
 
@@ -176,6 +177,7 @@ fn no_paid_calls_at_or_after_expiry_or_running_past_it() {
         amount_usd: 0.1,
         now: before,
         call_end: before + chrono::Duration::seconds(end_offset),
+        external_day_usd: 0.0,
     };
     assert!(matches!(
         l.reserve(&req(30)),

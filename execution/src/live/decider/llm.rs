@@ -4,13 +4,15 @@
 //! [`BudgetLedger`] before dispatch and settles against the response `usage`.
 //! The API key only ever goes into the `x-api-key` header.
 
-use super::budget::{BudgetError, Clock, ReserveRequest, Role, SharedLedger};
+use super::budget::{day_key, BudgetError, Clock, ReserveRequest, Role, SharedLedger};
 use super::{DeciderError, LlmCallReport};
-use crate::live::config::{LlmConfig, ModelPrice, TokenCounts};
+use crate::live::config::{LiveConfig, LlmConfig, ModelPrice, TokenCounts};
+use crate::live::cost;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -149,6 +151,8 @@ pub struct LlmCaller {
     contexts: BTreeMap<String, u64>,
     limits: CallLimits,
     ledger: SharedLedger,
+    /// Journal whose cost sidecar also draws from the daily cap (post-mortem).
+    journal: PathBuf,
     clock: Clock,
 }
 
@@ -180,12 +184,19 @@ fn api_error_type(bytes: &[u8]) -> String {
 }
 
 impl LlmCaller {
+    /// `cfg` supplies both the LLM limits and the journal whose cost sidecar
+    /// shares the daily cap.
     pub fn new(
-        cfg: &LlmConfig,
+        cfg: &LiveConfig,
         api_key: &str,
         ledger: SharedLedger,
         clock: Clock,
     ) -> Result<Self, String> {
+        // Post-mortems resolve the journal before writing the sidecar, so the
+        // caller must too when the configured path is a symlink.
+        let journal = std::fs::canonicalize(&cfg.journal_path)
+            .unwrap_or_else(|_| PathBuf::from(&cfg.journal_path));
+        let cfg = &cfg.llm;
         let http = reqwest::Client::builder()
             // The key header must never follow a redirect to another host.
             .redirect(reqwest::redirect::Policy::none())
@@ -205,6 +216,7 @@ impl LlmCaller {
             contexts,
             limits: CallLimits::from_config(cfg),
             ledger,
+            journal,
             clock,
         })
     }
@@ -331,6 +343,10 @@ impl LlmCaller {
         timeout: Duration,
     ) -> Result<u64, DeciderError> {
         let now = (self.clock)();
+        // Post-mortem spend shares the daily cap but lives in the journal's
+        // own sidecar, outside this ledger.
+        let external_day_usd = cost::spent(&self.journal, &day_key(now))
+            .map_err(|e| budget(BudgetError::Persistence(e.to_string())))?;
         let call_end = now + chrono::Duration::from_std(timeout).unwrap_or(chrono::Duration::MAX);
         self.ledger
             .reserve(&ReserveRequest {
@@ -339,6 +355,7 @@ impl LlmCaller {
                 amount_usd: reserve_usd,
                 now,
                 call_end,
+                external_day_usd,
             })
             .map_err(budget)
     }

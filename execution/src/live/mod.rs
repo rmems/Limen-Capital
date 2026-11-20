@@ -22,6 +22,7 @@
 
 pub mod alpaca;
 pub mod config;
+pub mod cost;
 pub mod decider;
 pub mod journal;
 pub mod r#loop;
@@ -29,6 +30,7 @@ pub mod market;
 pub mod market_state;
 pub mod notify;
 pub mod paper;
+pub mod postmortem;
 pub mod risk;
 pub mod robinhood;
 #[cfg(test)]
