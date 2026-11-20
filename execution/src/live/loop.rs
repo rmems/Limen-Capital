@@ -303,6 +303,11 @@ impl Runner<'_> {
         if !quote.is_sane() {
             return report::bad_quote(self.cfg, &mut self.parts, &quote, now, self.summary.ticks);
         }
+        // A halt raised while the quote was in flight acts before fills or
+        // a (possibly paid) decision run on this tick.
+        if self.stop_requested().is_some() {
+            return Ok(());
+        }
         self.process_quote(&quote, now).await
     }
 
@@ -442,7 +447,11 @@ impl Runner<'_> {
         row.reason = decision.reason.clone();
         let verdict = risk::check(&decision, state, &self.parts.pair, &self.cfg.risk, inputs);
         row.risk = verdict.label();
-        self.apply_verdict(verdict, state.ts, row);
+        // A stop raised during the decision leaves the journaled row (and the
+        // LLM cost) but places nothing.
+        if self.stop_requested().is_none() {
+            self.apply_verdict(verdict, state.ts, row);
+        }
         Ok(())
     }
 

@@ -60,7 +60,13 @@ impl MarketSource for HaltingMarket {
         if self.served == self.halt_at {
             std::fs::write(&self.halt, "").unwrap();
         }
-        let (bid, ask) = self.quotes.pop_front().unwrap_or((99.5, 99.6));
+        // Once the halt file exists the served quote crosses the resting buy:
+        // a halted tick that still processed it would fill the order.
+        let (bid, ask) = if self.served >= self.halt_at {
+            (98.0, 98.1)
+        } else {
+            self.quotes.pop_front().unwrap_or((99.5, 99.6))
+        };
         let q = crate::live::alpaca::types::BestBidAsk {
             symbol: symbol.to_string(),
             bid,
@@ -94,7 +100,8 @@ async fn halt_file_cancels_resting_order_stops_and_blocks_restart() {
     .unwrap();
     assert_eq!(s.ticks, 5, "{s:?}");
     assert_eq!(s.halted_reason.as_deref(), Some("halt_file"));
-    assert_eq!((s.orders_placed, s.cancels), (1, 1), "{s:?}");
+    // The crossing quote served at the halted tick fills nothing.
+    assert_eq!((s.orders_placed, s.fills, s.cancels), (1, 0, 1), "{s:?}");
     let text = std::fs::read_to_string(&p).unwrap();
     assert!(text.contains("stop:halt_file"), "{text}");
     let err = build_parts(&c, &Secrets::default()).await.unwrap_err();

@@ -86,9 +86,11 @@ impl LedgerBridge {
             return Ok(());
         }
         let row = self.audit_row(fill, notional, realized);
-        // The ghost log is an audit aid; a write failure must not undo a
-        // venue fill that already happened.
-        let _ = append_ghost_log(&row, &self.path.to_string_lossy());
+        // The fill is already in the durable state; a failed audit append is
+        // reported loudly instead of silently dropping the row and marking
+        // the fill as recorded.
+        append_ghost_log(&row, &self.path.to_string_lossy())
+            .map_err(|e| format!("ledger audit append for fill {} failed: {e}", fill.fill_id))?;
         self.recorded.insert(fill.fill_id.clone());
         Ok(())
     }
