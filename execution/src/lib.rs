@@ -288,18 +288,18 @@ impl ExecutionEngine {
                 latency_ns: latency,
             });
         }
-        self.commit(signal, fill_quantity, signal.price as f32, reason)
+        self.commit(CommittableFill {
+            signal,
+            quantity: fill_quantity,
+            price: signal.price as f32,
+            reason,
+        })
     }
 
     /// One ledger step: reserve the step counter, apply the fill, require a
     /// committed trade or surface RejectedFill.
-    fn commit(
-        &mut self,
-        signal: &TradeSignal,
-        fill_quantity: f32,
-        fill_price: f32,
-        reason: &str,
-    ) -> Result<(f64, f64), ExecutionDecision> {
+    fn commit(&mut self, fill: CommittableFill<'_>) -> Result<(f64, f64), ExecutionDecision> {
+        let signal = fill.signal;
         let latency = signal.latency_ns();
         let Some(step) = self.step_counter.checked_add(1) else {
             return Err(ExecutionDecision::RejectedFill {
@@ -314,16 +314,19 @@ impl ExecutionEngine {
         } else {
             Side::Sell
         };
-        let fill = GhostFill {
-            asset: &signal.ticker,
-            side,
-            price: fill_price,
-            quantity: fill_quantity,
-            fee: fill_price * fill_quantity * METABOLIC_COST,
-            step,
-            reason,
-        };
-        let record = match apply_ghost_fill(&mut self.ghost_wallet, fill, Some(&self.log_path)) {
+        let record = match apply_ghost_fill(
+            &mut self.ghost_wallet,
+            GhostFill {
+                asset: &signal.ticker,
+                side,
+                price: fill.price,
+                quantity: fill.quantity,
+                fee: fill.price * fill.quantity * METABOLIC_COST,
+                step,
+                reason: fill.reason,
+            },
+            Some(&self.log_path),
+        ) {
             Ok(record) if self.ghost_wallet.trade_count > trades_before => record,
             Ok(_) => {
                 return Err(ExecutionDecision::RejectedFill {
@@ -341,6 +344,14 @@ impl ExecutionEngine {
         };
         Ok((record.quantity as f64, record.price_usd as f64))
     }
+}
+
+/// A fill request the ledger can commit, already clamped and priced in f32.
+struct CommittableFill<'a> {
+    signal: &'a TradeSignal,
+    quantity: f32,
+    price: f32,
+    reason: &'a str,
 }
 
 /// Price and per-order notional cap must be finite, positive, and
@@ -630,15 +641,12 @@ mod tests {
         }
     }
 
-    fn check_capped_fill(
-        engine: &mut ExecutionEngine,
-        price: f64,
-        side: TradeSide,
-        confidence: f32,
-    ) {
+    fn check_capped_fill(engine: &mut ExecutionEngine, signal: TradeSignal) {
+        let price = signal.price;
+        let side = signal.side;
         let before_qty = engine.ghost_wallet.balance("TESTSYM") as f64;
         let before_atp = engine.ghost_wallet.balance_atp as f64;
-        match engine.process_signal(signal(price, side, confidence)) {
+        match engine.process_signal(signal) {
             ExecutionDecision::Executed {
                 quantity, sizing, ..
             } => {
@@ -681,7 +689,7 @@ mod tests {
                     TradeSide::Buy,
                     TradeSide::Sell,
                 ] {
-                    check_capped_fill(&mut engine, price, side, confidence);
+                    check_capped_fill(&mut engine, signal(price, side, confidence));
                 }
                 check_capped_log(&log, price);
                 assert_eq!(engine.ghost_wallet.trade_count, 4);
