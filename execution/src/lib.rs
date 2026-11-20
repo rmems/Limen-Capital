@@ -271,6 +271,7 @@ impl ExecutionEngine {
         reason: &str,
     ) -> Result<(f64, f64), ExecutionDecision> {
         let latency = signal.latency_ns();
+        let fill_price = signal.price as f32;
         // Clamp to what the ledger can commit: sells to held units, buys to
         // affordable notional (notional plus fee against balance_atp).
         let available = match signal.side {
@@ -281,7 +282,11 @@ impl ExecutionEngine {
             }
             TradeSide::Neutral => quantity,
         };
-        let fill_quantity = (quantity.min(available)) as f32;
+        let mut fill_quantity = (quantity.min(available)) as f32;
+        // f32 rounding must not push the committed notional above the cap.
+        while fill_quantity * fill_price > self.max_order_notional as f32 && fill_quantity > 0.0 {
+            fill_quantity = f32::from_bits(fill_quantity.to_bits() - 1);
+        }
         if !fill_quantity.is_finite() || fill_quantity <= 0.0 {
             return Err(ExecutionDecision::RejectedFill {
                 reason: "insufficient holdings or funds for a positive fill".into(),
@@ -291,7 +296,7 @@ impl ExecutionEngine {
         self.commit(CommittableFill {
             signal,
             quantity: fill_quantity,
-            price: signal.price as f32,
+            price: fill_price,
             reason,
         })
     }
@@ -357,12 +362,13 @@ struct CommittableFill<'a> {
 /// Price and per-order notional cap must be finite, positive, and
 /// representable in the f32 ghost ledger.
 fn valid_pricing(price: f64, max_order_notional: f64) -> bool {
-    price.is_finite()
-        && price > 0.0
-        && (price as f32).is_finite()
-        && (price as f32) > 0.0
-        && max_order_notional.is_finite()
-        && max_order_notional > 0.0
+    if !price.is_finite() || price <= 0.0 {
+        return false;
+    }
+    if !(price as f32).is_finite() || (price as f32) <= 0.0 {
+        return false;
+    }
+    max_order_notional.is_finite() && max_order_notional > 0.0
 }
 
 impl Drop for ExecutionEngine {

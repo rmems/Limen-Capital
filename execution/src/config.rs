@@ -25,8 +25,15 @@ impl ExecutionConfig {
         mut lookup: impl FnMut(&str) -> Result<Option<String>, String>,
     ) -> Result<Self, String> {
         let mut read = |name: &str, default: Option<f64>| number(&mut lookup, name, default);
+        // Range-check in f64 before the f32 cast: 1.00000001 must not round
+        // down to a valid 1.0.
+        let confidence_threshold = read("LIMEN_CONFIDENCE_THRESHOLD", Some(0.15))?;
+        ensure(
+            (0.0..=1.0).contains(&confidence_threshold),
+            "LIMEN_CONFIDENCE_THRESHOLD must be in [0, 1]",
+        )?;
         let config = Self {
-            confidence_threshold: read("LIMEN_CONFIDENCE_THRESHOLD", Some(0.15))? as f32,
+            confidence_threshold: confidence_threshold as f32,
             kelly_b: read("LIMEN_KELLY_B", None)?,
             kelly_scalar: read("LIMEN_KELLY_SCALAR", Some(0.25))?,
             max_order_notional: read("LIMEN_MAX_ORDER_NOTIONAL", Some(10.0))?,
@@ -36,10 +43,6 @@ impl ExecutionConfig {
     }
 
     fn validate(&self) -> Result<(), String> {
-        ensure(
-            (0.0..=1.0).contains(&self.confidence_threshold),
-            "LIMEN_CONFIDENCE_THRESHOLD must be in [0, 1]",
-        )?;
         ensure(self.kelly_b > 0.0, "LIMEN_KELLY_B must be > 0")?;
         ensure(
             self.kelly_scalar > 0.0 && self.kelly_scalar <= 1.0,
@@ -120,6 +123,8 @@ mod tests {
             assert!(parse(key, Some("1.01")).is_err());
             assert!(parse(key, Some("1")).is_ok());
         }
+        // Just past the f32 edge of 1.0 must not validate after rounding.
+        assert!(parse("LIMEN_CONFIDENCE_THRESHOLD", Some("1.00000001")).is_err());
         assert!(parse("LIMEN_CONFIDENCE_THRESHOLD", Some("0")).is_ok());
         for key in [
             "LIMEN_KELLY_B",
