@@ -8,7 +8,7 @@ Usage:
         [input_jsonl] [output_dir]
 
 Defaults:
-    input_jsonl = "ghost_trades.jsonl"
+    input_jsonl = "execution/ghost_trades.jsonl"
     output_dir  = "research/plots/trading"
 
 Outputs:
@@ -29,7 +29,7 @@ using Dates
 using Statistics
 using Plots
 
-const DEFAULT_INPUT = "ghost_trades.jsonl"
+const DEFAULT_INPUT = "execution/ghost_trades.jsonl"
 const DEFAULT_OUTPUT_DIR = "research/plots/trading"
 const TS_FMT = dateformat"yyyy-mm-ddTHH:MM:SS.sssssssss"
 
@@ -74,6 +74,13 @@ function prepare_frame(df::DataFrame)
     else
         base_time = now()
         df[!, :timestamp_dt] = base_time .+ Second.(df.step .- df.step[1])
+    end
+
+    # Current metabolic-ledger logs use balance_atp; older logs used balance_usdt.
+    if :balance_atp in names(df) && !(:balance_usdt in names(df))
+        df[!, :balance_usdt] = df[!, :balance_atp]
+    elseif :balance_atp in names(df)
+        df[!, :balance_usdt] = coalesce.(df.balance_usdt, df.balance_atp)
     end
 
     for col in (:portfolio_value, :balance_usdt, :cumulative_pnl)
@@ -139,7 +146,7 @@ function asset_balance_columns(df::DataFrame)
     cols = Symbol[]
     for name in names(df)
         s = String(name)
-        if startswith(s, "balance_") && s != "balance_usdt"
+        if startswith(s, "balance_") && s != "balance_usdt" && s != "balance_atp"
             push!(cols, Symbol(s))
         end
     end
