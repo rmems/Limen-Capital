@@ -5,6 +5,13 @@
 //! SNN "confidence" is **not** a calibrated win probability. Prefer fractional
 //! Kelly (default 0.25×). `b` is expected gain / expected loss, NOT a
 //! percentage return. Positive Kelly requires p > 1 / (1 + b).
+//!
+//! Canonical implementation of the shared formula. `execution/market_kelly.jl`
+//! is the documented offline/shell mirror — if this core formula ever changes,
+//! update that header too (drift guard, GH#28).
+//!
+//! Golden example (pinned in both headers): p = 0.98, b = 0.05 →
+//! full Kelly f* = (0.98·0.05 − 0.02)/0.05 = 0.58; quarter-Kelly (0.25×) = 0.145.
 
 use tracing::info;
 

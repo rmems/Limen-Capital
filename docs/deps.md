@@ -101,7 +101,7 @@ pins need Julia ≥ 1.11; CI and local research target **1.13** (latest stable).
 | Package | Role | Pin (rev) | Status |
 |---------|------|-----------|--------|
 | **LiquidCortex** | Sparse CUDA LSM | `edb3570ffdbc…` (2026-08-31) | Preferred (`rmems`) |
-| **TemporalFocus** | Load probe only (repo **NeuroPulse.jl**); helms use in-tree NERO | `ac4aa2ca4c28…` (2026-09-05) | Pinned, not wired into helms |
+| **TemporalFocus** | Relevance-routing library (repo **NeuroPulse.jl**); helms use in-tree NERO | `ac4aa2ca4c28…` (2026-09-05) | Pinned, not wired into helms |
 | CUDA / ZMQ / … | Runtime | registry | Required |
 
 ```toml
@@ -116,8 +116,8 @@ cd brain && julia --project=. -e 'using Pkg; Pkg.instantiate()'
 
 Fallback: `LIMEN_RESERVOIR=naut_core` uses in-tree `brain/naut_core.jl` without
 LiquidCortex, but still requires CUDA in both helms. It is not a CPU fallback.
-`brain/adapters.jl` is not included by the helms, so its TemporalFocus load probe
-does not provide runtime relevance routing.
+TemporalFocus is pinned in `brain/Project.toml` but not wired into the helms, so
+it provides no runtime relevance routing.
 
 ## Environment
 

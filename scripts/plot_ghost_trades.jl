@@ -4,11 +4,11 @@
 plot_ghost_trades.jl — Turn ghost trading logs into publication-ready plots.
 
 Usage:
-    julia spikenaut-capital/execution/plot_ghost_trades.jl \
+    julia scripts/plot_ghost_trades.jl \
         [input_jsonl] [output_dir]
 
 Defaults:
-    input_jsonl = "domain/research/ghost_market_log.jsonl"
+    input_jsonl = "ghost_trades.jsonl"
     output_dir  = "research/plots/trading"
 
 Outputs:
@@ -29,7 +29,7 @@ using Dates
 using Statistics
 using Plots
 
-const DEFAULT_INPUT = "domain/research/ghost_market_log.jsonl"
+const DEFAULT_INPUT = "ghost_trades.jsonl"
 const DEFAULT_OUTPUT_DIR = "research/plots/trading"
 const TS_FMT = dateformat"yyyy-mm-ddTHH:MM:SS.sssssssss"
 

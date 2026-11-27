@@ -757,7 +757,6 @@ version = "0.1.0"
 dependencies = [
  "axon-encoder",
  "base64 0.22.1",
- "bytes",
  "chrono",
  "corpus-ipc",
  "ed25519-dalek",

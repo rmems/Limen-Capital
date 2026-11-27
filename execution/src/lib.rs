@@ -13,7 +13,6 @@
 pub mod binary_wire;
 pub mod confidence;
 pub mod config;
-pub mod dydx;
 pub mod kelly;
 /// Live micro-capital experiment (RM-2436): Alpaca Crypto adapter + decision loop.
 /// Feature-gated; **not** part of the research path and not a research result.

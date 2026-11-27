@@ -36,7 +36,7 @@ Validated Rust packages use **crates.io releases** with `Cargo.lock`, except
 |---------|------|
 | **metabolic-ledger** | Ghost wallet, ATP gates, JSONL (git pin) |
 | **LiquidCortex.jl** | Preferred CUDA LSM; fallback `naut_core` also requires CUDA in the helms |
-| **TemporalFocus** (NeuroPulse.jl) | Pinned dependency, not wired into the helms; `adapters.jl` has a load probe |
+| **TemporalFocus** (NeuroPulse.jl) | Pinned in `brain/Project.toml`, not wired into the helms |
 | **binary_wire** (in-tree) | MarketPulse 120B / ReadoutPacket 88B; corpus-ipc migration deferred |
 | **kinetic-signals / neuromod** | Optional published libraries (`kinetic` / `snn`) |
 | **corpus-ipc / axon-encoder / plasticity-lab** | Optional published libraries (same-named features); runtime wiring deferred |
@@ -69,7 +69,7 @@ RM-1865 calibration boundaries: **[docs/confidence-defaults.md](docs/confidence-
 ┌──────────────────────────────────────────────────────────┐
 │  Rust Muscle                                             │
 │  Confidence / Kelly policy gates → caller-sized ghost fills    │
-│  latency tracking → JSONL; dydx adapter unwired          │
+│  latency tracking → JSONL                                │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -344,7 +344,7 @@ rather than silently truncated. Notes and journals must not enter training data.
 - [ ] Consume external sizing proposals (e.g. DendriteTrader `SizingModule`) as the single authority (ADR 0001)
 - [x] Git rev pins for validated library deps (no sibling clones)
 - [ ] Replace JSON serialization with FlatBuffers (proto/signal.fbs)
-- [ ] Add WebSocket streaming for dydx (replace REST polling)
+- [ ] Add WebSocket streaming for the market-data feed (replace REST polling)
 - [ ] Fix CUDA RNG (remove host-side random number generation)
 - [ ] Implement stop-loss and risk management gates in Rust
 - [ ] Backtest framework with historical data
