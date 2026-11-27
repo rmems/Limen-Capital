@@ -4,7 +4,7 @@
 # Use this to validate RTX 5080 performance before deploying the brain.
 #
 # Usage:
-#   julia --project=brain sonar_probe.jl
+#   julia --project=brain brain/bench/sonar_probe.jl
 #
 # Benchmarks:
 #   1. CUDA kernel launch overhead
@@ -21,9 +21,9 @@ using SparseArrays
 using LinearAlgebra
 
 # Define bindings and methods before entering the benchmark function.
-include(joinpath(@__DIR__, "naut_core.jl"))
-include(joinpath(@__DIR__, "synapse_conductor.jl"))
-include(joinpath(@__DIR__, "market_encoder.jl"))
+include(joinpath(@__DIR__, "..", "naut_core.jl"))
+include(joinpath(@__DIR__, "..", "synapse_conductor.jl"))
+include(joinpath(@__DIR__, "..", "market_encoder.jl"))
 
 const WARMUP_ITERS = 10
 const BENCH_ITERS = 100

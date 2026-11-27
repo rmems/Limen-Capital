@@ -3,10 +3,15 @@
 #
 # Canonical sizing lives in Rust `PositionSizer` (ExecutionEngine Decision path).
 # This script is for offline / shell tooling only — do not fork a third formula.
+# If the core formula in `execution/src/kelly.rs` ever changes, update this
+# header too (drift guard, GH#28).
 #
 # Full Kelly:  f* = (p·b − q) / b
 # Fractional:  f  = f* × FRAC   (default half-Kelly 0.5 for this CLI; Rust uses 0.25)
 # Clamp:       [0.02, 0.20] for shell output stability
+#
+# Golden example (pinned in both headers): p = 0.98, b = 0.05 →
+# full Kelly f* = (0.98·0.05 − 0.02)/0.05 = 0.58; quarter-Kelly (0.25×) = 0.145.
 #
 # Usage:
 #   SHIP_WIN_RATE=0.55 SHIP_AVG_WIN=8.50 SHIP_AVG_LOSS=5.20 julia market_kelly.jl

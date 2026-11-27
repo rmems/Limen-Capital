@@ -4,17 +4,17 @@
 plot_ghost_trades.jl — Turn ghost trading logs into publication-ready plots.
 
 Usage:
-    julia spikenaut-capital/execution/plot_ghost_trades.jl \
+    julia scripts/plot_ghost_trades.jl \
         [input_jsonl] [output_dir]
 
 Defaults:
-    input_jsonl = "domain/research/ghost_market_log.jsonl"
+    input_jsonl = "execution/ghost_trades.jsonl"
     output_dir  = "research/plots/trading"
 
 Outputs:
     • equity_curve.png        — portfolio value vs. cash balance timeline
     • pnl_curve.png           — cumulative PnL progression
-    • asset_heatmap.png       — per-asset wallet holdings heatmap
+    • asset_heatmap.png       — per-asset wallet holdings heatmap (omitted for cash-only logs)
     • spike_activity.png      — buy/sell intensity per step (proxy for SNN spikes)
     • summary.md              — markdown summary for social posts / grant decks
 
@@ -29,7 +29,7 @@ using Dates
 using Statistics
 using Plots
 
-const DEFAULT_INPUT = "domain/research/ghost_market_log.jsonl"
+const DEFAULT_INPUT = "execution/ghost_trades.jsonl"
 const DEFAULT_OUTPUT_DIR = "research/plots/trading"
 const TS_FMT = dateformat"yyyy-mm-ddTHH:MM:SS.sssssssss"
 
@@ -74,6 +74,13 @@ function prepare_frame(df::DataFrame)
     else
         base_time = now()
         df[!, :timestamp_dt] = base_time .+ Second.(df.step .- df.step[1])
+    end
+
+    # Current metabolic-ledger logs use balance_atp; older logs used balance_usdt.
+    if :balance_atp in names(df) && !(:balance_usdt in names(df))
+        df[!, :balance_usdt] = df[!, :balance_atp]
+    elseif :balance_atp in names(df)
+        df[!, :balance_usdt] = coalesce.(df.balance_usdt, df.balance_atp)
     end
 
     for col in (:portfolio_value, :balance_usdt, :cumulative_pnl)
@@ -139,7 +146,7 @@ function asset_balance_columns(df::DataFrame)
     cols = Symbol[]
     for name in names(df)
         s = String(name)
-        if startswith(s, "balance_") && s != "balance_usdt"
+        if startswith(s, "balance_") && s != "balance_usdt" && s != "balance_atp"
             push!(cols, Symbol(s))
         end
     end
@@ -153,8 +160,10 @@ end
 
 function plot_asset_heatmap(df::DataFrame, out_dir::AbstractString)
     assets = asset_balance_columns(df)
+    heatmap_path = joinpath(out_dir, "asset_heatmap.png")
     if isempty(assets)
-        return
+        isfile(heatmap_path) && rm(heatmap_path)
+        return false
     end
     asset_labels = [asset_label(c) for c in assets]
     mat = reduce(hcat, [Float64.(df[!, col]) for col in assets])
@@ -171,7 +180,8 @@ function plot_asset_heatmap(df::DataFrame, out_dir::AbstractString)
         ylabel = "Time",
         c = :plasma,
         title = "Wallet Allocation Heatmap (normalized holdings)")
-    savefig(plt, joinpath(out_dir, "asset_heatmap.png"))
+    savefig(plt, heatmap_path)
+    return true
 end
 
 function plot_spike_activity(df::DataFrame, out_dir::AbstractString)
@@ -194,7 +204,7 @@ function plot_spike_activity(df::DataFrame, out_dir::AbstractString)
     savefig(plt, joinpath(out_dir, "spike_activity.png"))
 end
 
-function write_summary(df::DataFrame, out_dir::AbstractString)
+function write_summary(df::DataFrame, out_dir::AbstractString, generated_plots::Vector{String})
     equity = df.portfolio_value
     cash = df.balance_usdt
     pnl = df.cumulative_pnl
@@ -226,7 +236,7 @@ function write_summary(df::DataFrame, out_dir::AbstractString)
             println(io, "  - $asset = $(round(amt, digits=4)) units")
         end
         println(io)
-        println(io, "Generated plots: equity_curve.png, pnl_curve.png, asset_heatmap.png, spike_activity.png")
+        println(io, "Generated plots: $(join(generated_plots, ", "))")
     end
 end
 
@@ -242,15 +252,23 @@ function main()
     df = prepare_frame(df_raw)
     println("[plotter] Loaded $(nrow(df)) records spanning $(df.timestamp_dt[1]) → $(df.timestamp_dt[end])")
 
+    generated_plots = String[]
     plot_equity(df, output_dir)
+    push!(generated_plots, "equity_curve.png")
     println("[plotter] Wrote equity_curve.png")
     plot_pnl(df, output_dir)
+    push!(generated_plots, "pnl_curve.png")
     println("[plotter] Wrote pnl_curve.png")
-    plot_asset_heatmap(df, output_dir)
-    println("[plotter] Wrote asset_heatmap.png")
+    if plot_asset_heatmap(df, output_dir)
+        push!(generated_plots, "asset_heatmap.png")
+        println("[plotter] Wrote asset_heatmap.png")
+    else
+        println("[plotter] Skipped asset_heatmap.png (no asset balance columns)")
+    end
     plot_spike_activity(df, output_dir)
+    push!(generated_plots, "spike_activity.png")
     println("[plotter] Wrote spike_activity.png")
-    write_summary(df, output_dir)
+    write_summary(df, output_dir, generated_plots)
     println("[plotter] Summary ready → $(joinpath(output_dir, "summary.md"))")
 end
 
